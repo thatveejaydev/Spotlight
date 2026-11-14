@@ -1,16 +1,26 @@
 #[cfg(windows)]
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, BOOL, HWND, LPARAM},
+    Foundation::{CloseHandle, BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    },
+    Graphics::Gdi::{
+        CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MonitorFromWindow, SetWindowRgn,
+        MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    },
     System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     },
     UI::{
+        HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_MENU},
         WindowsAndMessaging::{
-            BringWindowToTop, EnumWindows, GetForegroundWindow, GetSystemMetrics,
-            GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
-            IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, GWL_EXSTYLE, SM_CXSCREEN,
-            SM_CYSCREEN, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+            BringWindowToTop, CallWindowProcW, DefWindowProcW, EnumWindows, GetForegroundWindow, GetWindowRect,
+            GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCACTIVATE, WM_NCCALCSIZE,
+            WM_NCDESTROY, WM_NCPAINT, WNDPROC,
         },
     },
 };
@@ -76,23 +86,6 @@ pub fn is_premiere_active_and_unminimized(_hwnd: isize) -> bool {
 }
 
 #[cfg(windows)]
-pub fn hide_from_taskbar(hwnd: isize) {
-    if hwnd == 0 {
-        return;
-    }
-    unsafe {
-        let ex_style = GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE);
-        let new_style = (ex_style | (WS_EX_TOOLWINDOW as isize)) & !(WS_EX_APPWINDOW as isize);
-        if new_style != ex_style {
-            SetWindowLongPtrW(hwnd as _, GWL_EXSTYLE, new_style);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub fn hide_from_taskbar(_hwnd: isize) {}
-
-#[cfg(windows)]
 struct EnumPremiereState {
     any_running: bool,
     unminimized_hwnd: isize,
@@ -150,18 +143,113 @@ pub fn force_foreground(hwnd: isize) {
 pub fn force_foreground(_hwnd: isize) {}
 
 #[cfg(windows)]
-pub fn primary_screen_center(win_w: i32, win_h: i32) -> (i32, i32) {
+thread_local! {
+    static PALETTE_FRAME: std::cell::Cell<(HWND, WNDPROC, bool)> =
+        const { std::cell::Cell::new((std::ptr::null_mut(), None, false)) };
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn palette_frame(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let (palette, previous, _) = PALETTE_FRAME.with(|frame| frame.get());
+    if hwnd != palette || previous.is_none() {
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+    match message {
+        // Use the entire window for Slint, including during focus and DPI changes.
+        WM_NCCALCSIZE | WM_NCPAINT => 0,
+        WM_NCACTIVATE => CallWindowProcW(previous, hwnd, message, wparam, -1),
+        WM_NCDESTROY => {
+            PALETTE_FRAME.with(|frame| frame.set((std::ptr::null_mut(), None, false)));
+            CallWindowProcW(previous, hwnd, message, wparam, lparam)
+        }
+        _ => CallWindowProcW(previous, hwnd, message, wparam, lparam),
+    }
+}
+
+#[cfg(windows)]
+unsafe fn configure_palette_frame(hwnd: HWND) -> bool {
+    let (palette, _, rounding) = PALETTE_FRAME.with(|frame| frame.get());
+    if hwnd == palette {
+        return rounding;
+    }
+    let previous = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, palette_frame as *const () as isize);
+    if previous == 0 {
+        return false;
+    }
+    let previous = std::mem::transmute::<isize, WNDPROC>(previous);
+    PALETTE_FRAME.with(|frame| frame.set((hwnd, previous, false)));
+    let set_attribute = |attribute: i32, value: u32| {
+        DwmSetWindowAttribute(hwnd, attribute as u32, (&value as *const u32).cast(), 4)
+    };
+    // Match the search header if the compositor draws any part of the caption.
+    set_attribute(DWMWA_CAPTION_COLOR, 0x0022_1817);
+    set_attribute(DWMWA_BORDER_COLOR, 0xffff_fffe); // DWMWA_COLOR_NONE
+    let rounded = set_attribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND as u32) >= 0;
+    PALETTE_FRAME.with(|frame| frame.set((hwnd, previous, rounded)));
+    SetWindowPos(
+        hwnd,
+        std::ptr::null_mut(),
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+    );
+    rounded
+}
+
+#[cfg(windows)]
+pub fn center_palette(hwnd: isize, premiere_hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
     unsafe {
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let x = ((screen_w - win_w) / 2).max(0);
-        // Slightly above vertical center (Spotlight style: ~38% from top)
-        let y = (((screen_h - win_h) * 38) / 100).max(0);
-        (x, y)
+        let hwnd = hwnd as HWND;
+        let native_rounding = configure_palette_frame(hwnd);
+        let monitor = MonitorFromWindow(premiere_hwnd as HWND, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let mut window: RECT = std::mem::zeroed();
+        if GetMonitorInfoW(monitor, &mut info) == 0 || GetWindowRect(hwnd, &mut window) == 0 {
+            return;
+        }
+        let screen = info.rcMonitor;
+        let move_to_center = |window: &RECT| {
+            let width = window.right - window.left;
+            let height = window.bottom - window.top;
+            let x = screen.left + (screen.right - screen.left - width) / 2;
+            let y = screen.top + (screen.bottom - screen.top - height) / 2;
+            SetWindowPos(
+                hwnd, std::ptr::null_mut(), x, y, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        };
+        move_to_center(&window);
+        // Windows can resize the palette when it moves to a monitor with a different DPI.
+        if GetWindowRect(hwnd, &mut window) == 0 {
+            return;
+        }
+        move_to_center(&window);
+        if native_rounding {
+            return;
+        }
+        let width = window.right - window.left;
+        let height = window.bottom - window.top;
+
+        // Match the 10 logical pixel radius of the Slint outline.
+        let dpi = GetDpiForWindow(hwnd);
+        let diameter = if dpi == 0 { 20 } else { ((20 * dpi + 48) / 96) as i32 };
+        let rounded = CreateRoundRectRgn(0, 0, width, height, diameter, diameter);
+        if !rounded.is_null() && SetWindowRgn(hwnd, rounded, 1) == 0 {
+            DeleteObject(rounded);
+        }
     }
 }
 
 #[cfg(not(windows))]
-pub fn primary_screen_center(_win_w: i32, _win_h: i32) -> (i32, i32) {
-    (400, 240)
-}
+pub fn center_palette(_hwnd: isize, _premiere_hwnd: isize) {}

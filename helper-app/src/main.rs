@@ -13,7 +13,7 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use slint::{
-    Color, ComponentHandle, ModelRc, PhysicalPosition, SharedString, Timer, TimerMode, VecModel,
+    Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
 };
 use std::{
     cell::RefCell,
@@ -28,8 +28,6 @@ slint::include_modules!();
 const VISIBLE_ROWS: usize = 8;
 const MAX_RECENT_ITEMS: usize = 20;
 const ACTION_TIMEOUT: Duration = Duration::from_secs(12);
-const WINDOW_WIDTH: i32 = 620;
-const WINDOW_HEIGHT: i32 = 407;
 
 struct AppState {
     catalog: CatalogStore,
@@ -291,9 +289,6 @@ fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
 }
 
 fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
-    let (cx, cy) = win_focus::primary_screen_center(WINDOW_WIDTH, WINDOW_HEIGHT);
-    ui.window().set_position(PhysicalPosition::new(cx, cy));
-
     ui.set_active_catalog("all".into());
     ui.set_search_text(SharedString::from(""));
     state.media_catalog = None;
@@ -304,13 +299,17 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
     refresh_results_ui(ui, state);
 
     let our_hwnd_before = extract_window_hwnd(ui);
-    win_focus::hide_from_taskbar(our_hwnd_before);
+    win_focus::center_palette(our_hwnd_before, state.previous_hwnd);
 
-    let _ = ui.show();
+    if ui.show().is_err() {
+        return;
+    }
     state.is_visible = true;
 
     let our_hwnd = extract_window_hwnd(ui);
-    win_focus::hide_from_taskbar(our_hwnd);
+    if our_hwnd != our_hwnd_before {
+        win_focus::center_palette(our_hwnd, state.previous_hwnd);
+    }
     win_focus::force_foreground(our_hwnd);
     ui.invoke_focus_search();
 }
@@ -387,8 +386,23 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
 
+    #[cfg(windows)]
+    {
+        use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+
+        // Set the native style at creation so Windows never maps a captioned palette.
+        slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .with_winit_window_attributes_hook(|attributes| {
+                attributes
+                    .with_decorations(false)
+                    .with_undecorated_shadow(false)
+                    .with_transparent(false)
+                    .with_skip_taskbar(true)
+            })
+            .select()?;
+    }
     let ui = SpotlightWindow::new()?;
-    win_focus::hide_from_taskbar(extract_window_hwnd(&ui));
 
     // Create native Windows System Tray icon (no taskbar icon)
     let tray = Rc::new(RefCell::new(SystemTray::new()));
@@ -766,6 +780,9 @@ mod tests {
     };
     use slint::{LogicalPosition, PhysicalSize, Rgb8Pixel};
 
+    const WINDOW_WIDTH: i32 = 620;
+    const WINDOW_HEIGHT: i32 = 407;
+
     struct TestPlatform(Rc<MinimalSoftwareWindow>);
 
     impl Platform for TestPlatform {
@@ -934,5 +951,15 @@ mod tests {
             assert!(pixels[top..bottom].iter().any(|pixel| pixel.r > 170), "row {row} should render its label");
         }
         assert!(pixels[371 * width..].iter().any(|pixel| pixel.r > 130), "the footer should render its text");
+        let height = WINDOW_HEIGHT as usize;
+        let outline = Rgb8Pixel { r: 0x36, g: 0x39, b: 0x52 };
+        for edge in [
+            [width / 2, width + width / 2, 2 * width + width / 2],
+            std::array::from_fn(|i| (height - 1 - i) * width + width / 2),
+            std::array::from_fn(|i| height / 2 * width + i),
+            std::array::from_fn(|i| height / 2 * width + width - 1 - i),
+        ] {
+            assert!(edge.iter().any(|&i| pixels[i] == outline), "outline missing at a palette edge");
+        }
     }
 }

@@ -7,7 +7,7 @@ export struct EffectItemUI {
 }
 
 export component SpotlightWindow inherits Window {
-    title: "Premiere Spotlight";
+    title: "";
     no-frame: true;
     always-on-top: true;
     width: 620px;
@@ -51,8 +51,6 @@ export component SpotlightWindow inherits Window {
         width: 100%;
         height: 100%;
         background: #12131a;
-        border-width: 1.5px;
-        border-color: #363952;
         border-radius: 10px;
         clip: true;
 
@@ -312,16 +310,19 @@ export component SpotlightWindow inherits Window {
                         }
                     }
 
-                    VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: "↑↓ Navigate   Tab Switch catalog   Enter Select   Esc Close";
-                            font-size: 11px;
-                            color: #686d88;
-                        }
-                    }
                 }
             }
         }
+    }
+
+    // Draw over the content and inset from the native window's clipping edge.
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: root.width - 2px;
+        height: root.height - 2px;
+        border-width: 1.5px;
+        border-color: #363952;
+        border-radius: 9px;
     }
 }
