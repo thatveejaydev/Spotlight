@@ -1,0 +1,51 @@
+{
+  "manifestVersion": 5,
+  "id": "dev.spotlight.premiere",
+  "name": "Premiere Spotlight Bridge",
+  "version": "0.1.0",
+  "main": "index.html",
+  "host": {
+    "app": "premierepro",
+    "minVersion": "25.2.0",
+    "data": {
+      "loadEvent": "startup"
+    }
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "premiereSpotlightBridgePanel",
+      "label": {
+        "default": "Spotlight Bridge"
+      },
+      "minimumSize": {
+        "width": 240,
+        "height": 160
+      },
+      "preferredDockedSize": {
+        "width": 300,
+        "height": 220
+      },
+      "preferredFloatingSize": {
+        "width": 320,
+        "height": 240
+      }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": [
+        "ws://localhost/",
+        "http://localhost/",
+        "ws://127.0.0.1/",
+        "http://127.0.0.1/",
+        "ws://localhost:3847",
+        "ws://127.0.0.1:3847"
+      ]
+    },
+    "launchProcess": {
+      "schemes": ["premiere-spotlight"],
+      "extensions": [".exe"]
+    }
+  }
+}

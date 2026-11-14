@@ -1,0 +1,14 @@
+# Rust / Cargo build artifacts
+helper-app/target/
+target/
+**/*.rs.bk
+*.pdb
+
+# Packaged binaries & archives
+*.exe
+*.ccx
+*.zip
+
+# OS / Editor files
+.DS_Store
+Thumbs.db

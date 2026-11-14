@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Premiere Spotlight Bridge</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 14px;
+      background: #161720;
+      color: #e4e6f1;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 12px;
+    }
+    .card {
+      background: #1e202d;
+      border: 1px solid #2e3146;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .title {
+      font-weight: 600;
+      font-size: 13px;
+      color: #ffffff;
+    }
+    .badge {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      background: #f59e0b22;
+      color: #fbbf24;
+    }
+    .badge.online {
+      background: #22c55e22;
+      color: #4ade80;
+    }
+    .stats {
+      color: #989db8;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .btn {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 5px 10px;
+      background: #6366f1;
+      color: #ffffff;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      user-select: none;
+    }
+    .log {
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      color: #a5b4fc;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="row">
+      <span class="title">Premiere Spotlight</span>
+      <span id="connBadge" class="badge">Connecting...</span>
+    </div>
+    <div id="catalogStats" class="stats">Scanning Premiere effects...</div>
+    <div id="rescanBtn" class="btn">Rescan Effects Catalog</div>
+  </div>
+  <div class="card">
+    <div id="statusLog" class="log">Press Ctrl + Space to open Spotlight</div>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

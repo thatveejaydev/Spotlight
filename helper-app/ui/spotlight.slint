@@ -1,0 +1,408 @@
+export struct EffectItemUI {
+    name: string,
+    category: string,
+    folder: string,
+    match-name: string,
+    effect-type: string,
+    badge-bg: color,
+    badge-fg: color,
+}
+
+component FilterChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked <=> touch.clicked;
+
+    height: 24px;
+    width: label-txt.preferred-width + 20px;
+    border-radius: 6px;
+    background: root.active ? #6366f1 : (touch.has-hover ? #262736 : #1b1c26);
+    border-width: 1px;
+    border-color: root.active ? #818cf8 : #2e3040;
+
+    label-txt := Text {
+        text: root.label;
+        font-size: 11px;
+        font-weight: root.active ? 600 : 500;
+        color: root.active ? #ffffff : #a5a8c0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+    }
+}
+
+export component SpotlightWindow inherits Window {
+    title: "Premiere Spotlight";
+    no-frame: true;
+    always-on-top: true;
+    width: 620px;
+    height: 446px;
+    background: #12131a;
+
+    in-out property <string> search-text: "";
+    in-out property <int> selected-index: 0;
+    in-out property <string> active-filter: "all";
+    in-out property <bool> premiere-only-scope: false;
+    in-out property <bool> bridge-connected: false;
+    in-out property <int> total-matches: 0;
+    in-out property <string> status-message: "Ready · Ctrl+Space";
+    in property <[EffectItemUI]> results: [];
+
+    callback search-edited(string);
+    callback filter-changed(string);
+    callback cycle-filter();
+    callback move-selection(int);
+    callback activate-selected();
+    callback activate-index(int);
+    callback close-requested();
+    callback toggle-scope();
+
+    public function focus-search() {
+        search-input.focus();
+        search-input.select-all();
+    }
+
+    // Outer bordered shell
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #12131a;
+        border-width: 1.5px;
+        border-color: #363952;
+        border-radius: 10px;
+        clip: true;
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // 1. Search Bar Header
+            Rectangle {
+                height: 54px;
+                background: #171822;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 14px;
+                    spacing: 12px;
+                    alignment: stretch;
+
+                    // Search magnifier icon badge
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 6px;
+                            background: #6366f128;
+                            border-width: 1px;
+                            border-color: #6366f166;
+                            Text {
+                                text: "FX";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: #818cf8;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Input box container
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: transparent;
+
+                        // Placeholder text when empty
+                        if root.search-text == "" : Text {
+                            x: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text: "Search effects & transitions (Gaussian Blur, Lumetri, Cross Dissolve)...";
+                            color: #5e627c;
+                            font-size: 13.5px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        search-input := TextInput {
+                            x: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.search-text;
+                            font-size: 15px;
+                            color: #f3f4f8;
+                            selection-background-color: #6366f166;
+                            selection-foreground-color: #ffffff;
+                            vertical-alignment: center;
+                            single-line: true;
+
+                            edited => {
+                                root.search-edited(self.text);
+                            }
+
+                            accepted => {
+                                root.activate-selected();
+                            }
+
+                            key-pressed(event) => {
+                                if (event.text == Key.UpArrow) {
+                                    root.move-selection(-1);
+                                    return accept;
+                                }
+                                if (event.text == Key.DownArrow) {
+                                    root.move-selection(1);
+                                    return accept;
+                                }
+                                if (event.text == Key.Escape) {
+                                    root.close-requested();
+                                    return accept;
+                                }
+                                if (event.text == Key.Tab) {
+                                    root.cycle-filter();
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                        }
+                    }
+
+                    // Scope toggle button (Everywhere vs Premiere Only)
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 24px;
+                            width: scope-txt.preferred-width + 16px;
+                            border-radius: 5px;
+                            background: scope-touch.has-hover ? #252738 : #1d1e2b;
+                            border-width: 1px;
+                            border-color: root.premiere-only-scope ? #38bdf866 : #34374c;
+
+                            scope-txt := Text {
+                                text: root.premiere-only-scope ? "Hotkey: Premiere Only" : "Hotkey: Everywhere";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: root.premiere-only-scope ? #38bdf8 : #9ca0b8;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            scope-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.toggle-scope();
+                                    root.focus-search();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Divider
+            Rectangle {
+                height: 1px;
+                background: #26283a;
+            }
+
+            // 2. Category Filter Bar
+            Rectangle {
+                height: 38px;
+                background: #14151e;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 8px;
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        padding-top: 7px;
+
+                        FilterChip {
+                            label: "All";
+                            active: root.active-filter == "all";
+                            clicked => {
+                                root.filter-changed("all");
+                                root.focus-search();
+                            }
+                        }
+                        FilterChip {
+                            label: "Video FX";
+                            active: root.active-filter == "videoEffect";
+                            clicked => {
+                                root.filter-changed("videoEffect");
+                                root.focus-search();
+                            }
+                        }
+                        FilterChip {
+                            label: "Audio FX";
+                            active: root.active-filter == "audioEffect";
+                            clicked => {
+                                root.filter-changed("audioEffect");
+                                root.focus-search();
+                            }
+                        }
+                        FilterChip {
+                            label: "Transitions";
+                            active: root.active-filter == "transition";
+                            clicked => {
+                                root.filter-changed("transition");
+                                root.focus-search();
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: root.total-matches + " effects";
+                            font-size: 11px;
+                            color: #6b708b;
+                        }
+                    }
+                }
+            }
+
+            // Divider
+            Rectangle {
+                height: 1px;
+                background: #222434;
+            }
+
+            // 3. Results List (8 visible rows of 36px + spacing/padding = 314px)
+            Rectangle {
+                height: 314px;
+                background: #12131a;
+                clip: true;
+
+                if root.results.length == 0 : VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "No matching effects found";
+                        font-size: 13px;
+                        color: #6b708b;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 2px;
+                    alignment: start;
+
+                    for item[idx] in root.results : Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: idx == root.selected-index ? #6366f12e : (row-touch.has-hover ? #1c1e2b : transparent);
+                        border-width: idx == root.selected-index ? 1px : 0px;
+                        border-color: #6366f188;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 10px;
+
+                            // Effect Name
+                            Text {
+                                horizontal-stretch: 1;
+                                text: item.name;
+                                font-size: 13px;
+                                font-weight: idx == root.selected-index ? 600 : 400;
+                                color: idx == root.selected-index ? #ffffff : #dcdfe8;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            // Category pill
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 98px;
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: item.badge-bg;
+                                    Text {
+                                        text: item.category;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        color: item.badge-fg;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        row-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.activate-index(idx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Divider
+            Rectangle {
+                height: 1px;
+                background: #222434;
+            }
+
+            // 4. Footer Bar
+            Rectangle {
+                height: 36px;
+                background: #151620;
+
+                HorizontalLayout {
+                    width: 100%;
+                    height: 100%;
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    alignment: space-between;
+
+                    // Connection status indicator
+                    HorizontalLayout {
+                        spacing: 7px;
+                        alignment: start;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: root.bridge-connected ? #22c55e : #f59e0b;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.status-message;
+                                font-size: 11px;
+                                color: #8b90aa;
+                            }
+                        }
+                    }
+
+                    // Keyboard Shortcut Hints
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "↑↓ Navigate   Tab Filter   Enter Apply   Esc Close";
+                            font-size: 11px;
+                            color: #686d88;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
