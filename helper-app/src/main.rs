@@ -19,6 +19,10 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tray::{SystemTray, TrayAction};
@@ -321,13 +325,37 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
 }
 
 fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
+    // Restore Premiere before hiding so our foreground transfer does not need a synthetic Alt tap.
+    if state.previous_hwnd != 0 && win_focus::is_premiere_active_and_unminimized(state.previous_hwnd)
+    {
+        win_focus::restore_foreground(state.previous_hwnd);
+    }
     let _ = ui.hide();
     state.is_visible = false;
     state.shown_at = None;
     state.saw_foreground = false;
-    if state.previous_hwnd != 0 && win_focus::is_premiere_active_and_unminimized(state.previous_hwnd)
-    {
-        win_focus::force_foreground(state.previous_hwnd);
+}
+
+fn toggle_palette_from_hotkey(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
+    let fg_hwnd = win_focus::get_foreground_hwnd();
+    let is_premiere_fg = win_focus::is_premiere_active_and_unminimized(fg_hwnd);
+    toggle_palette_from_hotkey_for_fg(ui, state, bridge, fg_hwnd, is_premiere_fg);
+}
+
+fn toggle_palette_from_hotkey_for_fg(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+    fg_hwnd: isize,
+    is_premiere_fg: bool,
+) {
+    if state.is_visible {
+        hide_and_restore_focus(ui, state);
+        return;
+    }
+    if is_premiere_fg {
+        state.previous_hwnd = fg_hwnd;
+        center_and_show(ui, state, bridge);
     }
 }
 
@@ -613,15 +641,52 @@ fn main() -> Result<(), slint::PlatformError> {
     let hotkey_manager =
         GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
     let ctrl_space = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
+    let ctrl_space_id = ctrl_space.id();
+    let hotkey_pending = Arc::new(AtomicBool::new(false));
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge_ref = bridge.clone();
+        let pending_flag = hotkey_pending.clone();
+        HOTKEY_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                if !pending_flag.swap(false, Ordering::AcqRel) {
+                    return;
+                }
+                if let Some(ui) = ui_weak.upgrade() {
+                    let mut st = state_ref.borrow_mut();
+                    toggle_palette_from_hotkey(&ui, &mut st, &bridge_ref);
+                }
+            }));
+        });
+    }
+    {
+        let pending_flag = hotkey_pending.clone();
+        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if event.id == ctrl_space_id && event.state == HotKeyState::Pressed {
+                // Capture WM_HOTKEY foreground rights immediately and wake the event loop without timer lag.
+                win_focus::allow_current_process_foreground();
+                pending_flag.store(true, Ordering::Release);
+                let _ = slint::invoke_from_event_loop(|| {
+                    HOTKEY_DISPATCH.with(|slot| {
+                        if let Some(callback) = slot.borrow_mut().as_mut() {
+                            callback();
+                        }
+                    });
+                });
+            }
+        }));
+    }
     let mut hotkey_registered = false;
 
-    // Poll focus state, global hotkey events, and system tray actions on a 20ms timer
+    // Poll focus state, hotkey registration, and system tray actions on a 20ms timer
     let timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let tray_ref = tray.clone();
         let bridge_ref = bridge.clone();
+        let hotkey_pending = hotkey_pending.clone();
         timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -790,23 +855,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     let _ = hotkey_manager.unregister(ctrl_space);
                     hotkey_registered = false;
                 }
-                // Discard any queued hotkey events while Premiere is not focused
-                while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+                hotkey_pending.store(false, Ordering::Release);
             }
 
-            // 6. Process Ctrl + Space hotkey events only when enabled
-            if should_enable_hotkey {
-                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if event.id == ctrl_space.id() && event.state == HotKeyState::Pressed {
-                        let mut st = state_ref.borrow_mut();
-                        if st.is_visible {
-                            hide_and_restore_focus(&ui, &mut st);
-                        } else if is_premiere_fg {
-                            st.previous_hwnd = fg_hwnd;
-                            center_and_show(&ui, &mut st, &bridge_ref);
-                        }
-                    }
-                }
+            // 6. Fallback dispatch if a Ctrl + Space press arrived before the wake callback ran
+            if should_enable_hotkey && hotkey_pending.swap(false, Ordering::AcqRel) {
+                let mut st = state_ref.borrow_mut();
+                toggle_palette_from_hotkey(&ui, &mut st, &bridge_ref);
             }
         });
     }
@@ -823,6 +878,7 @@ thread_local! {
     static EFFECT_RESULTS: RefCell<Vec<ApplyResult>> = const { RefCell::new(Vec::new()) };
     static SHOW_WINDOW_QUEUE: RefCell<bool> = const { RefCell::new(false) };
     static BRIDGE_STATUS_QUEUE: RefCell<Option<bool>> = const { RefCell::new(None) };
+    static HOTKEY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1072,5 +1128,23 @@ mod tests {
             FocusOutcome::HideLostFocus
         ));
         assert!(!state.is_visible);
+
+        // Reopening after focus-loss dismissal or hide_and_restore_focus must take one toggle.
+        toggle_palette_from_hotkey_for_fg(&ui, &mut state, &bridge, 4242, true);
+        assert!(state.is_visible);
+        assert_eq!(state.previous_hwnd, 4242);
+        assert!(state.shown_at.is_some());
+
+        // Closing via hide_and_restore_focus clears visibility, then one toggle reopens it.
+        state.previous_hwnd = 0;
+        hide_and_restore_focus(&ui, &mut state);
+        assert!(!state.is_visible);
+        assert!(state.shown_at.is_none());
+        assert!(!state.saw_foreground);
+
+        toggle_palette_from_hotkey_for_fg(&ui, &mut state, &bridge, 4242, true);
+        assert!(state.is_visible);
+        assert_eq!(state.previous_hwnd, 4242);
+        assert!(state.shown_at.is_some());
     }
 }
