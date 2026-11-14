@@ -3,6 +3,7 @@
 mod bridge;
 mod catalog;
 mod installer;
+mod tray;
 mod win_focus;
 
 use bridge::{BridgeClients, BridgeEvent};
@@ -11,8 +12,11 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
-use slint::{Color, ComponentHandle, ModelRc, PhysicalPosition, SharedString, Timer, TimerMode, VecModel};
+use slint::{
+    Color, ComponentHandle, ModelRc, PhysicalPosition, SharedString, Timer, TimerMode, VecModel,
+};
 use std::{cell::RefCell, rc::Rc, time::Duration};
+use tray::{SystemTray, TrayAction};
 
 slint::include_modules!();
 
@@ -31,11 +35,26 @@ struct AppState {
 
 fn badge_colors(effect_type: &str) -> (Color, Color) {
     match effect_type {
-        "videoEffect" => (Color::from_argb_u8(45, 99, 102, 241), Color::from_rgb_u8(165, 180, 252)),
-        "audioEffect" => (Color::from_argb_u8(45, 16, 185, 129), Color::from_rgb_u8(110, 231, 183)),
-        "videoTransition" => (Color::from_argb_u8(45, 245, 158, 11), Color::from_rgb_u8(252, 211, 77)),
-        "audioTransition" => (Color::from_argb_u8(45, 236, 72, 153), Color::from_rgb_u8(249, 168, 212)),
-        _ => (Color::from_argb_u8(45, 148, 163, 184), Color::from_rgb_u8(203, 213, 225)),
+        "videoEffect" => (
+            Color::from_argb_u8(45, 99, 102, 241),
+            Color::from_rgb_u8(165, 180, 252),
+        ),
+        "audioEffect" => (
+            Color::from_argb_u8(45, 16, 185, 129),
+            Color::from_rgb_u8(110, 231, 183),
+        ),
+        "videoTransition" => (
+            Color::from_argb_u8(45, 245, 158, 11),
+            Color::from_rgb_u8(252, 211, 77),
+        ),
+        "audioTransition" => (
+            Color::from_argb_u8(45, 236, 72, 153),
+            Color::from_rgb_u8(249, 168, 212),
+        ),
+        _ => (
+            Color::from_argb_u8(45, 148, 163, 184),
+            Color::from_rgb_u8(203, 213, 225),
+        ),
     }
 }
 
@@ -114,18 +133,21 @@ fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
 
 fn center_and_show(ui: &SpotlightWindow, state: &mut AppState) {
     let (cx, cy) = win_focus::primary_screen_center(WINDOW_WIDTH, WINDOW_HEIGHT);
-    ui.window()
-        .set_position(PhysicalPosition::new(cx, cy));
+    ui.window().set_position(PhysicalPosition::new(cx, cy));
 
     ui.set_search_text(SharedString::from(""));
     state.selected_abs_index = 0;
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
 
+    let our_hwnd_before = extract_window_hwnd(ui);
+    win_focus::hide_from_taskbar(our_hwnd_before);
+
     let _ = ui.show();
     state.is_visible = true;
 
     let our_hwnd = extract_window_hwnd(ui);
+    win_focus::hide_from_taskbar(our_hwnd);
     win_focus::force_foreground(our_hwnd);
     ui.invoke_focus_search();
 }
@@ -133,7 +155,8 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState) {
 fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
     let _ = ui.hide();
     state.is_visible = false;
-    if state.previous_hwnd != 0 {
+    if state.previous_hwnd != 0 && win_focus::is_premiere_active_and_unminimized(state.previous_hwnd)
+    {
         win_focus::force_foreground(state.previous_hwnd);
     }
 }
@@ -153,7 +176,7 @@ fn apply_entry_at(
         ui.set_status_message(SharedString::from(format!("Applied: {}", chosen.name)));
     } else {
         ui.set_status_message(SharedString::from(format!(
-            "Selected: {} (Open Premiere UXP panel to apply)",
+            "Selected: {} (Waiting for Premiere bridge)",
             chosen.name
         )));
     }
@@ -164,16 +187,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // 1. Auto-install / enable the UXP bridge plugin in Premiere Pro & register Windows Startup (--watch)
     installer::ensure_installed();
 
-    let watch_arg = std::env::args().any(|a| a == "--watch" || a == "--background");
-    let launched_from_premiere = win_focus::is_premiere_hwnd(win_focus::get_foreground_hwnd());
-    let start_hidden = watch_arg || launched_from_premiere;
-
-    // 2. Single-instance check: if an instance is already listening on 127.0.0.1:3847, wake it (unless --watch) and exit
-    if bridge::check_or_wake_existing_instance(!start_hidden) {
+    // 2. Single-instance check: if Premiere Spotlight is already running in the System Tray, wake it (only opens if Premiere is active) and exit
+    if bridge::check_or_wake_existing_instance(true) {
         return Ok(());
     }
 
     let ui = SpotlightWindow::new()?;
+    win_focus::hide_from_taskbar(extract_window_hwnd(&ui));
+
+    // Create native Windows System Tray icon (no taskbar icon)
+    let tray = Rc::new(RefCell::new(SystemTray::new()));
 
     let state = Rc::new(RefCell::new(AppState {
         catalog: CatalogStore::new_with_defaults(),
@@ -206,12 +229,14 @@ fn main() -> Result<(), slint::PlatformError> {
                         ui.set_status_message(SharedString::from(
                             "Connected to Premiere Pro · Ctrl+Space",
                         ));
+                        BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(true));
                     }
                     BridgeEvent::ClientDisconnected => {
                         ui.set_bridge_connected(false);
                         ui.set_status_message(SharedString::from(
                             "Premiere disconnected · Standalone catalog active",
                         ));
+                        BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(false));
                     }
                     BridgeEvent::CatalogReceived(items) => {
                         ui.set_bridge_connected(true);
@@ -220,6 +245,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             items.len()
                         )));
                         CATALOG_QUEUE.with(|q| q.borrow_mut().push(items));
+                        BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(true));
                     }
                     BridgeEvent::ApplyResult { ok, message } => {
                         if !message.is_empty() {
@@ -348,44 +374,31 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Toggle hotkey scope (Everywhere vs Premiere Only)
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_toggle_scope(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let next = !ui.get_premiere_only_scope();
-                ui.set_premiere_only_scope(next);
-            }
-        });
-    }
-
-    // Register global hotkey: Ctrl + Space
-    let hotkey_manager = GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
+    // Prepare global hotkey manager (Ctrl + Space is registered dynamically ONLY when Premiere Pro is focused & unminimized)
+    let hotkey_manager =
+        GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
     let ctrl_space = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
-    if let Err(err) = hotkey_manager.register(ctrl_space) {
-        eprintln!("[hotkey] Could not register Ctrl+Space: {}", err);
-    } else {
-        println!("[hotkey] Registered global shortcut: Ctrl + Space");
-    }
+    let mut hotkey_registered = false;
 
-    // Show window immediately on direct launch, or stay hidden in background when started via --watch or Premiere
-    if !start_hidden {
-        let mut st = state.borrow_mut();
-        st.previous_hwnd = win_focus::get_foreground_hwnd();
-        center_and_show(&ui, &mut st);
-    }
-
-    // Poll GlobalHotKeyEvent and dynamic catalog updates on a lightweight 20ms timer
+    // Poll focus state, global hotkey events, and system tray actions on a 20ms timer
     let timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
+        let tray_ref = tray.clone();
         timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
 
-            // Drain any newly synced Premiere catalogs
+            // 1. Update tray tooltip if bridge status changed
+            if let Some(connected) = BRIDGE_STATUS_QUEUE.with(|q| q.borrow_mut().take()) {
+                if let Some(ref t) = *tray_ref.borrow() {
+                    t.set_connected(connected);
+                }
+            }
+
+            // 2. Drain any newly synced Premiere catalogs
             CATALOG_QUEUE.with(|q| {
                 let mut queue = q.borrow_mut();
                 if let Some(latest) = queue.pop() {
@@ -396,7 +409,28 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             });
 
-            // Check if a second premiere-spotlight.exe invocation asked to show the window
+            // 3. Handle System Tray menu / click actions
+            while let Some(action) = tray::poll_tray_action() {
+                match action {
+                    TrayAction::OpenSpotlight => {
+                        let (_, unminimized_premiere_hwnd) =
+                            win_focus::query_premiere_window_state();
+                        if unminimized_premiere_hwnd != 0 {
+                            let mut st = state_ref.borrow_mut();
+                            st.previous_hwnd = unminimized_premiere_hwnd;
+                            center_and_show(&ui, &mut st);
+                        }
+                    }
+                    TrayAction::Quit => {
+                        if let Some(ref mut t) = *tray_ref.borrow_mut() {
+                            t.remove();
+                        }
+                        std::process::exit(0);
+                    }
+                }
+            }
+
+            // 4. Handle wake request (only if Premiere is active & unminimized)
             let wake_requested = SHOW_WINDOW_QUEUE.with(|flag| {
                 let mut f = flag.borrow_mut();
                 let val = *f;
@@ -404,33 +438,65 @@ fn main() -> Result<(), slint::PlatformError> {
                 val
             });
             if wake_requested {
-                let mut st = state_ref.borrow_mut();
-                if !st.is_visible {
-                    st.previous_hwnd = win_focus::get_foreground_hwnd();
+                let fg_hwnd = win_focus::get_foreground_hwnd();
+                if win_focus::is_premiere_active_and_unminimized(fg_hwnd) {
+                    let mut st = state_ref.borrow_mut();
+                    st.previous_hwnd = fg_hwnd;
+                    center_and_show(&ui, &mut st);
                 }
-                center_and_show(&ui, &mut st);
             }
 
-            // Check global hotkey events
-            while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                if event.id == ctrl_space.id() && event.state == HotKeyState::Pressed {
-                    let mut st = state_ref.borrow_mut();
-                    if st.is_visible {
-                        hide_and_restore_focus(&ui, &mut st);
-                    } else {
-                        let fg_hwnd = win_focus::get_foreground_hwnd();
-                        if ui.get_premiere_only_scope() && !win_focus::is_premiere_hwnd(fg_hwnd) {
-                            continue;
+            // 5. Check whether Premiere Pro (unminimized) or our visible Spotlight popup is currently in the foreground
+            let fg_hwnd = win_focus::get_foreground_hwnd();
+            let our_hwnd = extract_window_hwnd(&ui);
+            let is_our_window = our_hwnd != 0 && fg_hwnd == our_hwnd;
+            let is_premiere_fg = win_focus::is_premiere_active_and_unminimized(fg_hwnd);
+
+            let should_enable_hotkey = {
+                let st = state_ref.borrow();
+                is_premiere_fg || (st.is_visible && is_our_window)
+            };
+
+            if should_enable_hotkey {
+                if !hotkey_registered {
+                    if hotkey_manager.register(ctrl_space).is_ok() {
+                        hotkey_registered = true;
+                    }
+                }
+            } else {
+                if hotkey_registered {
+                    let _ = hotkey_manager.unregister(ctrl_space);
+                    hotkey_registered = false;
+                }
+                // Discard any queued hotkey events while Premiere is not focused
+                while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+
+                // If Spotlight popup was open and the user clicked another app or minimized Premiere, auto-hide immediately
+                let mut st = state_ref.borrow_mut();
+                if st.is_visible {
+                    let _ = ui.hide();
+                    st.is_visible = false;
+                }
+            }
+
+            // 6. Process Ctrl + Space hotkey events only when enabled
+            if should_enable_hotkey {
+                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                    if event.id == ctrl_space.id() && event.state == HotKeyState::Pressed {
+                        let mut st = state_ref.borrow_mut();
+                        if st.is_visible {
+                            hide_and_restore_focus(&ui, &mut st);
+                        } else if is_premiere_fg {
+                            st.previous_hwnd = fg_hwnd;
+                            center_and_show(&ui, &mut st);
                         }
-                        st.previous_hwnd = fg_hwnd;
-                        center_and_show(&ui, &mut st);
                     }
                 }
             }
         });
     }
 
-    // Keep event loop alive even when popup window is hidden
+    // Keep event loop alive while helper is active in the System Tray
     slint::run_event_loop_until_quit()?;
     Ok(())
 }
@@ -438,4 +504,5 @@ fn main() -> Result<(), slint::PlatformError> {
 thread_local! {
     static CATALOG_QUEUE: RefCell<Vec<Vec<EffectEntry>>> = const { RefCell::new(Vec::new()) };
     static SHOW_WINDOW_QUEUE: RefCell<bool> = const { RefCell::new(false) };
+    static BRIDGE_STATUS_QUEUE: RefCell<Option<bool>> = const { RefCell::new(None) };
 }
