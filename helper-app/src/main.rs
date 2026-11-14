@@ -28,6 +28,7 @@ slint::include_modules!();
 const VISIBLE_ROWS: usize = 8;
 const MAX_RECENT_ITEMS: usize = 20;
 const ACTION_TIMEOUT: Duration = Duration::from_secs(12);
+const ACTIVATION_GRACE: Duration = Duration::from_millis(250);
 
 struct AppState {
     catalog: CatalogStore,
@@ -39,6 +40,8 @@ struct AppState {
     selected_abs_index: usize,
     scroll_offset: usize,
     is_visible: bool,
+    shown_at: Option<Instant>,
+    saw_foreground: bool,
     previous_hwnd: isize,
 }
 
@@ -305,11 +308,14 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
         return;
     }
     state.is_visible = true;
+    state.shown_at = Some(Instant::now());
+    state.saw_foreground = false;
 
     let our_hwnd = extract_window_hwnd(ui);
     if our_hwnd != our_hwnd_before {
         win_focus::center_palette(our_hwnd, state.previous_hwnd);
     }
+    win_focus::ensure_palette_topmost(our_hwnd);
     win_focus::force_foreground(our_hwnd);
     ui.invoke_focus_search();
 }
@@ -317,9 +323,38 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
 fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
     let _ = ui.hide();
     state.is_visible = false;
+    state.shown_at = None;
+    state.saw_foreground = false;
     if state.previous_hwnd != 0 && win_focus::is_premiere_active_and_unminimized(state.previous_hwnd)
     {
         win_focus::force_foreground(state.previous_hwnd);
+    }
+}
+
+enum FocusOutcome {
+    KeepVisible,
+    RetryForeground,
+    HideLostFocus,
+}
+
+fn evaluate_palette_focus(state: &mut AppState, is_our_window: bool, now: Instant) -> FocusOutcome {
+    if !state.is_visible {
+        return FocusOutcome::KeepVisible;
+    }
+    if is_our_window {
+        state.saw_foreground = true;
+        return FocusOutcome::KeepVisible;
+    }
+    let grace_elapsed = state
+        .shown_at
+        .is_some_and(|shown| now.saturating_duration_since(shown) >= ACTIVATION_GRACE);
+    if state.saw_foreground || grace_elapsed {
+        state.is_visible = false;
+        state.shown_at = None;
+        state.saw_foreground = false;
+        FocusOutcome::HideLostFocus
+    } else {
+        FocusOutcome::RetryForeground
     }
 }
 
@@ -417,6 +452,8 @@ fn main() -> Result<(), slint::PlatformError> {
         selected_abs_index: 0,
         scroll_offset: 0,
         is_visible: false,
+        shown_at: None,
+        saw_foreground: false,
         previous_hwnd: 0,
     }));
 
@@ -707,21 +744,45 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
 
-            // 5. Check whether Premiere Pro (unminimized) or our visible Spotlight popup is currently in the foreground
+            // 5. Close Spotlight if the user clicked outside it (including onto Premiere Pro) or switched apps
             let fg_hwnd = win_focus::get_foreground_hwnd();
             let our_hwnd = extract_window_hwnd(&ui);
             let is_our_window = our_hwnd != 0 && fg_hwnd == our_hwnd;
             let is_premiere_fg = win_focus::is_premiere_active_and_unminimized(fg_hwnd);
 
+            let focus_outcome = {
+                let mut st = state_ref.borrow_mut();
+                evaluate_palette_focus(&mut st, is_our_window, Instant::now())
+            };
+            match focus_outcome {
+                FocusOutcome::KeepVisible => {}
+                FocusOutcome::RetryForeground => {
+                    win_focus::force_foreground(our_hwnd);
+                }
+                FocusOutcome::HideLostFocus => {
+                    let _ = ui.hide();
+                }
+            }
+
             let should_enable_hotkey = {
                 let st = state_ref.borrow();
-                is_premiere_fg || (st.is_visible && is_our_window)
+                is_premiere_fg || st.is_visible
             };
 
             if should_enable_hotkey {
                 if !hotkey_registered {
-                    if hotkey_manager.register(ctrl_space).is_ok() {
-                        hotkey_registered = true;
+                    match hotkey_manager.register(ctrl_space) {
+                        Ok(()) => {
+                            hotkey_registered = true;
+                        }
+                        Err(global_hotkey::Error::AlreadyRegistered(_)) => {
+                            if hotkey_manager.unregister(ctrl_space).is_ok()
+                                && hotkey_manager.register(ctrl_space).is_ok()
+                            {
+                                hotkey_registered = true;
+                            }
+                        }
+                        Err(_) => {}
                     }
                 }
             } else {
@@ -731,13 +792,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 // Discard any queued hotkey events while Premiere is not focused
                 while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
-
-                // If Spotlight popup was open and the user clicked another app or minimized Premiere, auto-hide immediately
-                let mut st = state_ref.borrow_mut();
-                if st.is_visible {
-                    let _ = ui.hide();
-                    st.is_visible = false;
-                }
             }
 
             // 6. Process Ctrl + Space hotkey events only when enabled
@@ -848,6 +902,8 @@ mod tests {
             selected_abs_index: 0,
             scroll_offset: 0,
             is_visible: true,
+            shown_at: None,
+            saw_foreground: false,
             previous_hwnd: 0,
         };
         let effect = EffectEntry {
@@ -961,5 +1017,60 @@ mod tests {
         ] {
             assert!(edge.iter().any(|&i| pixels[i] == outline), "outline missing at a palette edge");
         }
+
+        // Escape should close the palette when search has focus and after clicking elsewhere inside the palette.
+        let close_count = Rc::new(std::cell::Cell::new(0u32));
+        {
+            let close_count = close_count.clone();
+            ui.on_close_requested(move || {
+                close_count.set(close_count.get() + 1);
+            });
+        }
+        ui.invoke_focus_search();
+        window.dispatch_event(WindowEvent::KeyPressed { text: Key::Escape.into() });
+        window.dispatch_event(WindowEvent::KeyReleased { text: Key::Escape.into() });
+        assert_eq!(close_count.get(), 1);
+        let footer_pos = LogicalPosition::new(300., 390.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position: footer_pos,
+            button: PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position: footer_pos,
+            button: PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::KeyPressed { text: Key::Escape.into() });
+        window.dispatch_event(WindowEvent::KeyReleased { text: Key::Escape.into() });
+        assert_eq!(close_count.get(), 2);
+
+        // Clicking outside (including back onto Premiere) hides once activation succeeded or grace expires.
+        let shown_at = Instant::now();
+        state.is_visible = true;
+        state.shown_at = Some(shown_at);
+        state.saw_foreground = false;
+        assert!(matches!(
+            evaluate_palette_focus(&mut state, false, shown_at + Duration::from_millis(20)),
+            FocusOutcome::RetryForeground
+        ));
+        assert!(state.is_visible);
+        assert!(matches!(
+            evaluate_palette_focus(&mut state, true, shown_at + Duration::from_millis(40)),
+            FocusOutcome::KeepVisible
+        ));
+        assert!(state.saw_foreground);
+        assert!(matches!(
+            evaluate_palette_focus(&mut state, false, shown_at + Duration::from_millis(60)),
+            FocusOutcome::HideLostFocus
+        ));
+        assert!(!state.is_visible);
+
+        state.is_visible = true;
+        state.shown_at = Some(shown_at);
+        state.saw_foreground = false;
+        assert!(matches!(
+            evaluate_palette_focus(&mut state, false, shown_at + ACTIVATION_GRACE),
+            FocusOutcome::HideLostFocus
+        ));
+        assert!(!state.is_visible);
     }
 }

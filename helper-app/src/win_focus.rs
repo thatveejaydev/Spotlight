@@ -10,17 +10,21 @@ use windows_sys::Win32::{
         MONITORINFO, MONITOR_DEFAULTTONEAREST,
     },
     System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     },
     UI::{
         HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_MENU},
         WindowsAndMessaging::{
-            BringWindowToTop, CallWindowProcW, DefWindowProcW, EnumWindows, GetForegroundWindow, GetWindowRect,
-            GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCACTIVATE, WM_NCCALCSIZE,
-            WM_NCDESTROY, WM_NCPAINT, WNDPROC,
+            BringWindowToTop, CallWindowProcW, DefWindowProcW, EnumWindows, GetAncestor,
+            GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+            GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
+            SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow, GA_ROOTOWNER,
+            GWLP_WNDPROC, GWL_STYLE, HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCACTIVATE,
+            WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WNDPROC, WS_CAPTION,
+            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -76,8 +80,15 @@ pub fn is_premiere_active_and_unminimized(hwnd: isize) -> bool {
         if IsIconic(hwnd as _) != 0 {
             return false;
         }
+        if is_premiere_hwnd(hwnd) {
+            return true;
+        }
+        let root = GetAncestor(hwnd as _, GA_ROOTOWNER);
+        !root.is_null()
+            && root as isize != hwnd
+            && IsIconic(root) == 0
+            && is_premiere_hwnd(root as isize)
     }
-    is_premiere_hwnd(hwnd)
 }
 
 #[cfg(not(windows))]
@@ -131,16 +142,83 @@ pub fn force_foreground(hwnd: isize) {
         return;
     }
     unsafe {
-        // Synthesize a harmless Alt key tap to satisfy Windows ForegroundLockTimeout rules
-        keybd_event(VK_MENU as u8, 0, 0, 0);
-        keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
-        BringWindowToTop(hwnd as _);
-        SetForegroundWindow(hwnd as _);
+        let target = hwnd as HWND;
+        if IsIconic(target) != 0 {
+            ShowWindow(target, SW_RESTORE);
+        }
+        let fg = GetForegroundWindow();
+        if fg == target {
+            BringWindowToTop(target);
+            return;
+        }
+        let cur_tid = GetCurrentThreadId();
+        let fg_tid = if fg.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(fg, std::ptr::null_mut())
+        };
+        let target_tid = GetWindowThreadProcessId(target, std::ptr::null_mut());
+        let attach_cur = fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, 1) != 0;
+        let attach_target = target_tid != 0
+            && target_tid != cur_tid
+            && target_tid != fg_tid
+            && AttachThreadInput(target_tid, cur_tid, 1) != 0;
+
+        BringWindowToTop(target);
+        SetForegroundWindow(target);
+
+        if attach_target {
+            AttachThreadInput(target_tid, cur_tid, 0);
+        }
+        if attach_cur {
+            AttachThreadInput(cur_tid, fg_tid, 0);
+        }
+
+        if GetForegroundWindow() != target {
+            // Fall back to a harmless Alt tap if Windows ForegroundLockTimeout still blocks focus.
+            keybd_event(VK_MENU as u8, 0, 0, 0);
+            keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+            BringWindowToTop(target);
+            SetForegroundWindow(target);
+        }
     }
 }
 
 #[cfg(not(windows))]
 pub fn force_foreground(_hwnd: isize) {}
+
+#[cfg(windows)]
+pub fn ensure_palette_topmost(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let target = hwnd as HWND;
+        if IsIconic(target) != 0 {
+            ShowWindow(target, SW_RESTORE);
+        }
+        SetWindowPos(
+            target,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn ensure_palette_topmost(_hwnd: isize) {}
+
+#[cfg(windows)]
+const WM_NCUAHDRAWCAPTION: u32 = 0x00AE;
+#[cfg(windows)]
+const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
+#[cfg(windows)]
+const FRAMELESS_STRIP_MASK: u32 =
+    WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
 
 #[cfg(windows)]
 thread_local! {
@@ -160,8 +238,14 @@ unsafe extern "system" fn palette_frame(
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
     match message {
-        // Use the entire window for Slint, including during focus and DPI changes.
-        WM_NCCALCSIZE | WM_NCPAINT => 0,
+        // Keep winit from restoring WS_CAPTION/WS_SYSMENU on show, hide, or z-order updates.
+        WM_STYLECHANGING if wparam as i32 == GWL_STYLE => {
+            let styles = &mut *(lparam as *mut STYLESTRUCT);
+            styles.styleNew &= !FRAMELESS_STRIP_MASK;
+            0
+        }
+        // Use the entire window for Slint and suppress classic Windows non-client caption painting.
+        WM_NCCALCSIZE | WM_NCPAINT | WM_NCUAHDRAWCAPTION | WM_NCUAHDRAWFRAME => 0,
         WM_NCACTIVATE => CallWindowProcW(previous, hwnd, message, wparam, -1),
         WM_NCDESTROY => {
             PALETTE_FRAME.with(|frame| frame.set((std::ptr::null_mut(), None, false)));
@@ -183,6 +267,11 @@ unsafe fn configure_palette_frame(hwnd: HWND) -> bool {
     }
     let previous = std::mem::transmute::<isize, WNDPROC>(previous);
     PALETTE_FRAME.with(|frame| frame.set((hwnd, previous, false)));
+    let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+    let stripped = style & !FRAMELESS_STRIP_MASK;
+    if stripped != style {
+        SetWindowLongW(hwnd, GWL_STYLE, stripped as i32);
+    }
     let set_attribute = |attribute: i32, value: u32| {
         DwmSetWindowAttribute(hwnd, attribute as u32, (&value as *const u32).cast(), 4)
     };
@@ -210,6 +299,9 @@ pub fn center_palette(hwnd: isize, premiere_hwnd: isize) {
     }
     unsafe {
         let hwnd = hwnd as HWND;
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
         let native_rounding = configure_palette_frame(hwnd);
         let monitor = MonitorFromWindow(premiere_hwnd as HWND, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFO = std::mem::zeroed();

@@ -46,13 +46,39 @@ export component SpotlightWindow inherits Window {
         search-input.focus();
     }
 
-    // Outer bordered shell
-    Rectangle {
+    // Catch palette navigation and Escape even if the search input is not focused.
+    FocusScope {
         width: 100%;
         height: 100%;
-        background: #12131a;
-        border-radius: 10px;
-        clip: true;
+        forward-focus: search-input;
+
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close-requested();
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.move-selection(-1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.move-selection(1);
+                return accept;
+            }
+            if (event.text == Key.Tab) {
+                root.switch-catalog();
+                return accept;
+            }
+            return reject;
+        }
+
+        // Outer bordered shell
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #12131a;
+            border-radius: 10px;
+            clip: true;
 
         VerticalLayout {
             padding: 0px;
@@ -146,10 +172,6 @@ export component SpotlightWindow inherits Window {
                                 }
                                 if (event.text == Key.DownArrow) {
                                     root.move-selection(1);
-                                    return accept;
-                                }
-                                if (event.text == Key.Escape) {
-                                    root.close-requested();
                                     return accept;
                                 }
                                 if (event.text == Key.Tab) {
@@ -312,6 +334,7 @@ export component SpotlightWindow inherits Window {
 
                 }
             }
+        }
         }
     }
 
