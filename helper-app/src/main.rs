@@ -6,8 +6,8 @@ mod installer;
 mod tray;
 mod win_focus;
 
-use bridge::{BridgeClients, BridgeEvent};
-use catalog::{CatalogStore, EffectEntry};
+use bridge::{ApplyResult, BridgeClients, BridgeEvent, MediaCatalog, PlacementResult};
+use catalog::{CatalogStore, EffectEntry, ProjectItemKind, SearchResult};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -15,24 +15,52 @@ use global_hotkey::{
 use slint::{
     Color, ComponentHandle, ModelRc, PhysicalPosition, SharedString, Timer, TimerMode, VecModel,
 };
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use tray::{SystemTray, TrayAction};
 
 slint::include_modules!();
 
 const VISIBLE_ROWS: usize = 8;
+const MAX_RECENT_ITEMS: usize = 20;
+const ACTION_TIMEOUT: Duration = Duration::from_secs(12);
 const WINDOW_WIDTH: i32 = 620;
-const WINDOW_HEIGHT: i32 = 446;
+const WINDOW_HEIGHT: i32 = 407;
 
 struct AppState {
     catalog: CatalogStore,
-    matched_items: Vec<EffectEntry>,
+    matched_items: Vec<SearchResult>,
+    recent_items: Vec<RecentItem>,
+    pending_effects: HashMap<u64, PendingEffect>,
+    media_catalog: Option<MediaCatalog>,
+    pending_placement: Option<PendingPlacement>,
     selected_abs_index: usize,
     scroll_offset: usize,
     is_visible: bool,
     previous_hwnd: isize,
 }
 
+struct PendingEffect {
+    entry: EffectEntry,
+    recipients: Vec<usize>,
+    deadline: Instant,
+}
+
+struct PendingPlacement {
+    peer_id: usize,
+    request_id: u64,
+    deadline: Instant,
+    recent: RecentItem,
+}
+
+struct RecentItem {
+    item: SearchResult,
+    project_id: Option<String>,
+}
 fn badge_colors(effect_type: &str) -> (Color, Color) {
     match effect_type {
         "videoEffect" => (
@@ -51,6 +79,18 @@ fn badge_colors(effect_type: &str) -> (Color, Color) {
             Color::from_argb_u8(45, 236, 72, 153),
             Color::from_rgb_u8(249, 168, 212),
         ),
+        "media" => (
+            Color::from_argb_u8(52, 56, 189, 248),
+            Color::from_rgb_u8(125, 211, 252),
+        ),
+        "sequence" => (
+            Color::from_argb_u8(52, 168, 85, 247),
+            Color::from_rgb_u8(216, 180, 254),
+        ),
+        "bin" => (
+            Color::from_argb_u8(52, 245, 158, 11),
+            Color::from_rgb_u8(253, 224, 131),
+        ),
         _ => (
             Color::from_argb_u8(45, 148, 163, 184),
             Color::from_rgb_u8(203, 213, 225),
@@ -58,11 +98,95 @@ fn badge_colors(effect_type: &str) -> (Color, Color) {
     }
 }
 
-fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
-    let query = ui.get_search_text().to_string();
-    let filter = ui.get_active_filter().to_string();
+fn remember_item(state: &mut AppState, recent: RecentItem) {
+    state.recent_items.retain(|entry| {
+        entry.project_id != recent.project_id || !entry.item.same_item(&recent.item)
+    });
+    state.recent_items.insert(0, recent);
+    state.recent_items.truncate(MAX_RECENT_ITEMS);
+}
 
-    state.matched_items = state.catalog.search(&query, &filter);
+fn recent_results(state: &AppState) -> Vec<SearchResult> {
+    state
+        .recent_items
+        .iter()
+        .filter_map(|recent| match &recent.item {
+            SearchResult::Effect(_) => Some(recent.item.clone()),
+            SearchResult::ProjectItem(item) => {
+                let catalog = state.media_catalog.as_ref()?;
+                if recent.project_id != catalog.project_id {
+                    return None;
+                }
+                catalog
+                    .items
+                    .iter()
+                    .find(|entry| entry.item_id == item.item_id && entry.placement_error().is_none())
+                    .cloned()
+                    .map(SearchResult::ProjectItem)
+            }
+        })
+        .collect()
+}
+
+fn complete_effect(state: &mut AppState, result: &ApplyResult) -> bool {
+    let request_id = match result.request_id {
+        Some(id) => id,
+        // Already loaded plugins can still acknowledge an apply without a request ID.
+        None if result.ok => {
+            let mut matches = state.pending_effects.iter().filter(|(_, pending)| {
+                pending.recipients.contains(&result.peer_id)
+                    && Instant::now() < pending.deadline
+                    && result.message
+                        .strip_prefix("Applied \"")
+                        .and_then(|message| message.strip_prefix(&pending.entry.name))
+                        .and_then(|message| message.strip_prefix('"'))
+                        .is_some_and(|suffix| suffix.starts_with(" to ") || suffix.starts_with(" ("))
+            });
+            match (matches.next(), matches.next()) {
+                (Some((&id, _)), None) => id,
+                _ => return false,
+            }
+        }
+        None => return false,
+    };
+    let Some(pending) = state.pending_effects.get_mut(&request_id) else {
+        return false;
+    };
+    let Some(index) = pending.recipients.iter().position(|peer| *peer == result.peer_id) else {
+        return false;
+    };
+    if Instant::now() >= pending.deadline {
+        return false;
+    }
+    if !result.ok {
+        pending.recipients.swap_remove(index);
+        if pending.recipients.is_empty() {
+            state.pending_effects.remove(&request_id);
+        }
+        return false;
+    }
+    let entry = state.pending_effects.remove(&request_id).unwrap().entry;
+    state.catalog.record_usage(&entry.match_name);
+    remember_item(
+        state,
+        RecentItem {
+            item: SearchResult::Effect(entry),
+            project_id: None,
+        },
+    );
+    true
+}
+
+fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
+    let query = ui.get_search_text();
+    let catalog = ui.get_active_catalog();
+    let show_history = catalog.as_str() == "all" && query.trim().is_empty();
+    ui.set_show_recent_items(show_history);
+    state.matched_items = if show_history {
+        recent_results(state)
+    } else {
+        state.catalog.search(query.as_str(), catalog.as_str())
+    };
     let total = state.matched_items.len();
     ui.set_total_matches(total as i32);
 
@@ -79,6 +203,25 @@ fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     }
 
     sync_viewport_slice(ui, state);
+}
+
+fn refresh_catalog_ui(ui: &SpotlightWindow, state: &mut AppState, preserve_media: bool) {
+    let selected = state.matched_items.get(state.selected_abs_index).cloned();
+    state.selected_abs_index = 0;
+    state.scroll_offset = 0;
+    refresh_results_ui(ui, state);
+    if let Some(selected) =
+        selected.filter(|item| preserve_media || !matches!(item, SearchResult::ProjectItem(_)))
+    {
+        if let Some(index) = state
+            .matched_items
+            .iter()
+            .position(|item| item.same_item(&selected))
+        {
+            state.selected_abs_index = index;
+            sync_viewport_slice(ui, state);
+        }
+    }
 }
 
 fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
@@ -99,15 +242,31 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
     let slice: Vec<EffectItemUI> = state.matched_items[state.scroll_offset..end]
         .iter()
         .map(|entry| {
-            let (badge_bg, badge_fg) = badge_colors(&entry.effect_type);
+            let (name, category, folder, colors) = match entry {
+                SearchResult::Effect(entry) => (
+                    entry.name.as_str(),
+                    entry.category_short(),
+                    "",
+                    badge_colors(&entry.effect_type),
+                ),
+                SearchResult::ProjectItem(entry) => (
+                    entry.name.as_str(),
+                    entry.kind.label(),
+                    entry.bin_path.as_str(),
+                    badge_colors(match entry.kind {
+                        ProjectItemKind::Media => "media",
+                        ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => "sequence",
+                        ProjectItemKind::Bin => "bin",
+                        ProjectItemKind::Other => "other",
+                    }),
+                ),
+            };
             EffectItemUI {
-                name: SharedString::from(entry.name.as_str()),
-                category: SharedString::from(entry.category_short()),
-                folder: SharedString::from(entry.folder.as_str()),
-                match_name: SharedString::from(entry.match_name.as_str()),
-                effect_type: SharedString::from(entry.effect_type.as_str()),
-                badge_bg,
-                badge_fg,
+                name: name.into(),
+                category: category.into(),
+                folder: folder.into(),
+                badge_bg: colors.0,
+                badge_fg: colors.1,
             }
         })
         .collect();
@@ -131,11 +290,15 @@ fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
     0
 }
 
-fn center_and_show(ui: &SpotlightWindow, state: &mut AppState) {
+fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
     let (cx, cy) = win_focus::primary_screen_center(WINDOW_WIDTH, WINDOW_HEIGHT);
     ui.window().set_position(PhysicalPosition::new(cx, cy));
 
+    ui.set_active_catalog("all".into());
     ui.set_search_text(SharedString::from(""));
+    state.media_catalog = None;
+    state.catalog.set_project_items(Vec::new());
+    bridge.request_project_items();
     state.selected_abs_index = 0;
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
@@ -170,10 +333,42 @@ fn apply_entry_at(
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
         return;
     };
-    state.catalog.record_usage(&chosen.match_name);
-    let sent = bridge.send_apply(&chosen);
-    if sent {
-        ui.set_status_message(SharedString::from(format!("Applied: {}", chosen.name)));
+    if state.pending_placement.is_some() {
+        return;
+    }
+    let chosen = match chosen {
+        SearchResult::Effect(entry) => entry,
+        SearchResult::ProjectItem(entry) => {
+            let Some(catalog) = &state.media_catalog else {
+                return;
+            };
+            match bridge.place_project_item(catalog, entry.item_id.clone()) {
+                Ok(request_id) => {
+                    state.pending_placement = Some(PendingPlacement {
+                        peer_id: catalog.peer_id,
+                        request_id,
+                        deadline: Instant::now() + ACTION_TIMEOUT,
+                        recent: RecentItem {
+                            item: SearchResult::ProjectItem(entry.clone()),
+                            project_id: catalog.project_id.clone(),
+                        },
+                    });
+                    ui.set_status_message(format!("Placing {}…", entry.name).into());
+                }
+                Err(message) => ui.set_status_message(message.into()),
+            }
+            return;
+        }
+    };
+    if let Some((request_id, recipients)) = bridge.send_apply(&chosen) {
+        ui.set_status_message(format!("Applying {}…", chosen.name).into());
+        state
+            .pending_effects
+            .insert(request_id, PendingEffect {
+                entry: chosen,
+                recipients,
+                deadline: Instant::now() + ACTION_TIMEOUT,
+            });
     } else {
         ui.set_status_message(SharedString::from(format!(
             "Selected: {} (Waiting for Premiere bridge)",
@@ -201,6 +396,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let state = Rc::new(RefCell::new(AppState {
         catalog: CatalogStore::new_with_defaults(),
         matched_items: Vec::new(),
+        recent_items: Vec::new(),
+        pending_effects: HashMap::new(),
+        media_catalog: None,
+        pending_placement: None,
         selected_abs_index: 0,
         scroll_offset: 0,
         is_visible: false,
@@ -247,14 +446,21 @@ fn main() -> Result<(), slint::PlatformError> {
                         CATALOG_QUEUE.with(|q| q.borrow_mut().push(items));
                         BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(true));
                     }
-                    BridgeEvent::ApplyResult { ok, message } => {
-                        if !message.is_empty() {
-                            let prefix = if ok { "Premiere:" } else { "Error:" };
+                    BridgeEvent::ApplyResult(result) => {
+                        if !result.message.is_empty() {
+                            let prefix = if result.ok { "Premiere:" } else { "Error:" };
                             ui.set_status_message(SharedString::from(format!(
                                 "{} {}",
-                                prefix, message
+                                prefix, result.message
                             )));
                         }
+                        EFFECT_RESULTS.with(|results| results.borrow_mut().push(result));
+                    }
+                    BridgeEvent::ProjectItemsChanged => {
+                        MEDIA_DIRTY.with(|dirty| dirty.set(true));
+                    }
+                    BridgeEvent::PlacementResult(result) => {
+                        PLACEMENT_QUEUE.with(|q| q.borrow_mut().push(result));
                     }
                     BridgeEvent::ShowWindowRequested => {
                         SHOW_WINDOW_QUEUE.with(|flag| *flag.borrow_mut() = true);
@@ -278,34 +484,12 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Filter pill clicked callback
+    // The header badge and Tab share the catalog switch.
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
-        ui.on_filter_changed(move |new_filter| {
+        ui.on_catalog_changed(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_active_filter(new_filter);
-                let mut st = state_ref.borrow_mut();
-                st.selected_abs_index = 0;
-                st.scroll_offset = 0;
-                refresh_results_ui(&ui, &mut st);
-            }
-        });
-    }
-
-    // Tab key cycles filter
-    {
-        let ui_weak = ui.as_weak();
-        let state_ref = state.clone();
-        ui.on_cycle_filter(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let next = match ui.get_active_filter().as_str() {
-                    "all" => "videoEffect",
-                    "videoEffect" => "audioEffect",
-                    "audioEffect" => "transition",
-                    _ => "all",
-                };
-                ui.set_active_filter(SharedString::from(next));
                 let mut st = state_ref.borrow_mut();
                 st.selected_abs_index = 0;
                 st.scroll_offset = 0;
@@ -386,6 +570,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let tray_ref = tray.clone();
+        let bridge_ref = bridge.clone();
         timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -405,9 +590,71 @@ fn main() -> Result<(), slint::PlatformError> {
                     queue.clear();
                     let mut st = state_ref.borrow_mut();
                     st.catalog.set_catalog(latest);
-                    refresh_results_ui(&ui, &mut st);
+                    refresh_catalog_ui(&ui, &mut st, true);
                 }
             });
+            if MEDIA_DIRTY.with(|dirty| dirty.replace(false)) {
+                let catalog = match bridge_ref.media_catalog() {
+                    Ok(catalog) => catalog,
+                    Err(message) => {
+                        ui.set_status_message(message.into());
+                        None
+                    }
+                };
+                let mut st = state_ref.borrow_mut();
+                let preserve_media =
+                    st.media_catalog
+                        .as_ref()
+                        .zip(catalog.as_ref())
+                        .is_some_and(|(old, new)| {
+                            old.peer_id == new.peer_id
+                                && old.project_id == new.project_id
+                                && old.sequence_id == new.sequence_id
+                        });
+                let items = catalog
+                    .as_ref()
+                    .map(|catalog| catalog.items.clone())
+                    .unwrap_or_default();
+                st.catalog.set_project_items(items);
+                st.media_catalog = catalog;
+                refresh_catalog_ui(&ui, &mut st, preserve_media);
+            }
+            {
+                let mut st = state_ref.borrow_mut();
+                let effects = EFFECT_RESULTS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+                let mut recent_changed = false;
+                for result in effects {
+                    recent_changed |= complete_effect(&mut st, &result);
+                }
+                if recent_changed {
+                    refresh_catalog_ui(&ui, &mut st, true);
+                }
+                st.pending_effects.retain(|_, pending| Instant::now() < pending.deadline);
+                let results = PLACEMENT_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+                if let Some(pending) = &st.pending_placement {
+                    if let Some(result) = results.into_iter().find(|result| {
+                        result.peer_id == pending.peer_id && result.request_id == pending.request_id
+                    }) {
+                        let pending = st.pending_placement.take().unwrap();
+                        if result.ok && Instant::now() < pending.deadline {
+                            remember_item(&mut st, pending.recent);
+                            refresh_catalog_ui(&ui, &mut st, true);
+                        }
+                        ui.set_status_message(result.message.into());
+                        if result.ok
+                            && st.is_visible
+                            && win_focus::get_foreground_hwnd() == extract_window_hwnd(&ui)
+                        {
+                            hide_and_restore_focus(&ui, &mut st);
+                        }
+                    } else if Instant::now() >= pending.deadline {
+                        st.pending_placement = None;
+                        ui.set_status_message(
+                            "Placement outcome unknown. Check the timeline before retrying.".into(),
+                        );
+                    }
+                }
+            }
 
             // 3. Handle System Tray menu / click actions
             while let Some(action) = tray::poll_tray_action() {
@@ -418,7 +665,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         if unminimized_premiere_hwnd != 0 {
                             let mut st = state_ref.borrow_mut();
                             st.previous_hwnd = unminimized_premiere_hwnd;
-                            center_and_show(&ui, &mut st);
+                            center_and_show(&ui, &mut st, &bridge_ref);
                         }
                     }
                     TrayAction::Quit => {
@@ -442,7 +689,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if win_focus::is_premiere_active_and_unminimized(fg_hwnd) {
                     let mut st = state_ref.borrow_mut();
                     st.previous_hwnd = fg_hwnd;
-                    center_and_show(&ui, &mut st);
+                    center_and_show(&ui, &mut st, &bridge_ref);
                 }
             }
 
@@ -488,7 +735,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             hide_and_restore_focus(&ui, &mut st);
                         } else if is_premiere_fg {
                             st.previous_hwnd = fg_hwnd;
-                            center_and_show(&ui, &mut st);
+                            center_and_show(&ui, &mut st, &bridge_ref);
                         }
                     }
                 }
@@ -503,6 +750,189 @@ fn main() -> Result<(), slint::PlatformError> {
 
 thread_local! {
     static CATALOG_QUEUE: RefCell<Vec<Vec<EffectEntry>>> = const { RefCell::new(Vec::new()) };
+    static MEDIA_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PLACEMENT_QUEUE: RefCell<Vec<PlacementResult>> = const { RefCell::new(Vec::new()) };
+    static EFFECT_RESULTS: RefCell<Vec<ApplyResult>> = const { RefCell::new(Vec::new()) };
     static SHOW_WINDOW_QUEUE: RefCell<bool> = const { RefCell::new(false) };
     static BRIDGE_STATUS_QUEUE: RefCell<Option<bool>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slint::platform::{
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+        Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
+    };
+    use slint::{LogicalPosition, PhysicalSize, Rgb8Pixel};
+
+    struct TestPlatform(Rc<MinimalSoftwareWindow>);
+
+    impl Platform for TestPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn search_header_cycles_and_reopens_to_recent_items() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+        ui.set_search_text("Take".into());
+        ui.invoke_focus_search();
+        let press_tab = || {
+            window.dispatch_event(WindowEvent::KeyPressed { text: Key::Tab.into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: Key::Tab.into() });
+        };
+        let click_badge = || {
+            let position = LogicalPosition::new(32., 27.);
+            let button = PointerEventButton::Left;
+            window.dispatch_event(WindowEvent::PointerPressed { position, button });
+            window.dispatch_event(WindowEvent::PointerReleased { position, button });
+        };
+        let badge_color = || {
+            let width = WINDOW_WIDTH as usize;
+            let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
+            window.request_redraw();
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+            pixels[21 * width + 20]
+        };
+        let all_color = badge_color();
+        press_tab();
+        let effects_color = badge_color();
+        press_tab();
+        let project_color = badge_color();
+        assert_ne!(all_color, effects_color);
+        assert_ne!(effects_color, project_color);
+        assert_ne!(all_color, project_color);
+        press_tab();
+        for switch in [&press_tab as &dyn Fn(), &click_badge] {
+            for expected in ["effects", "project", "all"] {
+                switch();
+                assert_eq!(ui.get_active_catalog().as_str(), expected);
+                assert_eq!(ui.get_search_text().as_str(), "Take");
+            }
+        }
+        click_badge();
+        press_tab();
+        assert_eq!(ui.get_active_catalog().as_str(), "project");
+        let mut state = AppState {
+            catalog: CatalogStore::new_with_defaults(),
+            matched_items: vec![],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: None,
+            pending_placement: None,
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            is_visible: true,
+            previous_hwnd: 0,
+        };
+        let effect = EffectEntry {
+            name: "Gaussian Blur".into(),
+            match_name: "blur".into(),
+            effect_type: "videoEffect".into(),
+            folder: String::new(),
+        };
+        let pending = || PendingEffect {
+            entry: effect.clone(),
+            recipients: vec![7],
+            deadline: Instant::now() + ACTION_TIMEOUT,
+        };
+        let ack = |request_id, ok| ApplyResult {
+            peer_id: 7,
+            request_id,
+            ok,
+            message: r#"Applied "Gaussian Blur" to 1 video clip."#.into(),
+        };
+        state.pending_effects.insert(1, pending());
+        assert!(!complete_effect(&mut state, &ack(Some(2), true)));
+        assert!(!complete_effect(&mut state, &ack(Some(1), false)));
+        assert!(state.recent_items.is_empty());
+        state.pending_effects.insert(3, pending());
+        state.pending_effects.insert(4, pending());
+        assert!(!complete_effect(&mut state, &ack(None, true)));
+        assert!(complete_effect(&mut state, &ack(Some(3), true)));
+        let mut other_peer = ack(None, true);
+        other_peer.peer_id = 8;
+        assert!(!complete_effect(&mut state, &other_peer));
+        assert!(complete_effect(&mut state, &ack(None, true)));
+        assert!(!complete_effect(&mut state, &ack(None, true)));
+        let mut both_peers = pending();
+        both_peers.recipients.push(8);
+        state.pending_effects.insert(5, both_peers);
+        assert!(!complete_effect(&mut state, &ack(Some(5), false)));
+        let mut success = ack(Some(5), true);
+        success.peer_id = 8;
+        assert!(complete_effect(&mut state, &success));
+        ui.set_search_text(" take ".into());
+        hide_and_restore_focus(&ui, &mut state);
+        let bridge = BridgeClients::new();
+        center_and_show(&ui, &mut state, &bridge);
+        assert_eq!(ui.get_active_catalog().as_str(), "all");
+        assert!(ui.get_search_text().is_empty());
+        assert_eq!(window.size().height, WINDOW_HEIGHT as u32);
+        assert!(matches!(state.matched_items.as_slice(),
+            [SearchResult::Effect(entry)] if entry.name == "Gaussian Blur"));
+
+        let item = catalog::ProjectItemEntry {
+            item_id: "audio".into(),
+            name: "achievement_sfx.mp3".into(),
+            bin_path: "Audio".into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+        remember_item(&mut state, RecentItem {
+            item: SearchResult::ProjectItem(item.clone()), project_id: Some("project".into()),
+        });
+        state.media_catalog = Some(MediaCatalog {
+            peer_id: 1,
+            project_id: Some("project".into()),
+            sequence_id: Some("sequence".into()),
+            items: vec![item],
+        });
+        refresh_results_ui(&ui, &mut state);
+        assert!(matches!(state.matched_items.as_slice(),
+            [SearchResult::ProjectItem(item), SearchResult::Effect(_)]
+                if item.name == "achievement_sfx.mp3"));
+        state.media_catalog.as_mut().unwrap().project_id = Some("different project".into());
+        refresh_results_ui(&ui, &mut state);
+        assert_eq!(state.matched_items.len(), 1);
+
+        ui.set_search_text("".into());
+        press_tab();
+        press_tab();
+        assert_eq!(ui.get_active_catalog().as_str(), "project");
+
+        state.catalog.set_project_items((1..=8).map(|i| catalog::ProjectItemEntry {
+            item_id: i.to_string(),
+            name: format!("Project item {i}"),
+            bin_path: "Footage / Interview".into(),
+            kind: catalog::ProjectItemKind::Media,
+            offline: false,
+        }).collect());
+        refresh_results_ui(&ui, &mut state);
+        assert_eq!(ui.get_total_matches(), 8);
+        click_badge();
+        click_badge();
+        click_badge();
+        assert_eq!(ui.get_active_catalog().as_str(), "project");
+        ui.set_status_message("This project item can't be placed on the timeline.".into());
+
+        let width = WINDOW_WIDTH as usize;
+        let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
+        window.request_redraw();
+        assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+        for row in 0..8 {
+            let top = (61 + row * 38) * width;
+            let bottom = top + 36 * width;
+            assert!(pixels[top..bottom].iter().any(|pixel| pixel.r > 170), "row {row} should render its label");
+        }
+        assert!(pixels[371 * width..].iter().any(|pixel| pixel.r > 130), "the footer should render its text");
+    }
 }

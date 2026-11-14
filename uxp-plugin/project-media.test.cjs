@@ -1,0 +1,236 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const { test } = require("node:test");
+const vm = require("node:vm");
+
+const source = fs.readFileSync(require.resolve("./index.js"), "utf8");
+const time = (ticks) => ({ ticks: String(ticks) });
+const empty = () => track();
+
+function track({ clips = [], transitions = [], locked = false } = {}) {
+  return {
+    isLocked: () => locked,
+    getTrackItems: (type) => (type === 1 ? clips : transitions).map(([start, end]) => ({
+      getStartTime: () => time(start),
+      getEndTime: () => time(end)
+    }))
+  };
+}
+
+function fixture() {
+  const commits = [];
+  const messages = [];
+  const socket = { readyState: 1, send: (text) => messages.push(JSON.parse(text)) };
+  const seq = {
+    guid: "timeline",
+    getProjectItem: () => ({ getId: () => "self" }),
+    getPlayerPosition: () => time(100),
+    getTimebase: () => "10",
+    video: [track({ clips: [[0, 100], [150, 200]] }), empty()],
+    audio: [empty()],
+    getVideoTrackCount() { return this.video.length; },
+    getVideoTrack(i) { return this.video[i]; },
+    getAudioTrackCount() { return this.audio.length; },
+    getAudioTrack(i) { return this.audio[i]; }
+  };
+  const clip = {
+    isSequence: () => false,
+    isOffline: () => false,
+    getComponentChain: (type) => type === "video" ? {} : null,
+    getInPoint: () => time(50),
+    getOutPoint: () => time(100)
+  };
+  const item = { name: "Take.mov", getId: () => "take", clip };
+  const nest = {
+    name: "Draft",
+    getId: () => "draft",
+    clip: { isSequence: () => true, getSequence: () => ({ guid: "draft", getEndTime: () => time(50) }) }
+  };
+  const self = { ...nest, getId: () => "self", clip: { ...nest.clip, getSequence: () => seq } };
+  const subBin = { name: "Secondary", getId: () => "sub", children: [
+    { ...item, getId: () => "alternate" }
+  ] };
+  const bin = { name: "Footage", getId: () => "bin", children: [subBin, item] };
+  const unsupported = { name: "Other item", getId: () => "other" };
+  const root = { children: [bin, nest, self, unsupported] };
+  let lockHeld = false;
+  const project = {
+    guid: "project",
+    getRootItem: () => ({ getItems: () => root.children }),
+    getActiveSequence: () => seq,
+    lockedAccess(callback) {
+      lockHeld = true;
+      try { callback(); } finally { lockHeld = false; }
+    },
+    executeTransaction(callback, label) {
+      assert.ok(lockHeld);
+      callback({ addAction(action) { commits.push({ action, label }); return true; } });
+      return true;
+    }
+  };
+  const ppro = {
+    Project: { getActiveProject: () => project },
+    FolderItem: { cast(item) {
+      if (!item.children) throw new Error("not a bin");
+      return { getItems: () => item.children };
+    } },
+    ClipProjectItem: { cast: (item) => item.clip },
+    Constants: { TrackItemType: { CLIP: 1, TRANSITION: 2 }, MediaType: { VIDEO: "video", AUDIO: "audio" } },
+    SequenceEditor: { getEditor: () => ({
+      createOverwriteItemAction(item, position, video, audio) {
+        assert.ok(lockHeld);
+        return { itemId: item.getId(), position: position.ticks, video, audio };
+      }
+    }) }
+  };
+  const context = vm.createContext({
+    require: (id) => id === "premierepro" ? ppro : { entrypoints: { setup() {} } },
+    document: { readyState: "loading", addEventListener() {}, getElementById: () => null },
+    WebSocket: { OPEN: 1 }, console, socket
+  });
+  const { placeProjectItem, syncProjectItems, applyEffectToSelection } = vm.runInContext(
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection });", context
+  );
+  return {
+    clip, seq, bin, project, commits, messages, ppro, applyEffectToSelection,
+    place(itemId = "take") {
+      return placeProjectItem({ itemId, projectId: "project", sequenceId: "timeline" }, socket);
+    },
+    scan(id) { return syncProjectItems(socket, id); }
+  };
+}
+
+test("indexes nested bins, sequences, and unsupported Project panel items", async () => {
+  const f = fixture();
+  await f.scan(7);
+  const result = f.messages[0];
+  assert.equal(result.requestId, 7);
+  assert.equal(result.sequenceId, "timeline");
+  assert.deepEqual(result.items.filter((item) => item.name === "Take.mov")
+    .map(({ itemId, binPath }) => [itemId, binPath]).sort(), [
+    ["alternate", "Footage / Secondary"], ["take", "Footage"]
+  ]);
+  assert.deepEqual(result.items.filter((item) => item.kind === "sequence")
+    .map((item) => item.itemId), ["draft"]);
+  assert.deepEqual(result.items.filter((item) => item.kind === "bin")
+    .map(({ itemId, binPath }) => [itemId, binPath]), [["bin", "Project root"], ["sub", "Footage"]]);
+  assert.equal(result.items.find((item) => item.itemId === "self").kind, "activeSequence");
+  assert.equal(result.items.find((item) => item.itemId === "other").kind, "other");
+});
+
+test("indexes offline media and rejects non-placeable items before committing", async () => {
+  const f = fixture();
+  f.clip.isOffline = () => true;
+  await f.scan(7);
+  assert.equal(f.messages[0].items.find((item) => item.itemId === "take").offline, true);
+  await assert.rejects(f.place("bin"), /Bins can't be placed/);
+  await assert.rejects(f.place("other"), /project item can't be placed/);
+  await assert.rejects(f.place("self"), /nest into itself/);
+  await assert.rejects(f.place(), /offline/);
+  assert.deepEqual(f.commits, []);
+});
+
+test("an older scan cannot replace a newer project response", async () => {
+  const f = fixture();
+  const stale = f.scan(1);
+  f.ppro.Project.getActiveProject = () => null;
+  await Promise.all([stale, f.scan(2)]);
+  assert.deepEqual(f.messages.map(({ requestId, projectId }) => [requestId, projectId]), [[2, null]]);
+});
+
+test("places at the playhead in an exact-fit gap using one transaction", async () => {
+  const f = fixture();
+  assert.match(await f.place(), /Placed/);
+  assert.deepEqual(f.commits, [{
+    action: { itemId: "take", position: "100", video: 0, audio: 0 },
+    label: "Place Take.mov"
+  }]);
+});
+
+test("skips short gaps, transitions and locked tracks", async () => {
+  const f = fixture();
+  f.seq.video = [
+    track({ clips: [[149, 160]] }),
+    track({ transitions: [[110, 120]] }),
+    track({ locked: true }),
+    empty()
+  ];
+  await f.place();
+  assert.equal(f.commits[0].action.video, 3);
+});
+
+test("requests fresh indices when a nest has no safe destination", async () => {
+  const f = fixture();
+  f.seq.video = [track({ clips: [[90, 160]] })];
+  f.seq.audio = [empty(), track({ clips: [[90, 160]] })];
+  await f.place("draft");
+  assert.deepEqual(f.commits[0].action, {
+    itemId: "draft", position: "100", video: 1, audio: 2
+  });
+});
+
+test("audio-only sources avoid occupied audio lanes", async () => {
+  const f = fixture();
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.seq.audio = [track({ clips: [[90, 160]] }), empty()];
+  await f.place();
+  assert.equal(f.commits[0].action.audio, 1);
+});
+
+test("linked media checks both track groups", async () => {
+  const f = fixture();
+  f.clip.getComponentChain = () => ({});
+  f.seq.audio = [track({ transitions: [[100, 105]] }), empty()];
+  await f.place();
+  assert.equal(f.commits[0].action.video, 0);
+  assert.equal(f.commits[0].action.audio, 1);
+});
+
+test("stills with unknown duration use an empty track", async () => {
+  const f = fixture();
+  f.clip.getOutPoint = () => null;
+  await f.place();
+  assert.equal(f.commits[0].action.video, 1);
+});
+
+test("video effects still apply to the timeline selection", async () => {
+  const f = fixture();
+  const trackItem = { getComponentChain: () => ({
+    createAppendComponentAction: (component) => ({ component })
+  }) };
+  f.seq.getSelection = () => ({ getTrackItems: () => [trackItem] });
+  f.ppro.VideoFilterFactory = { createComponent: (name) => name };
+  assert.match(await f.applyEffectToSelection({
+    name: "Blur", matchName: "test.blur", effectType: "videoEffect"
+  }), /Applied "Blur"/);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.commits)), [{
+    action: { component: "test.blur" }, label: "Apply Blur"
+  }]);
+});
+
+test("rejects stale context, unavailable items and timeline changes before committing", async () => {
+  const f = fixture();
+  await assert.rejects(f.place("self"), /nest into itself/);
+  await assert.rejects(f.place("missing"), /removed/);
+  f.clip.isOffline = () => true;
+  await assert.rejects(f.place(), /offline/);
+  f.clip.isOffline = () => false;
+  let reads = 0;
+  f.seq.getVideoTrack = () => reads++ === 0 ? empty() : track({ clips: [[95, 155]] });
+  await assert.rejects(f.place(), /Timeline changed/);
+  f.project.getActiveSequence = () => ({ ...f.seq, guid: "other" });
+  await assert.rejects(f.place(), /Active sequence changed/);
+  f.project.getActiveSequence = () => null;
+  await assert.rejects(f.place(), /Open a timeline/);
+  f.ppro.Project.getActiveProject = () => ({ ...f.project, guid: "other project" });
+  await assert.rejects(f.place(), /Active project changed/);
+  assert.equal(f.commits.length, 0);
+});
+
+test("reports host rejection when placement needs fresh tracks", async () => {
+  const f = fixture();
+  f.seq.video = [track({ clips: [[90, 160]] })];
+  f.project.executeTransaction = () => false;
+  await assert.rejects(f.place(), /could not place media on new tracks/);
+  assert.equal(f.commits.length, 0);
+});

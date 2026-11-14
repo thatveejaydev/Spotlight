@@ -16,6 +16,97 @@ pub struct EffectEntry {
     pub folder: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectItemEntry {
+    pub item_id: String,
+    pub name: String,
+    pub bin_path: String,
+    pub kind: ProjectItemKind,
+    #[serde(default)]
+    pub offline: bool,
+}
+
+impl ProjectItemEntry {
+    pub fn placement_error(&self) -> Option<&'static str> {
+        match self.kind {
+            ProjectItemKind::Bin => Some("Bins can't be placed on the timeline."),
+            ProjectItemKind::ActiveSequence => Some("A sequence can't nest into itself."),
+            ProjectItemKind::Other => Some("This project item can't be placed on the timeline."),
+            _ if self.offline => Some("Relink the offline media before placing it."),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectItemKind {
+    Media,
+    Sequence,
+    ActiveSequence,
+    Bin,
+    Other,
+}
+
+impl ProjectItemKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Media => "Media",
+            Self::Sequence | Self::ActiveSequence => "Sequence",
+            Self::Bin => "Bin",
+            Self::Other => "Project Item",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum SearchResult {
+    Effect(EffectEntry),
+    ProjectItem(ProjectItemEntry),
+}
+
+#[derive(Clone, Copy)]
+enum CatalogEntry<'a> {
+    Effect(&'a EffectEntry),
+    ProjectItem(&'a ProjectItemEntry),
+}
+
+impl SearchResult {
+    pub fn same_item(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Effect(a), Self::Effect(b)) => {
+                a.effect_type == b.effect_type && a.match_name == b.match_name
+            }
+            (Self::ProjectItem(a), Self::ProjectItem(b)) => a.item_id == b.item_id,
+            _ => false,
+        }
+    }
+}
+
+impl CatalogEntry<'_> {
+    fn name(&self) -> &str {
+        match self {
+            Self::Effect(entry) => &entry.name,
+            Self::ProjectItem(entry) => &entry.name,
+        }
+    }
+
+    fn folder(&self) -> &str {
+        match self {
+            Self::Effect(entry) => &entry.folder,
+            Self::ProjectItem(entry) => &entry.bin_path,
+        }
+    }
+
+    fn to_result(self) -> SearchResult {
+        match self {
+            Self::Effect(entry) => SearchResult::Effect(entry.clone()),
+            Self::ProjectItem(entry) => SearchResult::ProjectItem(entry.clone()),
+        }
+    }
+}
+
 impl EffectEntry {
     pub fn category_short(&self) -> &'static str {
         match self.effect_type.as_str() {
@@ -27,21 +118,14 @@ impl EffectEntry {
         }
     }
 
-    pub fn matches_filter(&self, filter: &str) -> bool {
-        match filter {
-            "all" | "" => true,
-            "videoEffect" => self.effect_type == "videoEffect",
-            "audioEffect" => self.effect_type == "audioEffect",
-            "transition" => {
-                self.effect_type == "videoTransition" || self.effect_type == "audioTransition"
-            }
-            _ => true,
-        }
+    fn is_supported(&self) -> bool {
+        matches!(self.effect_type.as_str(), "videoEffect" | "audioEffect" | "videoTransition")
     }
 }
 
 pub struct CatalogStore {
     items: Vec<EffectEntry>,
+    project_items: Vec<ProjectItemEntry>,
     usage_counts: HashMap<String, u32>,
     matcher: Matcher,
 }
@@ -50,6 +134,7 @@ impl CatalogStore {
     pub fn new_with_defaults() -> Self {
         Self {
             items: default_premiere_effects(),
+            project_items: Vec::new(),
             usage_counts: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
         }
@@ -71,24 +156,42 @@ impl CatalogStore {
         *count = count.saturating_add(1);
     }
 
-    pub fn search(&mut self, query: &str, filter: &str) -> Vec<EffectEntry> {
+    pub fn set_project_items(&mut self, items: Vec<ProjectItemEntry>) {
+        self.project_items = items;
+    }
+
+    pub fn search(&mut self, query: &str, catalog: &str) -> Vec<SearchResult> {
         let trimmed = query.trim();
+        let effects = self
+            .items
+            .iter()
+            .filter(|item| catalog != "project" && item.is_supported())
+            .map(CatalogEntry::Effect);
+        let project_items = self
+            .project_items
+            .iter()
+            .filter(|_| catalog != "effects")
+            .map(CatalogEntry::ProjectItem);
+        let entries = effects.chain(project_items);
+        let usage = |item: &CatalogEntry| match item {
+            CatalogEntry::Effect(entry) => self
+                .usage_counts
+                .get(&entry.match_name)
+                .copied()
+                .unwrap_or(0),
+            CatalogEntry::ProjectItem(_) => 0,
+        };
 
         if trimmed.is_empty() {
-            let mut filtered: Vec<EffectEntry> = self
-                .items
-                .iter()
-                .filter(|item| item.matches_filter(filter))
-                .cloned()
-                .collect();
+            let mut filtered: Vec<_> = entries.collect();
 
             filtered.sort_by(|a, b| {
-                let ua = self.usage_counts.get(&a.match_name).copied().unwrap_or(0);
-                let ub = self.usage_counts.get(&b.match_name).copied().unwrap_or(0);
-                ub.cmp(&ua)
-                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                usage(b)
+                    .cmp(&usage(a))
+                    .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+                    .then_with(|| a.folder().cmp(b.folder()))
             });
-            return filtered;
+            return filtered.into_iter().map(CatalogEntry::to_result).collect();
         }
 
         let pattern = Pattern::new(
@@ -99,16 +202,13 @@ impl CatalogStore {
         );
         let q_lower = trimmed.to_lowercase();
         let mut buf = Vec::new();
-        let mut scored: Vec<(u32, EffectEntry)> = Vec::new();
+        let mut scored = Vec::new();
 
-        for item in &self.items {
-            if !item.matches_filter(filter) {
-                continue;
-            }
-            let hay = format!("{} {}", item.name, item.folder);
+        for item in entries {
+            let hay = format!("{} {}", item.name(), item.folder());
             let utf32 = Utf32Str::new(&hay, &mut buf);
             if let Some(mut score) = pattern.score(utf32, &mut self.matcher) {
-                let name_lower = item.name.to_lowercase();
+                let name_lower = item.name().to_lowercase();
                 if name_lower == q_lower {
                     score += 500;
                 } else if name_lower.starts_with(&q_lower) {
@@ -116,19 +216,22 @@ impl CatalogStore {
                 } else if name_lower.contains(&q_lower) {
                     score += 80;
                 }
-                let usage = self.usage_counts.get(&item.match_name).copied().unwrap_or(0);
-                score += usage.min(50) * 15;
-                scored.push((score, item.clone()));
+                score += usage(&item).min(50) * 15;
+                scored.push((score, item));
             }
         }
 
         scored.sort_by(|a, b| {
             b.0.cmp(&a.0)
-                .then_with(|| a.1.name.len().cmp(&b.1.name.len()))
-                .then_with(|| a.1.name.cmp(&b.1.name))
+                .then_with(|| a.1.name().len().cmp(&b.1.name().len()))
+                .then_with(|| a.1.name().cmp(b.1.name()))
+                .then_with(|| a.1.folder().cmp(b.1.folder()))
         });
 
-        scored.into_iter().map(|(_, item)| item).collect()
+        scored
+            .into_iter()
+            .map(|(_, item)| item.to_result())
+            .collect()
     }
 }
 
@@ -200,4 +303,54 @@ fn default_premiere_effects() -> Vec<EffectEntry> {
             folder: folder.to_string(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_combines_effects_and_project_items() {
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_project_items(vec![
+            ProjectItemEntry {
+                item_id: "1".into(),
+                name: "Gaussian Blur".into(),
+                bin_path: "Archive / Stills".into(),
+                kind: ProjectItemKind::Media,
+                offline: false,
+            },
+            ProjectItemEntry {
+                item_id: "2".into(),
+                name: "Gaussian Blur".into(),
+                bin_path: "Drafts".into(),
+                kind: ProjectItemKind::Sequence,
+                offline: false,
+            },
+        ]);
+        let all = store.search("Gaussian Blur", "all");
+        assert!(all
+            .iter()
+            .any(|item| matches!(item, SearchResult::Effect(_))));
+        assert_eq!(
+            all.iter()
+                .filter(|item| matches!(item, SearchResult::ProjectItem(_)))
+                .count(),
+            2
+        );
+        assert!(matches!(store.search("Archive", "project").as_slice(),
+            [SearchResult::ProjectItem(item)] if item.item_id == "1"));
+        assert!(store
+            .search("", "effects")
+            .iter()
+            .all(|item| matches!(item, SearchResult::Effect(_))));
+        let effects = store.search("", "effects");
+        for effect_type in ["videoEffect", "audioEffect", "videoTransition"] {
+            assert!(effects.iter().any(|item| {
+                matches!(item, SearchResult::Effect(entry) if entry.effect_type == effect_type)
+            }));
+        }
+        store.set_project_items(Vec::new());
+        assert!(store.search("", "project").is_empty());
+    }
 }

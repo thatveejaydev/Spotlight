@@ -1,12 +1,12 @@
 # Premiere Spotlight (Rust + Slint + Adobe UXP)
 
-An ultra-lightweight, zero-WebView Spotlight effect launcher for Adobe Premiere Pro.
+An ultra-lightweight, zero-WebView Spotlight launcher for Adobe Premiere Pro effects and project media.
 
 ## Architecture
 
 1. **`helper-app/` (Rust + Slint Software Renderer)**
    - **Single process, zero WebView2:** Compiles `.slint` declarative UI directly to native Rust machine code rendered via Slint's CPU software renderer (`renderer-software`).
-   - **Global Hotkey (`Ctrl + Space`):** Toggles the frameless centered floating window (`620×430`) and automatically restores keyboard focus to Adobe Premiere Pro when you press `Enter` or `Esc`.
+   - **Global Hotkey (`Ctrl + Space`):** Toggles the frameless centered floating window (`620×407`).
    - **Fuzzy Search (`nucleo-matcher`):** Sub-millisecond typo-tolerant fuzzy search across Video Effects, Audio Effects, and Transitions, boosted by usage frequency.
    - **Localhost WebSocket Bridge (`ws://127.0.0.1:3847`):** Event-driven, 0% idle CPU bridge to Premiere Pro.
 
@@ -29,8 +29,8 @@ cargo run --release
 3. With Adobe Premiere Pro open, click **Load** on **Premiere Spotlight Bridge**.
 
 ## Keyboard Controls (Inside Spotlight Popup)
-- **Type:** Instant fuzzy search across effects & transitions
+- **Type:** Fuzzy search effects, transitions, and items in the active project. Project results show their bin path.
 - **`↑` / `↓` Arrows:** Navigate results
-- **`Tab`:** Cycle category filter (`All` → `Video FX` → `Audio FX` → `Transitions`)
-- **`Enter` (or Click):** Apply selected effect to selected timeline clip(s) and return focus to Premiere
+- **`Tab` (or click the search-bar badge):** Switch catalogs (`All` → `Effects` → `Project`). Spotlight opens in `All` and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
+- **`Enter` (or Click):** Apply an effect to selected timeline clips, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
 - **`Esc`:** Close popup and return focus to Premiere

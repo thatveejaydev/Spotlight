@@ -12,6 +12,11 @@ let started = false;
 let cachedCatalog = [];
 let failedConnects = 0;
 let launchAttempted = false;
+let mediaRequestId = 0;
+let mediaScanGeneration = 0;
+let projectContextRevision = 0;
+let projectEventBindings = [];
+let placementInProgress = false;
 
 const TICKS_PER_SECOND = 254016000000n;
 const DEFAULT_TICKS_PER_FRAME_30FPS = 8467200000n;
@@ -150,6 +155,310 @@ async function scanPremiereCatalog() {
   cachedCatalog = items;
   setStats(`Indexed ${items.length} effects & transitions`);
   return items;
+}
+
+async function* projectEntries(project) {
+  const folders = [{ folder: await project.getRootItem(), path: "" }];
+  const seen = new Set();
+  while (folders.length > 0) {
+    const { folder, path } = folders.pop();
+    for (const item of await folder.getItems()) {
+      const itemId = item.getId();
+      if (!itemId || seen.has(itemId)) continue;
+      seen.add(itemId);
+      let child;
+      try {
+        child = ppro.FolderItem.cast(item);
+      } catch (_) {
+        // Older Premiere builds throw when casting a non-bin ProjectItem.
+      }
+      if (typeof child?.getItems === "function") {
+        folders.push({ folder: child, path: path ? `${path} / ${item.name}` : item.name });
+        yield { item, itemId, path, bin: true };
+        continue;
+      }
+      let clip;
+      try {
+        clip = ppro.ClipProjectItem.cast(item);
+      } catch (_) {
+        // Some Project Panel entries cannot be edited onto a timeline.
+      }
+      yield { item, itemId, path, clip: typeof clip?.isSequence === "function" ? clip : null };
+    }
+  }
+}
+
+function guid(object) {
+  return object?.guid?.toString() || null;
+}
+
+function sendProjectItems(connection, requestId, projectId, sequenceId, items) {
+  if (connection && ws === connection) {
+    sendJson({ type: "project_items", requestId, projectId, sequenceId, items });
+  }
+}
+
+async function syncProjectItems(connection, requestId, clear = false) {
+  if (!connection || ws !== connection) return;
+  const generation = ++mediaScanGeneration;
+  if (clear) sendProjectItems(connection, requestId, null, null, []);
+  const items = [];
+  try {
+    const project = await ppro.Project.getActiveProject();
+    const projectId = guid(project);
+    const sequence = await project?.getActiveSequence();
+    const sequenceId = guid(sequence);
+    if (projectId) {
+      const activeItemId = (await sequence?.getProjectItem())?.getId();
+      for await (const { item, clip, itemId, path, bin } of projectEntries(project)) {
+        if (generation !== mediaScanGeneration || ws !== connection) return;
+        let kind = bin ? "bin" : "other";
+        let offline = false;
+        if (itemId === activeItemId) {
+          kind = "activeSequence";
+        } else if (clip) {
+          try {
+            kind = await clip.isSequence() ? "sequence" : "media";
+            if (kind === "media") offline = Boolean(await clip.isOffline?.());
+          } catch (_) {
+            // Keep items visible even when Premiere cannot classify their source.
+          }
+        }
+        items.push({ itemId, name: item.name, binPath: path || "Project root", kind, offline });
+      }
+    }
+    const currentProject = await ppro.Project.getActiveProject();
+    const currentSequence = await currentProject?.getActiveSequence();
+    if (generation === mediaScanGeneration) {
+      if (guid(currentProject) === projectId && guid(currentSequence) === sequenceId) {
+        sendProjectItems(connection, requestId, projectId, sequenceId, items);
+      } else {
+        sendProjectItems(connection, requestId, null, null, []);
+      }
+    }
+  } catch (error) {
+    if (generation === mediaScanGeneration) {
+      sendProjectItems(connection, requestId, null, null, []);
+      console.warn("[Spotlight] Project media scan failed:", error);
+    }
+  }
+}
+
+function bindProjectEvents() {
+  const constants = ppro.Constants;
+  const contextChanged = () => {
+    ++projectContextRevision;
+    void syncProjectItems(ws, mediaRequestId, true);
+  };
+  const rescanEvents = [
+    constants?.ProjectEvent?.ACTIVATED ?? ppro.ProjectEvent?.EVENT_ACTIVATED,
+    constants?.ProjectEvent?.CLOSED ?? ppro.ProjectEvent?.EVENT_CLOSED,
+    constants?.SequenceEvent?.ACTIVATED,
+    constants?.OperationCompleteEvent?.IMPORT_MEDIA_COMPLETE
+  ];
+  const markChanged = () => { ++projectContextRevision; };
+  const timelineEvents = [
+    constants?.ProjectEvent?.DIRTY ?? ppro.ProjectEvent?.EVENT_DIRTY,
+    ppro.VideoTrack?.EVENT_TRACK_CHANGED,
+    ppro.VideoTrack?.EVENT_TRACK_LOCK_CHANGED,
+    ppro.AudioTrack?.EVENT_TRACK_CHANGED,
+    ppro.AudioTrack?.EVENT_TRACK_LOCK_CHANGED
+  ];
+  const bindings = new Map([
+    ...timelineEvents.map((event) => [event, markChanged]),
+    ...rescanEvents.map((event) => [event, contextChanged])
+  ]);
+  for (const [event, listener] of bindings) {
+    if (event === undefined || typeof ppro.EventManager?.addGlobalEventListener !== "function") continue;
+    try {
+      ppro.EventManager.addGlobalEventListener(event, listener, true);
+      projectEventBindings.push([event, listener]);
+    } catch (error) {
+      console.warn("[Spotlight] Could not subscribe to project event:", error);
+    }
+  }
+}
+
+function readTicks(time) {
+  if (typeof time?.ticks === "bigint") return time.ticks;
+  if (typeof time?.ticks === "string" && /^-?\d+$/.test(time.ticks)) return BigInt(time.ticks);
+  if (Number.isSafeInteger(time?.ticks)) return BigInt(time.ticks);
+  throw new Error("Premiere could not provide a valid timeline time.");
+}
+
+async function sourceFootprint(clip, nested) {
+  if (nested) {
+    // Premiere determines a nest's routing. Reserve both track groups.
+    const end = readTicks(await nested.getEndTime());
+    return { video: end > 0n ? end : null, audio: end > 0n ? end : null };
+  }
+  const mediaTypes = ppro.Constants.MediaType;
+  let mediaDuration = null;
+  try {
+    const media = await clip.getMedia?.();
+    mediaDuration = readTicks(await (media?.getDuration?.() ?? media?.duration));
+  } catch (_) {
+    // Stills and some generated sources have no finite media duration.
+  }
+
+  async function span(type) {
+    let chain;
+    try {
+      chain = await clip.getComponentChain(type);
+    } catch (_) {
+      return null;
+    }
+    if (chain === null) return 0n;
+    if (!chain) return null;
+    try {
+      const start = readTicks(await clip.getInPoint(type));
+      const end = readTicks(await clip.getOutPoint(type));
+      if (start >= 0n && end > start) return end - start;
+    } catch (_) {
+      // Source marks can be absent for some project items.
+    }
+    return mediaDuration > 0n ? mediaDuration : null;
+  }
+  const [video, audio] = await Promise.all([span(mediaTypes.VIDEO), span(mediaTypes.AUDIO)]);
+  return { video, audio };
+}
+
+async function trackLayout(sequence, kind) {
+  const count = await sequence[`get${kind}TrackCount`]();
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error("Premiere could not verify the destination tracks.");
+  }
+  const trackItemType = ppro.Constants.TrackItemType;
+  const tracks = [];
+  for (let index = 0; index < count; index++) {
+    const track = await sequence[`get${kind}Track`](index);
+    if (!track) throw new Error("Premiere could not verify the destination tracks.");
+    let locked = false;
+    if (typeof track.isLocked === "function") locked = await track.isLocked();
+    let ranges = null;
+    try {
+      const clips = track.getTrackItems(trackItemType.CLIP, false);
+      const transitions = track.getTrackItems(trackItemType.TRANSITION, false);
+      if (Array.isArray(clips) && Array.isArray(transitions)) {
+        ranges = await Promise.all([...clips, ...transitions].map(async (item) => {
+          const start = readTicks(await item.getStartTime());
+          const end = readTicks(await item.getEndTime());
+          if (end <= start) throw new Error("Unverified track item span");
+          return [start, end];
+        }));
+      }
+    } catch (_) {
+      // Treat a track with unreadable clip or transition bounds as occupied.
+    }
+    tracks.push({ id: track.id, locked, ranges });
+  }
+  return tracks;
+}
+
+function firstSafeTrack(tracks, start, duration, maySpanTracks) {
+  if (duration === 0n) return 0;
+  const hasRoom = (track) => !track.locked && track.ranges !== null &&
+    (duration === null ? track.ranges.length === 0 :
+      track.ranges.every(([itemStart, itemEnd]) => start + duration <= itemStart || itemEnd <= start));
+  // Source channel mapping is not exposed. Reserve every possible downstream audio lane.
+  const index = tracks.findIndex((track, index) => hasRoom(track) &&
+    (!maySpanTracks || tracks.slice(index + 1).every(hasRoom)));
+  return index === -1 ? tracks.length : index;
+}
+
+async function placeProjectItem(payload, connection) {
+  const revision = projectContextRevision;
+  const project = await ppro.Project.getActiveProject();
+  if (!project || guid(project) !== payload.projectId) {
+    throw new Error("Active project changed. Search again.");
+  }
+  const sequence = await project.getActiveSequence();
+  const sequenceId = guid(sequence);
+  if (!sequenceId) throw new Error("Open a timeline before placing media.");
+  if (sequenceId !== payload.sequenceId) throw new Error("Active sequence changed. Search again.");
+  const editor = ppro.SequenceEditor?.getEditor(sequence);
+  if (!editor) throw new Error("Premiere could not open the timeline editor.");
+
+  let source;
+  for await (const candidate of projectEntries(project)) {
+    if (candidate.itemId === payload.itemId) {
+      source = candidate;
+      break;
+    }
+  }
+  if (!source) throw new Error("Project item was removed. Search again.");
+  if (source.bin) throw new Error("Bins can't be placed on the timeline.");
+  if (!source.clip) throw new Error("This project item can't be placed on the timeline.");
+  if ((await sequence.getProjectItem())?.getId() === source.itemId) {
+    throw new Error("A sequence cannot nest into itself.");
+  }
+  if (await source.clip.isOffline?.()) throw new Error("Relink the offline media before placing it.");
+  const isSequence = await source.clip.isSequence();
+  const nested = isSequence ? await source.clip.getSequence() : null;
+  if (isSequence && !nested) throw new Error("Premiere could not resolve the source sequence.");
+  if (nested && guid(nested) === sequenceId) throw new Error("A sequence cannot nest into itself.");
+
+  const position = await sequence.getPlayerPosition();
+  const start = readTicks(position);
+  if (start < 0n) throw new Error("Move the playhead into the timeline before placing media.");
+  const footprint = await sourceFootprint(source.clip, nested);
+  if (footprint.video === 0n && footprint.audio === 0n) {
+    throw new Error("Premiere could not identify editable media in this item.");
+  }
+  // Video placement can align the edit to sequence frames. Round the protected end outward.
+  const frame = BigInt(await sequence.getTimebase());
+  if (frame <= 0n) throw new Error("Premiere could not verify the timeline frame rate.");
+  const protectedStart = start / frame * frame;
+  const protectedDuration = (duration) => {
+    if (duration === null || duration === 0n) return duration;
+    return ((start + duration + frame - 1n) / frame * frame) - protectedStart;
+  };
+  const snapshot = () => Promise.all([trackLayout(sequence, "Video"), trackLayout(sequence, "Audio")]);
+  const trials = await snapshot();
+  const confirmedFootprint = await sourceFootprint(source.clip, nested);
+  const latest = await snapshot();
+  if (await source.clip.isOffline?.()) throw new Error("Relink the offline media before placing it.");
+  const latestProject = await ppro.Project.getActiveProject();
+  const latestSequence = await latestProject?.getActiveSequence();
+  const latestPlayhead = await latestSequence?.getPlayerPosition();
+  const signature = (layout) => JSON.stringify(layout, (_, value) =>
+    typeof value === "bigint" ? value.toString() : value);
+  if (guid(latestProject) !== payload.projectId || guid(latestSequence) !== sequenceId ||
+      readTicks(latestPlayhead) !== start || signature(trials) !== signature(latest) ||
+      footprint.video !== confirmedFootprint.video || footprint.audio !== confirmedFootprint.audio) {
+    throw new Error("Timeline changed before placement. Try again.");
+  }
+  const [videoTracks, audioTracks] = latest;
+  const longest = footprint.video === null || footprint.audio === null ? null :
+    (footprint.video > footprint.audio ? footprint.video : footprint.audio);
+  const videoSpan = footprint.video === 0n ? 0n : longest;
+  const audioSpan = footprint.audio === 0n ? 0n : longest;
+  const video = firstSafeTrack(videoTracks, protectedStart, protectedDuration(videoSpan), Boolean(nested));
+  const audio = firstSafeTrack(audioTracks, protectedStart, protectedDuration(audioSpan), true);
+  const usesNewTrack = (footprint.video !== 0n && video === videoTracks.length) ||
+    (footprint.audio !== 0n && audio === audioTracks.length);
+  let committed = false;
+  project.lockedAccess(() => {
+    if (revision !== projectContextRevision || ws !== connection || connection.readyState !== WebSocket.OPEN) {
+      throw new Error("Premiere context changed before placement.");
+    }
+    try {
+      const action = editor.createOverwriteItemAction(source.item, position, video, audio);
+      if (!action) throw new Error("Premiere could not prepare a safe placement.");
+      committed = project.executeTransaction((tx) => {
+        if (!tx.addAction(action)) throw new Error("Premiere rejected the placement action.");
+      }, `Place ${source.item.name}`);
+    } catch (error) {
+      if (!usesNewTrack) throw error;
+      throw new Error(`Premiere could not place media on new tracks: ${error.message || error}`);
+    }
+  });
+  if (!committed) {
+    throw new Error(usesNewTrack
+      ? "Premiere could not place media on new tracks. Add an empty track and retry."
+      : "Premiere rejected the placement. Check track locks and media compatibility.");
+  }
+  return `Placed "${source.item.name}" at the playhead.`;
 }
 
 function resolveEffectEntry(payload) {
@@ -637,6 +946,8 @@ function connectBridge() {
     failedConnects = 0;
     launchAttempted = true;
     sendJson({ type: "ping" });
+    mediaRequestId = 0;
+    void syncProjectItems(connection, mediaRequestId, true);
     setBadge(true, "Connected");
     setLog(`Connected to Spotlight helper (${url}).`);
     try {
@@ -653,16 +964,39 @@ function connectBridge() {
     if (ws !== connection || typeof event.data !== "string") return;
     try {
       const msg = JSON.parse(event.data);
-      if (msg.type === "apply_effect") {
+      if (msg.type === "request_project_items" && Number.isSafeInteger(msg.requestId)) {
+        mediaRequestId = msg.requestId;
+        void syncProjectItems(connection, mediaRequestId);
+      } else if (msg.type === "place_project_item" && Number.isSafeInteger(msg.requestId)) {
+        let ok = false;
+        let message;
+        if (placementInProgress) {
+          message = "A media placement is already in progress.";
+        } else {
+          placementInProgress = true;
+          try {
+            message = await placeProjectItem(msg, connection);
+            ok = true;
+          } catch (error) {
+            message = error.message || String(error);
+          } finally {
+            placementInProgress = false;
+          }
+        }
+        if (ws === connection) {
+          setLog(message);
+          sendJson({ type: "placement_ack", requestId: msg.requestId, ok, message });
+        }
+      } else if (msg.type === "apply_effect") {
         setLog(`Applying ${msg.name}...`);
         try {
           const resultMsg = await applyEffectToSelection(msg);
           setLog(resultMsg);
-          sendJson({ type: "ack", ok: true, message: resultMsg });
+          if (ws === connection) sendJson({ type: "ack", requestId: msg.requestId, ok: true, message: resultMsg });
         } catch (err) {
           const errMsg = err && err.message ? err.message : String(err);
           setLog(`Error: ${errMsg}`);
-          sendJson({ type: "ack", ok: false, message: errMsg });
+          if (ws === connection) sendJson({ type: "ack", requestId: msg.requestId, ok: false, message: errMsg });
         }
       } else if (msg.type === "request_catalog") {
         const items = await scanPremiereCatalog();
@@ -704,6 +1038,7 @@ function bindPanelUI() {
   uiBound = true;
   btn.addEventListener("click", async () => {
     setLog("Scanning Premiere Pro effects...");
+    void syncProjectItems(ws, mediaRequestId);
     const items = await scanPremiereCatalog();
     if (ws && ws.readyState === WebSocket.OPEN) {
       sendJson({ type: "catalog", effects: items });
@@ -724,14 +1059,25 @@ async function startPlugin() {
     return;
   }
   started = true;
+  bindProjectEvents();
   try {
     await scanPremiereCatalog();
   } catch (_) {}
-  connectBridge();
+  if (started) connectBridge();
 }
 
 function stopPlugin() {
   started = false;
+  ++mediaScanGeneration;
+  ++projectContextRevision;
+  for (const [event, listener] of projectEventBindings) {
+    try {
+      ppro.EventManager.removeGlobalEventListener?.(event, listener, true);
+    } catch (error) {
+      console.warn("[Spotlight] Could not remove project event listener:", error);
+    }
+  }
+  projectEventBindings = [];
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;

@@ -1,4 +1,4 @@
-use crate::catalog::EffectEntry;
+use crate::catalog::{EffectEntry, ProjectItemEntry};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
@@ -25,7 +25,22 @@ pub enum IncomingPluginMessage {
     #[serde(rename = "ack")]
     Ack {
         ok: bool,
+        #[serde(rename = "requestId", default)]
+        request_id: Option<u64>,
         #[serde(default)]
+        message: String,
+    },
+    #[serde(rename = "project_items", rename_all = "camelCase")]
+    ProjectItems {
+        request_id: u64,
+        project_id: Option<String>,
+        sequence_id: Option<String>,
+        items: Vec<ProjectItemEntry>,
+    },
+    #[serde(rename = "placement_ack", rename_all = "camelCase")]
+    PlacementAck {
+        request_id: u64,
+        ok: bool,
         message: String,
     },
     #[serde(rename = "ping")]
@@ -44,8 +59,19 @@ pub struct TransitionDurationPref {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum OutgoingHelperMessage {
+    #[serde(rename = "request_project_items", rename_all = "camelCase")]
+    RequestProjectItems { request_id: u64 },
+    #[serde(rename = "place_project_item", rename_all = "camelCase")]
+    PlaceProjectItem {
+        request_id: u64,
+        project_id: String,
+        sequence_id: String,
+        item_id: String,
+    },
     #[serde(rename = "apply_effect")]
     ApplyEffect {
+        #[serde(rename = "requestId")]
+        request_id: u64,
         name: String,
         #[serde(rename = "matchName")]
         match_name: String,
@@ -190,8 +216,24 @@ pub enum BridgeEvent {
     ClientConnected,
     ClientDisconnected,
     CatalogReceived(Vec<EffectEntry>),
-    ApplyResult { ok: bool, message: String },
+    ApplyResult(ApplyResult),
+    ProjectItemsChanged,
+    PlacementResult(PlacementResult),
     ShowWindowRequested,
+}
+
+pub struct ApplyResult {
+    pub peer_id: usize,
+    pub request_id: Option<u64>,
+    pub ok: bool,
+    pub message: String,
+}
+
+pub struct PlacementResult {
+    pub peer_id: usize,
+    pub request_id: u64,
+    pub ok: bool,
+    pub message: String,
 }
 
 /// Checks if another instance of Premiere Spotlight is already listening on 127.0.0.1:3847.
@@ -219,23 +261,106 @@ pub fn check_or_wake_existing_instance(show_window: bool) -> bool {
 
 #[derive(Clone, Default)]
 pub struct BridgeClients {
-    peers: Arc<Mutex<Vec<Sender<String>>>>,
-    active_count: Arc<AtomicUsize>,
+    peers: Arc<Mutex<Vec<Peer>>>,
+    next_id: Arc<AtomicUsize>,
+}
+
+struct Peer {
+    id: usize,
+    tx: Sender<String>,
+    media: Option<MediaCatalog>,
+    requested: u64,
+}
+
+#[derive(Clone)]
+pub struct MediaCatalog {
+    pub peer_id: usize,
+    pub project_id: Option<String>,
+    pub sequence_id: Option<String>,
+    pub items: Vec<ProjectItemEntry>,
 }
 
 impl BridgeClients {
     pub fn new() -> Self {
-        Self {
-            peers: Arc::new(Mutex::new(Vec::new())),
-            active_count: Arc::new(AtomicUsize::new(0)),
+        Self::default()
+    }
+
+    pub fn media_catalog(&self) -> Result<Option<MediaCatalog>, &'static str> {
+        let peers = self.peers.lock().unwrap();
+        let mut catalogs = peers.iter().filter_map(|peer| peer.media.as_ref());
+        let first = catalogs.next();
+        if catalogs.next().is_some() {
+            return Err("Multiple Premiere sessions. Close the other session to place media.");
+        }
+        Ok(first.cloned())
+    }
+
+    pub fn request_project_items(&self) {
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let msg = OutgoingHelperMessage::RequestProjectItems { request_id };
+        let json = serde_json::to_string(&msg).unwrap();
+        for peer in self.peers.lock().unwrap().iter_mut() {
+            peer.requested = request_id;
+            if let Some(media) = &mut peer.media {
+                media.items.clear();
+            }
+            let _ = peer.tx.send(json.clone());
         }
     }
 
-    pub fn send_apply(&self, entry: &EffectEntry) -> bool {
+    pub fn place_project_item(
+        &self,
+        catalog: &MediaCatalog,
+        item_id: String,
+    ) -> Result<u64, &'static str> {
+        let peers = self.peers.lock().unwrap();
+        let mut media_peers = peers.iter().filter(|peer| peer.media.is_some());
+        let Some(peer) = media_peers.next() else {
+            return Err("Premiere media bridge disconnected.");
+        };
+        if media_peers.next().is_some() {
+            return Err("Close the other Premiere session before placing media.");
+        }
+        let current = peer.media.as_ref().unwrap();
+        if peer.id != catalog.peer_id
+            || current.project_id != catalog.project_id
+            || current.sequence_id != catalog.sequence_id
+        {
+            return Err("Project media changed. Search again.");
+        }
+        let entry = current.items.iter().find(|entry| entry.item_id == item_id)
+            .ok_or("Project media changed. Search again.")?;
+        if let Some(message) = entry.placement_error() {
+            return Err(message);
+        }
+        let project_id = current
+            .project_id
+            .clone()
+            .ok_or("Open a Premiere project first.")?;
+        let sequence_id = current
+            .sequence_id
+            .clone()
+            .ok_or("Open a timeline before placing media.")?;
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let msg = OutgoingHelperMessage::PlaceProjectItem {
+            request_id,
+            project_id,
+            sequence_id,
+            item_id,
+        };
+        peer.tx
+            .send(serde_json::to_string(&msg).unwrap())
+            .map_err(|_| "Premiere media bridge disconnected.")?;
+        Ok(request_id)
+    }
+
+    pub fn send_apply(&self, entry: &EffectEntry) -> Option<(u64, Vec<usize>)> {
         let (video_transition_duration, audio_transition_duration) =
             read_premiere_transition_prefs();
 
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
         let msg = OutgoingHelperMessage::ApplyEffect {
+            request_id,
             name: entry.name.clone(),
             match_name: entry.match_name.clone(),
             effect_type: entry.effect_type.clone(),
@@ -243,19 +368,16 @@ impl BridgeClients {
             audio_transition_duration,
         };
         let Ok(json) = serde_json::to_string(&msg) else {
-            return false;
+            return None;
         };
 
-        let mut peers = self.peers.lock().unwrap();
-        let mut sent_any = false;
-        peers.retain(|tx| match tx.send(json.clone()) {
-            Ok(()) => {
-                sent_any = true;
-                true
-            }
-            Err(_) => false,
-        });
-        sent_any
+        let peers = self.peers.lock().unwrap();
+        let recipients: Vec<_> = peers
+            .iter()
+            .filter(|peer| peer.tx.send(json.clone()).is_ok())
+            .map(|peer| peer.id)
+            .collect();
+        (!recipients.is_empty()).then_some((request_id, recipients))
     }
 
     pub fn start_server<F>(&self, on_event: F)
@@ -265,8 +387,7 @@ impl BridgeClients {
         let callback = Arc::new(on_event);
 
         for addr in BRIDGE_ADDRS {
-            let peers = self.peers.clone();
-            let active_count = self.active_count.clone();
+            let bridge = self.clone();
             let cb = callback.clone();
             let bind_addr = addr.to_string();
 
@@ -281,12 +402,11 @@ impl BridgeClients {
                 );
 
                 for stream in listener.incoming().flatten() {
-                    let peers_ref = peers.clone();
-                    let count_ref = active_count.clone();
+                    let bridge = bridge.clone();
                     let cb_ref = cb.clone();
 
                     thread::spawn(move || {
-                        handle_client(stream, peers_ref, count_ref, cb_ref);
+                        handle_client(stream, bridge, cb_ref);
                     });
                 }
             });
@@ -294,12 +414,8 @@ impl BridgeClients {
     }
 }
 
-fn handle_client<F>(
-    stream: TcpStream,
-    peers: Arc<Mutex<Vec<Sender<String>>>>,
-    active_count: Arc<AtomicUsize>,
-    cb: Arc<F>,
-) where
+fn handle_client<F>(stream: TcpStream, bridge: BridgeClients, cb: Arc<F>)
+where
     F: Fn(BridgeEvent) + Send + Sync + 'static,
 {
     let _ = stream.set_nodelay(true);
@@ -315,6 +431,7 @@ fn handle_client<F>(
         .set_read_timeout(Some(Duration::from_millis(25)));
 
     let (tx, rx) = mpsc::channel::<String>();
+    let peer_id = bridge.next_id.fetch_add(1, Ordering::Relaxed);
     let mut is_plugin_client = false;
 
     // Ask plugin to send its catalog right away
@@ -338,18 +455,59 @@ fn handle_client<F>(
         match ws.read() {
             Ok(Message::Text(txt)) => {
                 if let Ok(parsed) = serde_json::from_str::<IncomingPluginMessage>(&txt) {
-                    if !is_plugin_client && !matches!(parsed, IncomingPluginMessage::ShowWindow) {
+                    if !is_plugin_client
+                        && !matches!(
+                            parsed,
+                            IncomingPluginMessage::ShowWindow
+                                | IncomingPluginMessage::Ack { .. }
+                                | IncomingPluginMessage::PlacementAck { .. }
+                        )
+                    {
                         is_plugin_client = true;
-                        peers.lock().unwrap().push(tx.clone());
-                        active_count.fetch_add(1, Ordering::SeqCst);
+                        bridge.peers.lock().unwrap().push(Peer {
+                            id: peer_id,
+                            tx: tx.clone(),
+                            media: None,
+                            requested: 0,
+                        });
                         cb(BridgeEvent::ClientConnected);
                     }
                     match parsed {
                         IncomingPluginMessage::Catalog { effects } => {
                             cb(BridgeEvent::CatalogReceived(effects));
                         }
-                        IncomingPluginMessage::Ack { ok, message } => {
-                            cb(BridgeEvent::ApplyResult { ok, message });
+                        IncomingPluginMessage::Ack { request_id, ok, message } => {
+                            if is_plugin_client {
+                                cb(BridgeEvent::ApplyResult(ApplyResult {
+                                    peer_id, request_id, ok, message,
+                                }));
+                            }
+                        }
+                        IncomingPluginMessage::ProjectItems {
+                            request_id,
+                            project_id,
+                            sequence_id,
+                            items,
+                        } => {
+                            let mut peers = bridge.peers.lock().unwrap();
+                            let peer = peers.iter_mut().find(|peer| peer.id == peer_id).unwrap();
+                            if peer.accept_catalog(request_id, project_id, sequence_id, items) {
+                                cb(BridgeEvent::ProjectItemsChanged);
+                            }
+                        }
+                        IncomingPluginMessage::PlacementAck {
+                            request_id,
+                            ok,
+                            message,
+                        } => {
+                            if is_plugin_client {
+                                cb(BridgeEvent::PlacementResult(PlacementResult {
+                                    peer_id,
+                                    request_id,
+                                    ok,
+                                    message,
+                                }));
+                            }
                         }
                         IncomingPluginMessage::Ping => {}
                         IncomingPluginMessage::ShowWindow => {
@@ -375,9 +533,146 @@ fn handle_client<F>(
     }
 
     if is_plugin_client {
-        let remaining = active_count.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
-        if remaining == 0 {
+        let mut peers = bridge.peers.lock().unwrap();
+        peers.retain(|peer| peer.id != peer_id);
+        cb(BridgeEvent::ProjectItemsChanged);
+        if peers.is_empty() {
             cb(BridgeEvent::ClientDisconnected);
         }
+    }
+}
+
+impl Peer {
+    fn accept_catalog(
+        &mut self,
+        request_id: u64,
+        project_id: Option<String>,
+        sequence_id: Option<String>,
+        items: Vec<ProjectItemEntry>,
+    ) -> bool {
+        if request_id == self.requested {
+            self.media = Some(MediaCatalog {
+                peer_id: self.id,
+                project_id,
+                sequence_id,
+                items,
+            });
+            true
+        } else if request_id == 0 && self.media.is_none() {
+            // Capability announcement can precede the response to the latest refresh.
+            self.media = Some(MediaCatalog {
+                peer_id: self.id,
+                project_id: None,
+                sequence_id: None,
+                items: Vec::new(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_commands_and_acknowledgments_support_request_ids_and_legacy_replies() {
+        let bridge = BridgeClients::new();
+        let (tx, rx) = mpsc::channel();
+        bridge.peers.lock().unwrap().push(Peer { id: 7, tx, media: None, requested: 0 });
+        let effect = EffectEntry {
+            name: "Gaussian Blur".into(),
+            match_name: "blur".into(),
+            effect_type: "videoEffect".into(),
+            folder: String::new(),
+        };
+        let (id, recipients) = bridge.send_apply(&effect).unwrap();
+        assert_eq!(recipients, [7]);
+        let command: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(command["requestId"], id);
+        for request_id in [Some(id), None] {
+            let mut reply = serde_json::json!({"type":"ack","ok":true,"message":"Applied effect"});
+            if let Some(id) = request_id {
+                reply["requestId"] = id.into();
+            }
+            assert!(matches!(
+                serde_json::from_value::<IncomingPluginMessage>(reply).unwrap(),
+                IncomingPluginMessage::Ack { request_id: actual, ok: true, .. } if actual == request_id
+            ));
+        }
+    }
+
+    #[test]
+    fn media_placement_is_scoped_to_the_current_catalog_and_peer() {
+        let bridge = BridgeClients::new();
+        let (tx, rx) = mpsc::channel();
+        let IncomingPluginMessage::ProjectItems { request_id, project_id, sequence_id, items } =
+            serde_json::from_str(r#"{"type":"project_items","requestId":3,"projectId":"p","sequenceId":"s","items":[
+                {"itemId":"i","name":"Clip","binPath":"Bin","kind":"media"},
+                {"itemId":"b","name":"Bin","binPath":"Project root","kind":"bin"},
+                {"itemId":"a","name":"Active","binPath":"Project root","kind":"activeSequence"},
+                {"itemId":"o","name":"Other","binPath":"Project root","kind":"other"},
+                {"itemId":"f","name":"Offline","binPath":"Project root","kind":"media","offline":true}
+            ]}"#).unwrap()
+        else {
+            panic!("expected a media catalog");
+        };
+        let mut peer = Peer {
+            id: 42,
+            tx,
+            media: None,
+            requested: request_id,
+        };
+        assert!(peer.accept_catalog(request_id, project_id, sequence_id, items));
+        assert!(!peer.accept_catalog(request_id - 1, None, None, vec![]));
+        bridge.peers.lock().unwrap().push(peer);
+        let catalog = bridge.media_catalog().unwrap().unwrap();
+        for (item_id, message) in [
+            ("b", "Bins can't be placed on the timeline."),
+            ("a", "A sequence can't nest into itself."),
+            ("o", "This project item can't be placed on the timeline."),
+            ("f", "Relink the offline media before placing it."),
+        ] {
+            assert_eq!(bridge.place_project_item(&catalog, item_id.into()), Err(message));
+        }
+        assert!(rx.try_recv().is_err());
+        let id = bridge.place_project_item(&catalog, "i".into()).unwrap();
+        let message: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            message,
+            serde_json::json!({
+                "type": "place_project_item",
+                "requestId": id,
+                "projectId": "p",
+                "sequenceId": "s",
+                "itemId": "i",
+            })
+        );
+
+        let (tx, other_rx) = mpsc::channel();
+        bridge.peers.lock().unwrap().push(Peer {
+            id: 43,
+            tx,
+            media: Some(MediaCatalog {
+                peer_id: 43,
+                project_id: None,
+                sequence_id: None,
+                items: Vec::new(),
+            }),
+            requested: 0,
+        });
+        assert!(bridge.media_catalog().is_err());
+        assert!(bridge.place_project_item(&catalog, "i".into()).is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(other_rx.try_recv().is_err());
+        bridge.peers.lock().unwrap().pop();
+
+        bridge.request_project_items();
+        let message: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(message["type"], "request_project_items");
+        assert!(bridge.place_project_item(&catalog, "i".into()).is_err());
+        assert!(rx.try_recv().is_err());
     }
 }
