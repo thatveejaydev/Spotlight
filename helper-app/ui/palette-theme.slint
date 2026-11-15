@@ -1,0 +1,74 @@
+// Shared colors for the palette. Midnight Indigo retains the original palette colors.
+export global PaletteThemeColors {
+    in property <string> theme-name: "Midnight Indigo";
+    out property <bool> light: theme-name == "Light";
+    out property <bool> indigo: theme-name == "Midnight Indigo";
+    private property <bool> dark: theme-name == "Dark";
+
+    // Window surfaces
+    out property <color> window-background: light ? #f7f8fa : (dark ? #141414 : (indigo ? #12131a : #1e1e1e));
+    out property <color> header-background: light ? #ffffff : (dark ? #1b1b1b : (indigo ? #171822 : #252525));
+    out property <color> strip-background: light ? #eef0f4 : (dark ? #181818 : (indigo ? #151620 : #222222));
+    out property <color> outline: light ? #8b95a5 : (dark ? #545454 : (indigo ? #363952 : #505050));
+    out property <color> section-divider: light ? #cbd1db : (dark ? #343434 : (indigo ? #26283a : #393939));
+    out property <color> footer-divider: light ? #cbd1db : (dark ? #343434 : (indigo ? #222434 : #393939));
+    out property <color> card-border: light ? #d4dae3 : (dark ? #373737 : (indigo ? #26293d : #3c3c3c));
+
+    // Text and controls
+    out property <color> primary-text: light ? #1b2432 : (dark ? #f4f4f4 : (indigo ? #f3f4f8 : #f0f0f0));
+    out property <color> muted-text: light ? #4f5c70 : (indigo ? #8b90aa : #ababab);
+    out property <color> placeholder-text: light ? #59677b : (dark ? #a0a0a0 : (indigo ? #5e627c : #a4a4a4));
+    out property <color> subtle-text: light ? #59677b : (dark ? #a0a0a0 : (indigo ? #6b708b : #a4a4a4));
+    out property <color> tab-text: light ? #475569 : (dark ? #bcbcbc : (indigo ? #a9adc3 : #c4c4c4));
+    out property <color> control-text: light ? #334155 : (dark ? #d4d4d4 : (indigo ? #cbd5e1 : #d2d2d2));
+    out property <color> result-text: light ? #243042 : (dark ? #e3e3e3 : (indigo ? #dcdfe8 : #dcdcdc));
+    out property <color> shortcut-text: light ? #283548 : (dark ? #e7e7e7 : (indigo ? #e2e8f0 : #e4e4e4));
+    out property <color> breadcrumb-text: light ? #526077 : (indigo ? #a0a6bf : #ababab);
+    out property <color> control-background: light ? #f6f7fa : (dark ? #242424 : (indigo ? #1f2130 : #303030));
+    out property <color> control-hover: light ? #e3e8f0 : (dark ? #353535 : (indigo ? #282b3d : #404040));
+    out property <color> shortcut-background: light ? #eef2f7 : (dark ? #282828 : (indigo ? #1f2233 : #2d2d2d));
+    out property <color> shortcut-hover: light ? #e3e8f0 : (dark ? #353535 : (indigo ? #25283a : #3b3b3b));
+    out property <color> shortcut-border: light ? #9ca8ba : (dark ? #555555 : (indigo ? #3a3f5c : #535353));
+    out property <color> switch-off: light ? #667588 : (dark ? #575757 : (indigo ? #2a2d40 : #565656));
+    out property <color> switch-knob: #ffffff;
+
+    // Selection and playback
+    out property <color> accent: light ? #245ac3 : (dark ? #777777 : (indigo ? #6366f1 : #247fe5));
+    out property <color> accent-text: light ? #194caa : (dark ? #f0f0f0 : (indigo ? #c7d2fe : #91caff));
+    out property <color> focus-outline: light ? #245ac3 : (dark ? #b0b0b0 : (indigo ? #818cf8 : #59aaff));
+    out property <color> focus-outline-soft: light ? #245ac388 : (dark ? #b0b0b088 : (indigo ? #818cf888 : #59aaff88));
+    out property <color> text-selection: light ? #245ac3 : (dark ? #606060 : (indigo ? #6366f166 : #2067ad));
+    out property <color> text-selection-foreground: #ffffff;
+    out property <color> selected-tab-background: light ? #dce8fb : (dark ? #383838 : (indigo ? #292d49 : #1f3d5a));
+    out property <color> selected-tab-text: light ? #1a489b : (dark ? #f5f5f5 : (indigo ? #e0e2ff : #b9dfff));
+    out property <color> selected-tab-outline: light ? #587fbd : (dark ? #808080 : (indigo ? #656bba : #498cca));
+    out property <color> tab-hover: light ? #e6ebf3 : (dark ? #2d2d2d : (indigo ? #222538 : #303030));
+    out property <color> row-hover: light ? #e9edf4 : (dark ? #242424 : (indigo ? #1c1e2b : #2d2d2d));
+    out property <color> row-selected: light ? #dbe8ff : (dark ? #3b3b3b : (indigo ? #6366f12e : #1f3b57));
+    out property <color> row-outline: light ? #4c79ce : (dark ? #818181 : (indigo ? #6366f188 : #428de0));
+    out property <color> row-selected-text: light ? #192639 : (indigo ? #ffffff : #ffffff);
+    out property <color> accent-tint: light ? #245ac322 : (dark ? #ffffff1a : (indigo ? #6366f130 : #378eff33));
+    out property <color> accent-hover: light ? #245ac333 : (dark ? #ffffff26 : (indigo ? #6366f133 : #378eff40));
+    out property <color> settings-icon-center: light ? #dbe8ff : (dark ? #333333 : (indigo ? #1d2038 : #233a52));
+    out property <color> preview-disabled: light ? #586a85 : (dark ? #a6a6a6 : (indigo ? #8187a4 : #9b9b9b));
+    out property <color> progress-track: light ? #aab8ce : (dark ? #696969 : (indigo ? #3e425a : #53616f));
+    out property <color> progress-fill: light ? #245ac3 : (dark ? #e0e0e0 : (indigo ? #a5b4fc : #67b6ff));
+
+    // Catalog and status
+    out property <color> catalog-all: light ? #1a56a7 : (dark ? #d6d6d6 : (indigo ? #93c5fd : #8fc8ff));
+    out property <color> catalog-effects: light ? #6040a8 : (dark ? #d6d6d6 : (indigo ? #c4b5fd : #8fc8ff));
+    out property <color> catalog-project: light ? #17664f : (dark ? #d6d6d6 : (indigo ? #6ee7b7 : #8fc8ff));
+    out property <color> project-accent: light ? #17664f : (dark ? #83dfb5 : (indigo ? #6ee7b7 : #87dcb8));
+    out property <color> project-emphasis: light ? #125842 : (dark ? #b0ebca : (indigo ? #a7f3d0 : #a5e6c6));
+    out property <color> project-tint: light ? #17664f16 : (dark ? #83dfb51a : (indigo ? #6ee7b71a : #87dcb818));
+    out property <color> project-hover: light ? #17664f28 : (dark ? #83dfb530 : (indigo ? #6ee7b730 : #87dcb830));
+    out property <color> project-outline: light ? #17664f77 : (dark ? #83dfb566 : (indigo ? #6ee7b766 : #87dcb866));
+    out property <color> success-background: light ? #e0f4e9 : (dark ? #1e372a : (indigo ? #163028 : #1e382e));
+    out property <color> success-text: light ? #17664f : (dark ? #9be8c0 : (indigo ? #6ee7b7 : #9be5c2));
+    out property <color> error-background: light ? #fce7e8 : (dark ? #3d2225 : (indigo ? #3b1d24 : #462527));
+    out property <color> error-text: light ? #921d30 : (dark ? #ffb5bb : (indigo ? #fca5a5 : #ffb5b9));
+    out property <color> danger-hover: light ? #fbe3e6 : (dark ? #42282c : (indigo ? #38252d : #45292c));
+    out property <color> danger-outline: light ? #a12f42 : (dark ? #d98d97 : (indigo ? #ca7c85 : #de8c96));
+    out property <color> connected: light ? #16803b : (dark ? #5edc83 : (indigo ? #22c55e : #51d778));
+    out property <color> warning: light ? #9c5c09 : (dark ? #f2b649 : (indigo ? #f59e0b : #f2b34a));
+}

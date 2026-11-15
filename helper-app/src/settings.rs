@@ -11,6 +11,40 @@ pub const DEFAULT_SETTINGS_HOTKEY: &str = "Ctrl+,";
 pub const DEFAULT_AUDIO_PREVIEW_HOTKEY: &str = "Ctrl+P";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PaletteTheme {
+    Light,
+    Dark,
+    #[default]
+    MidnightIndigo,
+    Premiere,
+}
+
+impl PaletteTheme {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+            Self::MidnightIndigo => "Midnight Indigo",
+            Self::Premiere => "Premiere",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        [Self::Light, Self::Dark, Self::MidnightIndigo, Self::Premiere]
+            .into_iter()
+            .find(|theme| theme.label() == label)
+    }
+}
+
+fn deserialize_theme<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PaletteTheme, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AlternateModifier {
     #[default]
@@ -40,6 +74,8 @@ impl AlternateModifier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    #[serde(deserialize_with = "deserialize_theme")]
+    pub theme: PaletteTheme,
     pub hotkey: String,
     pub open_effect_controls_by_default: bool,
     pub alternate_modifier: AlternateModifier,
@@ -54,6 +90,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            theme: PaletteTheme::default(),
             hotkey: DEFAULT_HOTKEY.to_string(),
             open_effect_controls_by_default: false,
             alternate_modifier: AlternateModifier::Shift,
@@ -554,6 +591,21 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn palette_theme_config_preserves_other_settings_with_missing_or_invalid_theme() {
+        for raw in [
+            r#"{"hotkey":"Alt+Space","auto_preview_audio":true}"#,
+            r#"{"hotkey":"Alt+Space","auto_preview_audio":true,"theme":"unknown"}"#,
+            r#"{"hotkey":"Alt+Space","auto_preview_audio":true,"theme":{"name":"light"}}"#,
+            r#"{"hotkey":"Alt+Space","auto_preview_audio":true,"theme":null}"#,
+        ] {
+            let loaded: AppSettings = serde_json::from_str(raw).unwrap();
+            assert_eq!(loaded.theme, PaletteTheme::MidnightIndigo);
+            assert_eq!(loaded.hotkey, "Alt+Space");
+            assert!(loaded.auto_preview_audio);
+        }
+    }
+
+    #[test]
     fn settings_round_trip_and_invalid_json_fallback() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -565,6 +617,7 @@ mod tests {
         assert_eq!(load_settings_from(&file), AppSettings::default());
 
         let saved = AppSettings {
+            theme: PaletteTheme::default(),
             hotkey: "Alt+Space".into(),
             open_effect_controls_by_default: true,
             alternate_modifier: AlternateModifier::Ctrl,
@@ -575,8 +628,22 @@ mod tests {
             audio_preview_hotkey: "Alt+P".into(),
             auto_preview_audio: true,
         };
-        save_settings_to(&file, &saved).unwrap();
-        assert_eq!(load_settings_from(&file), saved);
+        for (theme, value) in [
+            (PaletteTheme::Light, "light"),
+            (PaletteTheme::Dark, "dark"),
+            (PaletteTheme::MidnightIndigo, "midnight_indigo"),
+            (PaletteTheme::Premiere, "premiere"),
+        ] {
+            let saved = AppSettings {
+                theme,
+                ..saved.clone()
+            };
+            save_settings_to(&file, &saved).unwrap();
+            let json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(json["theme"], value);
+            assert_eq!(load_settings_from(&file), saved);
+        }
 
         fs::write(&file, "{ not valid json").unwrap();
         assert_eq!(load_settings_from(&file), AppSettings::default());

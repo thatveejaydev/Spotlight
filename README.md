@@ -47,3 +47,4 @@ cargo run --release
   - Customize the **Open Settings Shortcut** (default `Ctrl+,`) and optional **Direct Catalog Shortcuts** for **All**, **Effects**, and **Project** (all empty by default).
   - Customize the **Preview Audio Shortcut** (default `Ctrl+P`) and enable **Auto-preview audio** to play a clip after its highlight settles. Auto-preview is off by default.
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.
+- Under **Appearance**, choose **Light**, **Dark**, **Midnight Indigo** (the default), or **Premiere**.

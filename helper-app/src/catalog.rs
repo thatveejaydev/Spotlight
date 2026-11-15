@@ -196,9 +196,9 @@ impl EffectEntry {
 
     pub fn category_short(&self) -> &'static str {
         match self.effect_type.as_str() {
-            "videoEffect" => "Video Effect",
-            "audioEffect" => "Audio Effect",
-            "videoTransition" => "Video Transition",
+            "videoEffect" => "Video FX",
+            "audioEffect" => "Audio FX",
+            "videoTransition" => "Video Trans",
             "audioTransition" => "Audio Transition",
             "preset" => "Preset",
             _ => "Effect",

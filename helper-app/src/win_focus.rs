@@ -553,6 +553,25 @@ pub fn init_palette_window(hwnd: isize) {
 pub fn init_palette_window(_hwnd: isize) {}
 
 #[cfg(windows)]
+pub fn set_palette_caption_color(hwnd: isize, [red, green, blue]: [u8; 3]) {
+    if hwnd == 0 {
+        return;
+    }
+    let color = u32::from_le_bytes([red, green, blue, 0]);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd as HWND,
+            DWMWA_CAPTION_COLOR as u32,
+            (&color as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_palette_caption_color(_hwnd: isize, _color: [u8; 3]) {}
+
+#[cfg(windows)]
 pub fn ensure_palette_topmost(hwnd: isize) {
     if hwnd == 0 {
         return;
@@ -754,8 +773,6 @@ unsafe fn configure_palette_frame(hwnd: HWND) -> bool {
     let set_attribute = |attribute: i32, value: u32| {
         DwmSetWindowAttribute(hwnd, attribute as u32, (&value as *const u32).cast(), 4)
     };
-    // Match the search header if the compositor draws any part of the caption.
-    set_attribute(DWMWA_CAPTION_COLOR, 0x0022_1817);
     set_attribute(DWMWA_BORDER_COLOR, 0xffff_fffe); // DWMWA_COLOR_NONE
     let rounded = set_attribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND as u32) >= 0;
     PALETTE_FRAME.with(|frame| frame.set((hwnd, previous, rounded)));

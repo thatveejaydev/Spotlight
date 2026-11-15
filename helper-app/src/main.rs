@@ -23,13 +23,14 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use presets::PresetHandoff;
-use settings::{AlternateModifier, AppSettings, PaletteShortcutAction};
+use settings::{AlternateModifier, AppSettings, PaletteShortcutAction, PaletteTheme};
 use slint::{
     Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
 };
 use std::{
     cell::RefCell,
     collections::HashMap,
+    path::Path,
     rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -397,7 +398,7 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
             EffectItemUI {
                 name: name.into(),
                 category: category.into(),
-                folder: folder.into(),
+                folder: folder.replace(" / ", " › ").into(),
                 badge_bg: colors.0,
                 badge_fg: colors.1,
             }
@@ -455,6 +456,7 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     if our_hwnd != our_hwnd_before {
         win_focus::center_palette(our_hwnd, state.previous_hwnd);
     }
+    update_palette_caption(ui, our_hwnd);
     win_focus::ensure_palette_topmost(our_hwnd);
     win_focus::force_foreground(our_hwnd);
     win_focus::set_palette_visible(true);
@@ -463,6 +465,42 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
         ui.invoke_focus_search();
     }
     sync_audio_selection(ui, state);
+}
+
+fn update_palette_caption(ui: &SpotlightWindow, hwnd: isize) {
+    let color = ui.get_caption_color();
+    win_focus::set_palette_caption_color(hwnd, [color.red(), color.green(), color.blue()]);
+}
+
+fn apply_palette_theme(ui: &SpotlightWindow, theme: PaletteTheme) {
+    ui.set_theme_name(theme.label().into());
+    update_palette_caption(ui, extract_window_hwnd(ui));
+}
+
+fn change_palette_theme(ui: &SpotlightWindow, settings: &mut AppSettings, label: &str, path: &Path) {
+    let Some(theme) = PaletteTheme::from_label(label) else {
+        return;
+    };
+    if theme == settings.theme {
+        return;
+    }
+
+    let updated = AppSettings {
+        theme,
+        ..settings.clone()
+    };
+    match settings::save_settings_to(path, &updated) {
+        Ok(()) => {
+            *settings = updated;
+            apply_palette_theme(ui, theme);
+            ui.set_settings_feedback("".into());
+            ui.set_settings_feedback_error(false);
+        }
+        Err(error) => {
+            ui.set_settings_feedback_error(true);
+            ui.set_settings_feedback(error.into());
+        }
+    }
 }
 
 fn restore_premiere_focus(hwnd: isize) {
@@ -1326,6 +1364,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     fn sync_settings_ui(ui: &SpotlightWindow, settings: &AppSettings) {
+        apply_palette_theme(ui, settings.theme);
         ui.set_hotkey_label(settings.hotkey.clone().into());
         ui.set_open_effect_controls_default(settings.open_effect_controls_by_default);
         ui.set_alternate_modifier(settings.alternate_modifier.as_str().into());
@@ -1417,6 +1456,7 @@ fn main() -> Result<(), slint::PlatformError> {
         hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
     ) {
         let loaded = settings::load_settings();
+        state.settings.theme = loaded.theme;
         state.settings.open_effect_controls_by_default = loaded.open_effect_controls_by_default;
         state.settings.alternate_modifier = loaded.alternate_modifier;
         state.settings.settings_hotkey = loaded.settings_hotkey;
@@ -1502,6 +1542,20 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        ui.on_select_theme(move |label| {
+            if let Some(ui) = ui_weak.upgrade() {
+                change_palette_theme(
+                    &ui,
+                    &mut state_ref.borrow_mut().settings,
+                    label.as_str(),
+                    &settings::config_path(),
+                );
+            }
+        });
+    }
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
@@ -2005,18 +2059,139 @@ mod tests {
         ui.show().unwrap();
 
         let mut pixels = vec![Rgb8Pixel::default(); width * height];
-        assert!(adapter.draw_if_needed(|renderer| {
-            renderer.render(&mut pixels, width);
-        }));
-        let border = Rgb8Pixel { r: 0x36, g: 0x39, b: 0x52 };
-        for (x, y) in [
-            (0, height / 2),
-            (width - 1, height / 2),
-            (width / 2, 0),
-            (width / 2, height - 1),
+        for (theme, outline) in [
+            (PaletteTheme::Light, [0x8b, 0x95, 0xa5]),
+            (PaletteTheme::Dark, [0x54, 0x54, 0x54]),
+            (PaletteTheme::MidnightIndigo, [0x36, 0x39, 0x52]),
+            (PaletteTheme::Premiere, [0x50, 0x50, 0x50]),
         ] {
-            assert_eq!(pixels[y * width + x], border, "outline at ({x}, {y})");
+            apply_palette_theme(&ui, theme);
+            assert!(adapter.draw_if_needed(|renderer| {
+                renderer.render(&mut pixels, width);
+            }));
+            let [r, g, b] = outline;
+            let border = Rgb8Pixel { r, g, b };
+            for (x, y) in [
+                (0, height / 2),
+                (width - 1, height / 2),
+                (width / 2, 0),
+                (width / 2, height - 1),
+            ] {
+                assert_eq!(pixels[y * width + x], border, "{theme:?} outline at ({x}, {y})");
+            }
         }
+    }
+
+    #[test]
+    fn appearance_dropdown_saves_theme_and_recovers_from_save_failure() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+        ui.set_settings_open(true);
+
+        let dir =
+            std::env::temp_dir().join(format!("premiere-spotlight-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let target = Rc::new(RefCell::new(path.clone()));
+        let saved = Rc::new(RefCell::new(AppSettings {
+            auto_preview_audio: true,
+            ..AppSettings::default()
+        }));
+        let weak = ui.as_weak();
+        ui.on_select_theme({
+            let (target, saved) = (target.clone(), saved.clone());
+            move |label| {
+                change_palette_theme(
+                    &weak.unwrap(),
+                    &mut saved.borrow_mut(),
+                    label.as_str(),
+                    &target.borrow(),
+                );
+            }
+        });
+        let weak = ui.as_weak();
+        ui.on_toggle_settings(move || {
+            let ui = weak.unwrap();
+            ui.set_settings_open(!ui.get_settings_open());
+        });
+
+        let window = ui.window();
+        let click = |x, y| {
+            let position = LogicalPosition::new(x, y);
+            for event in [
+                WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                },
+                WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                },
+            ] {
+                window.dispatch_event(event);
+            }
+        };
+        let key = |key: Key| {
+            window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        };
+
+        key(Key::RightArrow);
+        key(Key::Tab);
+        key(Key::Return);
+        key(Key::DownArrow);
+        assert_eq!(ui.get_theme_name(), "Premiere");
+        assert_eq!(*saved.borrow(), settings::load_settings_from(&path));
+        key(Key::Escape);
+        assert!(ui.get_settings_open());
+
+        click(505., 136.);
+        click(505., 138.);
+        assert_eq!(ui.get_theme_name(), "Light");
+
+        *target.borrow_mut() = dir.clone();
+        click(505., 136.);
+        key(Key::DownArrow);
+        assert_eq!(ui.get_theme_name(), "Light");
+        assert_eq!(saved.borrow().theme, PaletteTheme::Light);
+        assert!(ui.get_settings_feedback_error());
+
+        *target.borrow_mut() = path.clone();
+        key(Key::DownArrow);
+        assert_eq!(
+            ui.get_theme_name(),
+            "Dark",
+            "the dropdown restored Light after the error"
+        );
+        assert!(!ui.get_settings_feedback_error());
+        key(Key::Escape);
+        assert!(ui.get_settings_open());
+        key(Key::Escape);
+        assert!(!ui.get_settings_open());
+
+        let reloaded = AppSettings {
+            theme: PaletteTheme::Premiere,
+            ..saved.borrow().clone()
+        };
+        settings::save_settings_to(&path, &reloaded).unwrap();
+        *saved.borrow_mut() = settings::load_settings_from(&path);
+        apply_palette_theme(&ui, saved.borrow().theme);
+        assert_eq!(ui.get_theme_name(), "Premiere");
+        assert_eq!(ui.get_caption_color(), Color::from_rgb_u8(0x25, 0x25, 0x25));
+        ui.set_settings_open(true);
+        key(Key::RightArrow);
+        click(505., 136.);
+        key(Key::UpArrow);
+        assert_eq!(
+            ui.get_theme_name(),
+            "Midnight Indigo",
+            "the dropdown reflected the reloaded theme"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[test]
@@ -2138,13 +2313,26 @@ mod tests {
         assert_ne!(pixels[165 * width + 80], fill);
         let icon = Rgb8Pixel { r: 0xc7, g: 0xd2, b: 0xfe };
         let icon_pixels = |pixels: &[Rgb8Pixel]| {
-            (102..121).flat_map(|y| &pixels[y * width + 460..y * width + 489])
+            (102..121).flat_map(|y| &pixels[y * width + 574..y * width + 599])
                 .filter(|&&pixel| pixel == icon).count()
         };
         assert!(icon_pixels(&pixels) > 0);
         ui.set_preview_playing(true);
         assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
         assert!(icon_pixels(&pixels) > 0);
+
+        for (theme, fill, track) in [
+            (PaletteTheme::Light, [0x24, 0x5a, 0xc3], [0xaa, 0xb8, 0xce]),
+            (PaletteTheme::Dark, [0xe0, 0xe0, 0xe0], [0x69, 0x69, 0x69]),
+            (PaletteTheme::Premiere, [0x67, 0xb6, 0xff], [0x53, 0x61, 0x6f]),
+        ] {
+            apply_palette_theme(&ui, theme);
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+            let [r, g, b] = fill;
+            assert_eq!(pixels[127 * width + 10], Rgb8Pixel { r, g, b });
+            let [r, g, b] = track;
+            assert_eq!(pixels[127 * width + 609], Rgb8Pixel { r, g, b });
+        }
 
         let played = Rc::new(Cell::new(false));
         let position = Rc::new(Cell::new(None));
@@ -2164,7 +2352,7 @@ mod tests {
             ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
             ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
         };
-        click(472., 111.);
+        click(586., 111.);
         assert!(played.get());
         click(310., 127.);
         assert!(
@@ -2175,10 +2363,10 @@ mod tests {
         assert_eq!(activated.get(), None);
         ui.set_preview_can_toggle(false);
         played.set(false);
-        click(472., 111.);
+        click(586., 111.);
         assert!(!played.get());
         assert_eq!(activated.get(), None);
-        click(472., 149.);
+        click(586., 149.);
         assert_eq!(activated.get(), Some(1));
         click(48., 111.);
         assert_eq!(activated.get(), Some(0));
@@ -2859,6 +3047,8 @@ mod tests {
 
     #[test]
     fn bin_drill_down_enters_and_steps_out_without_hiding() {
+        use slint::Model;
+
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
         let ui = SpotlightWindow::new().unwrap();
@@ -2934,6 +3124,10 @@ mod tests {
         assert_eq!(state.active_bin_path.as_deref(), Some("Footage / B-Roll"));
         assert_eq!(ui.get_active_bin().as_str(), "Footage / B-Roll");
         assert_eq!(state.matched_items.len(), 1);
+        assert_eq!(
+            ui.get_results().row_data(0).unwrap().folder,
+            "Footage › B-Roll"
+        );
 
         step_out_bin(&ui, &mut state);
         assert_eq!(state.active_bin_path.as_deref(), Some("Footage"));
@@ -3036,7 +3230,7 @@ mod tests {
 
         let width = WINDOW_WIDTH as usize;
         let without_folder = render("00_BACK UP", "");
-        let with_folder = render("00_BACK UP", "04_Nests / 041_Main");
+        let with_folder = render("00_BACK UP", "04_Nests › 041_Main");
 
         let diff_xs: Vec<usize> = (95..129)
             .flat_map(|y| {
@@ -3048,18 +3242,25 @@ mod tests {
             })
             .collect();
         assert!(!diff_xs.is_empty());
-        // Name itself shouldn't shift vertically; divider and folder pill sit strictly to its right.
-        let min_diff_x = *diff_xs.iter().min().unwrap();
-        assert!(min_diff_x > 80, "expected divider/folder beside name, got min x={min_diff_x}");
+        // The category pill occupies the left edge of the content.
+        let badge = Rgb8Pixel { r: 0x36, g: 0x26, b: 0x5c };
+        let badge_end = (18..116)
+            .rfind(|&x| without_folder[105 * width + x] == badge)
+            .expect("category pill should be on the left");
+        assert_eq!(without_folder[105 * width + 22], badge);
 
-        // Even with long name + folder, neither overlaps the right-side category pill (x >= 504).
+        // The folder text sits strictly to the right of the item name.
+        let min_diff_x = *diff_xs.iter().min().unwrap();
+        assert!(min_diff_x > badge_end + 60, "expected folder beside name, got min x={min_diff_x}");
+
+        // A long name and folder leave the leading category pill intact.
         let long_base = render("Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider", "");
         let long_with_folder = render(
             "Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider",
-            "01_Project / 04_Nests / 041_Main / Exports / Final_Master",
+            "01_Project › 04_Nests › 041_Main › Exports › Final_Master",
         );
         let leaked_into_badge = (95..129).any(|y| {
-            (504..WINDOW_WIDTH as usize - 10)
+            (18..=badge_end)
                 .any(|x| long_base[y * width + x] != long_with_folder[y * width + x])
         });
         assert!(!leaked_into_badge);
@@ -3203,18 +3404,20 @@ mod tests {
         );
 
         // About cancels recording and hides the shortcut controls.
-        click(155., 72.);
+        click(236., 72.);
         assert!(!ui.get_recording_hotkey());
         click(490., 142.);
         assert!(!ui.get_recording_hotkey());
         assert!(ui.get_settings_open());
 
-        window.dispatch_event(WindowEvent::KeyPressed {
-            text: Key::LeftArrow.into(),
-        });
-        window.dispatch_event(WindowEvent::KeyReleased {
-            text: Key::LeftArrow.into(),
-        });
+        for _ in 0..2 {
+            window.dispatch_event(WindowEvent::KeyPressed {
+                text: Key::LeftArrow.into(),
+            });
+            window.dispatch_event(WindowEvent::KeyReleased {
+                text: Key::LeftArrow.into(),
+            });
+        }
         click(490., 142.);
         assert!(ui.get_recording_hotkey());
 

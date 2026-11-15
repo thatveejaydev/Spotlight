@@ -1,4 +1,5 @@
-import { AboutSlint, Palette } from "std-widgets.slint";
+import { AboutSlint, ComboBox, Palette } from "std-widgets.slint";
+import { PaletteThemeColors as Theme } from "palette-theme.slint";
 
 export struct EffectItemUI {
     name: string,
@@ -336,12 +337,12 @@ component ShortcutRecorderRow inherits HorizontalLayout {
             text: root.label;
             font-size: 12.5px;
             font-weight: 600;
-            color: #f3f4f8;
+            color: Theme.primary-text;
         }
         if root.hint != "" : Text {
             text: root.hint;
             font-size: 11px;
-            color: #8b90aa;
+            color: Theme.muted-text;
             overflow: elide;
         }
     }
@@ -356,9 +357,9 @@ component ShortcutRecorderRow inherits HorizontalLayout {
                 min-width: 112px;
                 height: 26px;
                 border-radius: 6px;
-                background: root.recording ? #6366f130 : (slot-touch.has-hover ? #25283a : #1f2233);
+                background: root.recording ? Theme.accent-tint : (slot-touch.has-hover ? Theme.shortcut-hover : Theme.shortcut-background);
                 border-width: 1px;
-                border-color: root.recording ? #818cf8 : #3a3f5c;
+                border-color: root.recording ? Theme.focus-outline : Theme.shortcut-border;
                 accessible-role: button;
                 accessible-label: root.label;
                 accessible-action-default => { root.toggle-record(); }
@@ -371,8 +372,8 @@ component ShortcutRecorderRow inherits HorizontalLayout {
                             : (root.shortcut-text != "" ? root.shortcut-text : root.empty-text);
                         font-size: 11px;
                         font-weight: 700;
-                        color: root.recording ? #c7d2fe
-                            : (root.shortcut-text != "" ? #e2e8f0 : #6b708b);
+                        color: root.recording ? Theme.accent-text
+                            : (root.shortcut-text != "" ? Theme.shortcut-text : Theme.subtle-text);
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -390,9 +391,9 @@ component ShortcutRecorderRow inherits HorizontalLayout {
                 width: 26px;
                 height: 26px;
                 border-radius: 6px;
-                background: clear-touch.has-hover ? #38252d : #1f2130;
+                background: clear-touch.has-hover ? Theme.danger-hover : Theme.control-background;
                 border-width: 1px;
-                border-color: clear-touch.has-hover ? #ca7c85 : #363952;
+                border-color: clear-touch.has-hover ? Theme.danger-outline : Theme.outline;
                 accessible-role: button;
                 accessible-label: "Clear " + root.label;
                 accessible-action-default => { root.clear-clicked(); }
@@ -400,7 +401,7 @@ component ShortcutRecorderRow inherits HorizontalLayout {
                     text: "×";
                     font-size: 13px;
                     font-weight: 700;
-                    color: #cbd5e1;
+                    color: Theme.control-text;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -421,9 +422,9 @@ component SettingsToggle inherits Rectangle {
     width: 40px;
     height: 22px;
     border-radius: 11px;
-    background: checked ? #6366f1 : #2a2d40;
+    background: checked ? Theme.accent : Theme.switch-off;
     border-width: 1px;
-    border-color: checked ? #818cf8 : #3a3f5c;
+    border-color: checked ? Theme.focus-outline : Theme.shortcut-border;
     accessible-role: checkbox;
     accessible-label: label;
     accessible-checked: checked;
@@ -435,7 +436,7 @@ component SettingsToggle inherits Rectangle {
         width: 14px;
         height: 14px;
         border-radius: 7px;
-        background: #ffffff;
+        background: Theme.switch-knob;
         animate x { duration: 120ms; }
     }
     TouchArea {
@@ -450,9 +451,22 @@ export component SpotlightWindow inherits Window {
     always-on-top: true;
     width: 620px;
     height: 440px;
-    background: #12131a;
+    background: Theme.window-background;
 
-    init => { Palette.color-scheme = ColorScheme.dark; }
+    in-out property <string> theme-name <=> Theme.theme-name;
+    out property <color> caption-color: Theme.header-background;
+    private property <[string]> theme-options: ["Light", "Dark", "Midnight Indigo", "Premiere"];
+    private property <int> saved-theme-index: Theme.light ? 0 : (Theme.indigo ? 2 : (root.theme-name == "Dark" ? 1 : 3));
+    private property <int> theme-selection: root.saved-theme-index;
+    callback select-theme(string);
+
+    function sync-theme() {
+        Palette.color-scheme = Theme.light ? ColorScheme.light : ColorScheme.dark;
+        root.theme-selection = root.saved-theme-index;
+    }
+
+    init => { root.sync-theme(); }
+    changed theme-name => { root.sync-theme(); }
 
     in property <string> app-version;
     in-out property <string> search-text: "";
@@ -563,6 +577,7 @@ export component SpotlightWindow inherits Window {
         if (root.settings-tab-index != index) {
             root.set-recording(false);
             root.settings-tab-index = index;
+            settings-focus.focus();
         }
     }
 
@@ -618,7 +633,7 @@ export component SpotlightWindow inherits Window {
                 if (!root.recording-hotkey && !event.modifiers.control && !event.modifiers.alt
                     && !event.modifiers.shift && !event.modifiers.meta
                     && (event.text == Key.LeftArrow || event.text == Key.RightArrow)) {
-                    root.select-settings-tab(event.text == Key.LeftArrow ? 0 : 1);
+                    root.select-settings-tab((root.settings-tab-index + (event.text == Key.LeftArrow ? -1 : 1)).clamp(0, 2));
                     return accept;
                 }
                 return reject;
@@ -668,7 +683,7 @@ export component SpotlightWindow inherits Window {
         Rectangle {
             width: 100%;
             height: 100%;
-            background: #12131a;
+            background: Theme.window-background;
             border-radius: 10px;
             clip: true;
 
@@ -679,7 +694,7 @@ export component SpotlightWindow inherits Window {
             // Search bar or Settings header
             Rectangle {
                 height: root.settings-open ? 54px : 50px;
-                background: #171822;
+                background: Theme.header-background;
 
                 HorizontalLayout {
                     visible: root.settings-open;
@@ -698,13 +713,13 @@ export component SpotlightWindow inherits Window {
                             text: "Settings";
                             font-size: 14px;
                             font-weight: 700;
-                            color: #f3f4f8;
+                            color: Theme.primary-text;
                         }
                         Text {
                             visible: root.settings-tab-index == 0;
                             text: "Hotkeys and preferences apply immediately";
                             font-size: 11px;
-                            color: #8b90aa;
+                            color: Theme.muted-text;
                             overflow: elide;
                         }
                     }
@@ -715,9 +730,9 @@ export component SpotlightWindow inherits Window {
                             width: 72px;
                             height: 26px;
                             border-radius: 6px;
-                            background: back-touch.has-hover ? #282b3d : #1f2130;
+                            background: back-touch.has-hover ? Theme.control-hover : Theme.control-background;
                             border-width: 1px;
-                            border-color: #363952;
+                            border-color: Theme.outline;
                             accessible-role: button;
                             accessible-label: "Back to search";
                             accessible-action-default => { root.toggle-settings(); }
@@ -725,7 +740,7 @@ export component SpotlightWindow inherits Window {
                                 text: "← Back";
                                 font-size: 11px;
                                 font-weight: 600;
-                                color: #dcdfe8;
+                                color: Theme.result-text;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -753,9 +768,9 @@ export component SpotlightWindow inherits Window {
                             height: 24px;
                             max-width: 210px;
                             border-radius: 6px;
-                            background: bin-touch.has-hover ? #6ee7b730 : #6ee7b71a;
+                            background: bin-touch.has-hover ? Theme.project-hover : Theme.project-tint;
                             border-width: 1px;
-                            border-color: #6ee7b766;
+                            border-color: Theme.project-outline;
                             accessible-role: button;
                             accessible-label: "Inside bin " + root.active-bin + ". Step up one level";
                             accessible-action-default => { root.step-out-bin(); }
@@ -768,7 +783,7 @@ export component SpotlightWindow inherits Window {
                                     text: root.active-bin;
                                     font-size: 11px;
                                     font-weight: 600;
-                                    color: #a7f3d0;
+                                    color: Theme.project-emphasis;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
@@ -776,7 +791,7 @@ export component SpotlightWindow inherits Window {
                                     text: "×";
                                     font-size: 12px;
                                     font-weight: 700;
-                                    color: #6ee7b7;
+                                    color: Theme.project-accent;
                                     vertical-alignment: center;
                                 }
                             }
@@ -804,7 +819,7 @@ export component SpotlightWindow inherits Window {
                                 : root.active-catalog == "effects" ? "Search effects and transitions…"
                                 : root.active-catalog == "project" ? "Search project items…"
                                 : "Search effects and project items…";
-                            color: #5e627c;
+                            color: Theme.placeholder-text;
                             font-size: 13.5px;
                             vertical-alignment: center;
                             overflow: elide;
@@ -817,9 +832,9 @@ export component SpotlightWindow inherits Window {
                             height: 100%;
                             text <=> root.search-text;
                             font-size: 15px;
-                            color: #f3f4f8;
-                            selection-background-color: #6366f166;
-                            selection-foreground-color: #ffffff;
+                            color: Theme.primary-text;
+                            selection-background-color: Theme.text-selection;
+                            selection-foreground-color: Theme.text-selection-foreground;
                             vertical-alignment: center;
                             single-line: true;
 
@@ -876,12 +891,12 @@ export component SpotlightWindow inherits Window {
 
             Rectangle {
                 height: 1px;
-                background: #26283a;
+                background: Theme.section-divider;
             }
 
             if !root.settings-open : Rectangle {
                 height: 36px;
-                background: #151620;
+                background: Theme.strip-background;
                 accessible-role: tab-list;
                 accessible-label: "Search catalogs";
                 accessible-item-count: 3;
@@ -894,9 +909,9 @@ export component SpotlightWindow inherits Window {
                     alignment: start;
 
                     for catalog[index] in [
-                        { id: "all", label: "All", name: "All", accent: #93c5fd },
-                        { id: "effects", label: "FX", name: "Effects", accent: #c4b5fd },
-                        { id: "project", label: "PRJ", name: "Project", accent: #6ee7b7 },
+                        { id: "all", label: "All", name: "All", accent: Theme.catalog-all },
+                        { id: "effects", label: "FX", name: "Effects", accent: Theme.catalog-effects },
+                        { id: "project", label: "PRJ", name: "Project", accent: Theme.catalog-project },
                     ] : Rectangle {
                         private property <bool> active: catalog.id == root.active-catalog;
                         width: 46px;
@@ -914,7 +929,7 @@ export component SpotlightWindow inherits Window {
                             text: catalog.label;
                             font-size: 11px;
                             font-weight: 700;
-                            color: active ? catalog.accent : #a9adc3;
+                            color: active ? catalog.accent : Theme.tab-text;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -928,14 +943,14 @@ export component SpotlightWindow inherits Window {
 
             if !root.settings-open : Rectangle {
                 height: 1px;
-                background: #26283a;
+                background: Theme.section-divider;
             }
 
             // Eight visible results (or Settings panel)
             Rectangle {
                 min-height: 314px;
                 vertical-stretch: 1;
-                background: #12131a;
+                background: Theme.window-background;
                 clip: true;
 
                 // Settings tabs and their content
@@ -982,10 +997,10 @@ export component SpotlightWindow inherits Window {
 
                         Rectangle {
                             height: 38px;
-                            background: #171822;
+                            background: Theme.header-background;
                             accessible-role: tab-list;
                             accessible-label: "Settings sections";
-                            accessible-item-count: 2;
+                            accessible-item-count: 3;
                             HorizontalLayout {
                                 padding-left: 14px;
                                 padding-top: 5px;
@@ -993,13 +1008,13 @@ export component SpotlightWindow inherits Window {
                                 spacing: 6px;
                                 alignment: start;
 
-                                for title[index] in ["Shortcuts", "About"] : Rectangle {
+                                for title[index] in ["Shortcuts", "Appearance", "About"] : Rectangle {
                                     width: 88px;
                                     border-radius: 6px;
-                                    background: index == root.settings-tab-index ? #292d49
-                                        : (tab-touch.has-hover ? #222538 : transparent);
+                                    background: index == root.settings-tab-index ? Theme.selected-tab-background
+                                        : (tab-touch.has-hover ? Theme.tab-hover : transparent);
                                     border-width: index == root.settings-tab-index ? 1px : 0px;
-                                    border-color: #656bba;
+                                    border-color: Theme.selected-tab-outline;
                                     accessible-role: tab;
                                     accessible-label: title;
                                     accessible-item-index: index;
@@ -1010,7 +1025,7 @@ export component SpotlightWindow inherits Window {
                                         text: title;
                                         font-size: 12px;
                                         font-weight: 600;
-                                        color: index == root.settings-tab-index ? #e0e2ff : #a9adc3;
+                                        color: index == root.settings-tab-index ? Theme.selected-tab-text : Theme.tab-text;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -1022,7 +1037,7 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        if root.settings-tab-index == 1 : VerticalLayout {
+                        if root.settings-tab-index == 2 : VerticalLayout {
                             vertical-stretch: 1;
                             alignment: center;
                             spacing: 6px;
@@ -1031,14 +1046,14 @@ export component SpotlightWindow inherits Window {
                                 text: "Version: " + root.app-version;
                                 font-size: 15px;
                                 font-weight: 600;
-                                color: #e0e2ff;
+                                color: Theme.selected-tab-text;
                                 horizontal-alignment: center;
                             }
 
                             Text {
                                 text: "Developed by Vee Jay";
                                 font-size: 13px;
-                                color: #a9adc3;
+                                color: Theme.tab-text;
                                 horizontal-alignment: center;
                             }
 
@@ -1052,8 +1067,8 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        if root.settings-tab-index == 0 && root.settings-feedback != "" : Rectangle {
-                            background: root.settings-feedback-error ? #3b1d24 : #163028;
+                        if root.settings-tab-index != 2 && root.settings-feedback != "" : Rectangle {
+                            background: root.settings-feedback-error ? Theme.error-background : Theme.success-background;
                             HorizontalLayout {
                                 padding-left: 14px;
                                 padding-right: 14px;
@@ -1062,8 +1077,54 @@ export component SpotlightWindow inherits Window {
                                 Text {
                                     text: root.settings-feedback;
                                     font-size: 11px;
-                                    color: root.settings-feedback-error ? #fca5a5 : #6ee7b7;
+                                    color: root.settings-feedback-error ? Theme.error-text : Theme.success-text;
                                     wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        if root.settings-tab-index == 1 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding: 14px;
+
+                            Rectangle {
+                                height: 60px;
+                                background: Theme.header-background;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.card-border;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 12px;
+
+                                    Text {
+                                        text: "Theme";
+                                        color: Theme.primary-text;
+                                        font-size: 12.5px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        width: 172px;
+
+                                        ComboBox {
+                                            accessible-label: "Theme";
+                                            model: root.theme-options;
+                                            current-index <=> root.theme-selection;
+                                            selected(value) => {
+                                                root.select-theme(value);
+                                                // The widget tracks the value and index separately.
+                                                self.current-value = root.theme-name;
+                                                root.theme-selection = root.saved-theme-index;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1081,10 +1142,10 @@ export component SpotlightWindow inherits Window {
 
                                 // Card 1: Launch Hotkey
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     VerticalLayout {
                                         padding: 12px;
@@ -1102,12 +1163,12 @@ export component SpotlightWindow inherits Window {
                                                     text: "Launch Hotkey";
                                                     font-size: 13px;
                                                     font-weight: 600;
-                                                    color: #f3f4f8;
+                                                    color: Theme.primary-text;
                                                 }
                                                 Text {
                                                     text: "Global shortcut to open Spotlight in Premiere Pro";
                                                     font-size: 11px;
-                                                    color: #8b90aa;
+                                                    color: Theme.muted-text;
                                                     overflow: elide;
                                                 }
                                             }
@@ -1122,10 +1183,10 @@ export component SpotlightWindow inherits Window {
                                                         min-width: 122px;
                                                         height: 28px;
                                                         border-radius: 6px;
-                                                        background: (root.recording-hotkey && root.recording-target == "launch") ? #6366f130
-                                                            : (record-touch.has-hover ? #25283a : #1f2233);
+                                                        background: (root.recording-hotkey && root.recording-target == "launch") ? Theme.accent-tint
+                                                            : (record-touch.has-hover ? Theme.shortcut-hover : Theme.shortcut-background);
                                                         border-width: 1px;
-                                                        border-color: (root.recording-hotkey && root.recording-target == "launch") ? #818cf8 : #3a3f5c;
+                                                        border-color: (root.recording-hotkey && root.recording-target == "launch") ? Theme.focus-outline : Theme.shortcut-border;
                                                         accessible-role: button;
                                                         accessible-label: "Change launch hotkey";
                                                         accessible-action-default => { root.begin-recording("launch"); }
@@ -1138,7 +1199,7 @@ export component SpotlightWindow inherits Window {
                                                                 text: (root.recording-hotkey && root.recording-target == "launch") ? "Press keys…" : root.hotkey-label;
                                                                 font-size: 11.5px;
                                                                 font-weight: 700;
-                                                                color: (root.recording-hotkey && root.recording-target == "launch") ? #c7d2fe : #e2e8f0;
+                                                                color: (root.recording-hotkey && root.recording-target == "launch") ? Theme.accent-text : Theme.shortcut-text;
                                                                 horizontal-alignment: center;
                                                                 vertical-alignment: center;
                                                             }
@@ -1160,9 +1221,9 @@ export component SpotlightWindow inherits Window {
                                                         width: 52px;
                                                         height: 28px;
                                                         border-radius: 6px;
-                                                        background: reset-touch.has-hover ? #282b3d : #1f2130;
+                                                        background: reset-touch.has-hover ? Theme.control-hover : Theme.control-background;
                                                         border-width: 1px;
-                                                        border-color: #363952;
+                                                        border-color: Theme.outline;
                                                         accessible-role: button;
                                                         accessible-label: "Reset hotkey to Ctrl+Space";
                                                         accessible-action-default => { root.reset-default-hotkey(); }
@@ -1170,7 +1231,7 @@ export component SpotlightWindow inherits Window {
                                                             text: "Reset";
                                                             font-size: 11px;
                                                             font-weight: 600;
-                                                            color: #cbd5e1;
+                                                            color: Theme.control-text;
                                                             horizontal-alignment: center;
                                                             vertical-alignment: center;
                                                         }
@@ -1190,10 +1251,10 @@ export component SpotlightWindow inherits Window {
 
                                 // Card 2: Effect Controls on Enter
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     HorizontalLayout {
                                         padding: 12px;
@@ -1208,14 +1269,14 @@ export component SpotlightWindow inherits Window {
                                                 text: "Always open Effect Controls on Enter";
                                                 font-size: 13px;
                                                 font-weight: 600;
-                                                color: #f3f4f8;
+                                                color: Theme.primary-text;
                                             }
                                             Text {
                                                 text: root.open-effect-controls-default
                                                     ? "Enter applies & opens Effect Controls · " + root.alternate-modifier-label + "+Enter applies only"
                                                     : "Enter applies only · " + root.alternate-modifier-label + "+Enter opens Effect Controls";
                                                 font-size: 11px;
-                                                color: #8b90aa;
+                                                color: Theme.muted-text;
                                                 overflow: elide;
                                             }
                                         }
@@ -1236,10 +1297,10 @@ export component SpotlightWindow inherits Window {
 
                                 // Card 3: Alternate Action Modifier
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     HorizontalLayout {
                                         padding: 12px;
@@ -1254,12 +1315,12 @@ export component SpotlightWindow inherits Window {
                                                 text: "Alternate Action Modifier";
                                                 font-size: 13px;
                                                 font-weight: 600;
-                                                color: #f3f4f8;
+                                                color: Theme.primary-text;
                                             }
                                             Text {
                                                 text: root.alternate-modifier-label + "+Enter / " + root.alternate-modifier-label + "+Click triggers Source Monitor or Effect Controls swap";
                                                 font-size: 11px;
-                                                color: #8b90aa;
+                                                color: Theme.muted-text;
                                                 overflow: elide;
                                             }
                                         }
@@ -1278,15 +1339,15 @@ export component SpotlightWindow inherits Window {
                                                     width: 44px;
                                                     height: 26px;
                                                     border-radius: 5px;
-                                                    background: root.alternate-modifier == opt.id ? #6366f130
-                                                        : (mod-touch.has-hover ? #282b3d : #1f2130);
+                                                    background: root.alternate-modifier == opt.id ? Theme.accent-tint
+                                                        : (mod-touch.has-hover ? Theme.control-hover : Theme.control-background);
                                                     border-width: 1px;
-                                                    border-color: root.alternate-modifier == opt.id ? #818cf8 : #363952;
+                                                    border-color: root.alternate-modifier == opt.id ? Theme.focus-outline : Theme.outline;
                                                     Text {
                                                         text: opt.title;
                                                         font-size: 11px;
                                                         font-weight: root.alternate-modifier == opt.id ? 700 : 500;
-                                                        color: root.alternate-modifier == opt.id ? #c7d2fe : #cbd5e1;
+                                                        color: root.alternate-modifier == opt.id ? Theme.accent-text : Theme.control-text;
                                                         horizontal-alignment: center;
                                                         vertical-alignment: center;
                                                     }
@@ -1305,10 +1366,10 @@ export component SpotlightWindow inherits Window {
 
                                 // Card 4: Open Settings Shortcut
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     VerticalLayout {
                                         padding: 12px;
@@ -1328,10 +1389,10 @@ export component SpotlightWindow inherits Window {
 
                                 // Card 5: Direct Catalog Shortcuts
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     VerticalLayout {
                                         padding: 12px;
@@ -1374,10 +1435,10 @@ export component SpotlightWindow inherits Window {
                                 }
 
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     VerticalLayout {
                                         padding: 12px;
@@ -1399,7 +1460,7 @@ export component SpotlightWindow inherits Window {
                                             Text {
                                                 text: "Auto-preview audio";
                                                 font-size: 12px;
-                                                color: #f3f4f8;
+                                                color: Theme.primary-text;
                                                 vertical-alignment: center;
                                                 horizontal-stretch: 1;
                                             }
@@ -1417,10 +1478,10 @@ export component SpotlightWindow inherits Window {
 
                                 // Config file location & actions
                                 Rectangle {
-                                    background: #171822;
+                                    background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
-                                    border-color: #26293d;
+                                    border-color: Theme.card-border;
 
                                     HorizontalLayout {
                                         padding: 12px;
@@ -1435,13 +1496,13 @@ export component SpotlightWindow inherits Window {
                                                 text: "Config File";
                                                 font-size: 13px;
                                                 font-weight: 600;
-                                                color: #f3f4f8;
+                                                color: Theme.primary-text;
                                             }
                                             Text {
                                                 text: root.config-path-display;
                                                 font-size: 10.5px;
                                                 font-family: "Consolas";
-                                                color: #8b90aa;
+                                                color: Theme.muted-text;
                                                 overflow: elide;
                                             }
                                         }
@@ -1456,9 +1517,9 @@ export component SpotlightWindow inherits Window {
                                                     width: 72px;
                                                     height: 26px;
                                                     border-radius: 6px;
-                                                    background: open-cfg-touch.has-hover ? #282b3d : #1f2130;
+                                                    background: open-cfg-touch.has-hover ? Theme.control-hover : Theme.control-background;
                                                     border-width: 1px;
-                                                    border-color: #363952;
+                                                    border-color: Theme.outline;
                                                     accessible-role: button;
                                                     accessible-label: "Open config file";
                                                     accessible-action-default => { root.open-config-file(); }
@@ -1466,7 +1527,7 @@ export component SpotlightWindow inherits Window {
                                                         text: "Open File";
                                                         font-size: 11px;
                                                         font-weight: 600;
-                                                        color: #cbd5e1;
+                                                        color: Theme.control-text;
                                                         horizontal-alignment: center;
                                                         vertical-alignment: center;
                                                     }
@@ -1486,9 +1547,9 @@ export component SpotlightWindow inherits Window {
                                                     width: 58px;
                                                     height: 26px;
                                                     border-radius: 6px;
-                                                    background: reload-cfg-touch.has-hover ? #282b3d : #1f2130;
+                                                    background: reload-cfg-touch.has-hover ? Theme.control-hover : Theme.control-background;
                                                     border-width: 1px;
-                                                    border-color: #363952;
+                                                    border-color: Theme.outline;
                                                     accessible-role: button;
                                                     accessible-label: "Reload config file";
                                                     accessible-action-default => { root.reload-settings(); }
@@ -1496,7 +1557,7 @@ export component SpotlightWindow inherits Window {
                                                         text: "Reload";
                                                         font-size: 11px;
                                                         font-weight: 600;
-                                                        color: #cbd5e1;
+                                                        color: Theme.control-text;
                                                         horizontal-alignment: center;
                                                         vertical-alignment: center;
                                                     }
@@ -1524,7 +1585,7 @@ export component SpotlightWindow inherits Window {
                             : root.show-recent-items ? "No recently added items"
                             : "No matching results";
                         font-size: 13px;
-                        color: #6b708b;
+                        color: Theme.subtle-text;
                         horizontal-alignment: center;
                     }
                 }
@@ -1541,9 +1602,9 @@ export component SpotlightWindow inherits Window {
                         height: 36px;
                         border-radius: 6px;
                         clip: true;
-                        background: idx == root.selected-index ? #6366f12e : (row-touch.has-hover ? #1c1e2b : transparent);
+                        background: idx == root.selected-index ? Theme.row-selected : (row-touch.has-hover ? Theme.row-hover : transparent);
                         border-width: idx == root.selected-index ? 1px : 0px;
-                        border-color: #6366f188;
+                        border-color: Theme.row-outline;
 
                         row-touch := TouchArea {
                             property <bool> shift-click;
@@ -1567,6 +1628,25 @@ export component SpotlightWindow inherits Window {
                             padding-right: 12px;
                             spacing: 10px;
 
+                            // Category pill
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: category-label.preferred-width + 14px;
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: Theme.indigo ? item.badge-bg : item.badge-fg.with-alpha(Theme.light ? 0.26 : 0.14);
+                                    category-label := Text {
+                                        text: item.category;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        color: Theme.indigo ? item.badge-fg : item.badge-fg.mix(Theme.primary-text, Theme.light ? 0.20 : 0.75);
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
                             // Result name and selected project item's bin path side-by-side
                             HorizontalLayout {
                                 horizontal-stretch: 1;
@@ -1580,36 +1660,19 @@ export component SpotlightWindow inherits Window {
                                         text: item.name;
                                         font-size: 13px;
                                         font-weight: idx == root.selected-index ? 600 : 400;
-                                        color: idx == root.selected-index ? #ffffff : #dcdfe8;
+                                        color: idx == root.selected-index ? Theme.row-selected-text : Theme.result-text;
                                         overflow: elide;
                                     }
                                 }
 
-                                if idx == root.selected-index && item.folder != "" : Rectangle {
+                                if idx == root.selected-index && item.folder != "" : Text {
+                                    min-width: 0px;
                                     horizontal-stretch: 1;
-                                    background: transparent;
-
-                                    Rectangle {
-                                        x: 0px;
-                                        y: (parent.height - self.height) / 2;
-                                        width: min(parent.width, folder-text.preferred-width + 14px);
-                                        height: 20px;
-                                        border-radius: 4px;
-                                        background: #1f2233;
-                                        border-width: 1px;
-                                        border-color: #3a3f5c;
-
-                                        folder-text := Text {
-                                            x: 7px;
-                                            width: parent.width - 14px;
-                                            height: 100%;
-                                            text: item.folder;
-                                            font-size: 10.5px;
-                                            color: #b4b9d4;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
-                                    }
+                                    text: item.folder;
+                                    font-size: 10.5px;
+                                    color: Theme.breadcrumb-text;
+                                    vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
 
@@ -1619,7 +1682,7 @@ export component SpotlightWindow inherits Window {
                                     width: 32px;
                                     height: 24px;
                                     border-radius: 5px;
-                                    background: playback-button.has-hover ? #6366f133 : transparent;
+                                    background: playback-button.has-hover ? Theme.accent-hover : transparent;
                                     accessible-role: button;
                                     accessible-label: !root.preview-can-toggle ? "Loading audio preview"
                                         : root.preview-playing ? "Pause audio preview" : "Play audio preview";
@@ -1634,7 +1697,7 @@ export component SpotlightWindow inherits Window {
                                         height: 12px;
                                         viewbox-width: 12;
                                         viewbox-height: 12;
-                                        fill: root.preview-can-toggle ? #c7d2fe : #8187a4;
+                                        fill: root.preview-can-toggle ? Theme.accent-text : Theme.preview-disabled;
                                         commands: root.preview-playing
                                             ? "M2 1 H5 V11 H2 Z M7 1 H10 V11 H7 Z"
                                             : "M2 1 L11 6 L2 11 Z";
@@ -1648,24 +1711,6 @@ export component SpotlightWindow inherits Window {
                                 }
                             }
 
-                            // Category pill
-                            VerticalLayout {
-                                alignment: center;
-                                Rectangle {
-                                    width: 98px;
-                                    height: 20px;
-                                    border-radius: 4px;
-                                    background: item.badge-bg;
-                                    Text {
-                                        text: item.category;
-                                        font-size: 10px;
-                                        font-weight: 600;
-                                        color: item.badge-fg;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
                         }
 
                         if root.preview-active && idx == root.selected-index && root.preview-can-seek : Rectangle {
@@ -1693,14 +1738,14 @@ export component SpotlightWindow inherits Window {
                                 width: 100%;
                                 height: 2px;
                                 border-radius: 1px;
-                                background: #3e425a;
+                                background: Theme.progress-track;
                                 Rectangle {
                                     x: 0px;
                                     y: 0px;
                                     width: parent.width * root.preview-progress;
                                     height: parent.height;
                                     border-radius: parent.border-radius;
-                                    background: #a5b4fc;
+                                    background: Theme.progress-fill;
                                 }
                             }
                             TouchArea {
@@ -1718,13 +1763,13 @@ export component SpotlightWindow inherits Window {
             // Divider
             Rectangle {
                 height: 1px;
-                background: #222434;
+                background: Theme.footer-divider;
             }
 
             // Footer
             Rectangle {
                 height: 36px;
-                background: #151620;
+                background: Theme.strip-background;
 
                 HorizontalLayout {
                     width: 100%;
@@ -1745,7 +1790,7 @@ export component SpotlightWindow inherits Window {
                                 width: 7px;
                                 height: 7px;
                                 border-radius: 3.5px;
-                                background: root.bridge-connected ? #22c55e : #f59e0b;
+                                background: root.bridge-connected ? Theme.connected : Theme.warning;
                             }
                         }
 
@@ -1755,7 +1800,7 @@ export component SpotlightWindow inherits Window {
                             Text {
                                 text: root.preview-message != "" ? root.preview-message : root.status-message;
                                 font-size: 11px;
-                                color: #8b90aa;
+                                color: Theme.muted-text;
                                 wrap: word-wrap;
                                 height: 30px;
                                 vertical-alignment: center;
@@ -1770,7 +1815,7 @@ export component SpotlightWindow inherits Window {
                             text: root.show-recent-items ? "Recently added"
                                 : root.total-matches == 1 ? "1 result" : root.total-matches + " results";
                             font-size: 11px;
-                            color: #8b90aa;
+                            color: Theme.muted-text;
                         }
                     }
 
@@ -1781,10 +1826,10 @@ export component SpotlightWindow inherits Window {
                             width: 24px;
                             height: 24px;
                             border-radius: 5px;
-                            background: root.settings-open ? #6366f133
-                                : (gear-touch.has-hover ? #25283a : transparent);
+                            background: root.settings-open ? Theme.accent-hover
+                                : (gear-touch.has-hover ? Theme.shortcut-hover : transparent);
                             border-width: root.settings-open ? 1px : 0px;
-                            border-color: #818cf888;
+                            border-color: Theme.focus-outline-soft;
                             accessible-role: button;
                             accessible-label: root.settings-open ? "Close settings" : "Open settings";
                             accessible-action-default => { root.toggle-settings(); }
@@ -1796,8 +1841,8 @@ export component SpotlightWindow inherits Window {
                                 height: 14px;
                                 viewbox-width: 24;
                                 viewbox-height: 24;
-                                fill: root.settings-open ? #c7d2fe
-                                    : (gear-touch.has-hover ? #dcdfe8 : #8b90aa);
+                                fill: root.settings-open ? Theme.accent-text
+                                    : (gear-touch.has-hover ? Theme.result-text : Theme.muted-text);
                                 commands: "M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.44.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.48.48 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.03.24.23.41.47.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.48.48 0 0 0-.12-.61l-2.01-1.58z";
                             }
                             Rectangle {
@@ -1806,7 +1851,7 @@ export component SpotlightWindow inherits Window {
                                 width: 5px;
                                 height: 5px;
                                 border-radius: 2.5px;
-                                background: root.settings-open ? #1d2038 : (gear-touch.has-hover ? #25283a : #151620);
+                                background: root.settings-open ? Theme.settings-icon-center : (gear-touch.has-hover ? Theme.shortcut-hover : Theme.strip-background);
                             }
 
                             gear-touch := TouchArea {
@@ -1832,7 +1877,7 @@ export component SpotlightWindow inherits Window {
         width: root.width;
         height: root.height;
         border-width: 1.5px;
-        border-color: #363952;
+        border-color: Theme.outline;
         border-radius: 10px;
     }
 }
