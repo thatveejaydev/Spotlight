@@ -413,6 +413,37 @@ component ShortcutRecorderRow inherits HorizontalLayout {
     }
 }
 
+component SettingsToggle inherits Rectangle {
+    in property <bool> checked;
+    in property <string> label;
+    callback toggled();
+
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: checked ? #6366f1 : #2a2d40;
+    border-width: 1px;
+    border-color: checked ? #818cf8 : #3a3f5c;
+    accessible-role: checkbox;
+    accessible-label: label;
+    accessible-checked: checked;
+    accessible-action-default => { root.toggled(); }
+
+    Rectangle {
+        x: root.checked ? 20px : 3px;
+        y: 3px;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: #ffffff;
+        animate x { duration: 120ms; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
+    }
+}
+
 export component SpotlightWindow inherits Window {
     title: "";
     no-frame: true;
@@ -451,6 +482,15 @@ export component SpotlightWindow inherits Window {
     in-out property <string> catalog-all-hotkey-label: "";
     in-out property <string> catalog-effects-hotkey-label: "";
     in-out property <string> catalog-project-hotkey-label: "";
+    in property <string> audio-preview-hotkey-label: "Ctrl+P";
+    in property <bool> auto-preview-audio: false;
+    in property <bool> preview-active: false;
+    in property <string> preview-message: "";
+    in property <string> preview-time: "";
+    in property <float> preview-progress: 0;
+    in property <bool> preview-playing: false;
+    in property <bool> preview-can-seek: false;
+    in property <bool> preview-can-toggle: false;
     in-out property <string> config-path-display: "";
     in-out property <string> settings-feedback: "";
     in-out property <bool> settings-feedback-error: false;
@@ -473,7 +513,10 @@ export component SpotlightWindow inherits Window {
     callback reset-default-hotkey();
     callback toggle-default-effect-controls();
     callback set-alternate-modifier(string);
-    callback try-palette-shortcut(string, bool, bool, bool, bool) -> bool;
+    callback try-palette-shortcut(string, bool, bool, bool, bool, bool) -> bool;
+    callback toggle-auto-preview-audio();
+    callback toggle-preview-playback();
+    callback seek-audio-preview(float);
     callback open-config-file();
     callback reload-settings();
 
@@ -562,6 +605,7 @@ export component SpotlightWindow inherits Window {
                     event.modifiers.alt,
                     event.modifiers.shift,
                     event.modifiers.meta,
+                    event.repeat,
                 )) {
                     return accept;
                 }
@@ -583,6 +627,7 @@ export component SpotlightWindow inherits Window {
                 event.modifiers.alt,
                 event.modifiers.shift,
                 event.modifiers.meta,
+                event.repeat,
             )) {
                 return accept;
             }
@@ -821,6 +866,7 @@ export component SpotlightWindow inherits Window {
                                     event.modifiers.alt,
                                     event.modifiers.shift,
                                     event.modifiers.meta,
+                                    event.repeat,
                                 )) {
                                     return accept;
                                 }
@@ -1151,34 +1197,12 @@ export component SpotlightWindow inherits Window {
 
                                         VerticalLayout {
                                             alignment: center;
-                                            Rectangle {
-                                                width: 40px;
-                                                height: 22px;
-                                                border-radius: 11px;
-                                                background: root.open-effect-controls-default ? #6366f1 : #2a2d40;
-                                                border-width: 1px;
-                                                border-color: root.open-effect-controls-default ? #818cf8 : #3a3f5c;
-                                                accessible-role: checkbox;
-                                                accessible-label: "Always open Effect Controls on Enter";
-                                                accessible-checked: root.open-effect-controls-default;
-                                                accessible-action-default => { root.toggle-default-effect-controls(); }
-
-                                                Rectangle {
-                                                    x: root.open-effect-controls-default ? 20px : 3px;
-                                                    y: 3px;
-                                                    width: 14px;
-                                                    height: 14px;
-                                                    border-radius: 7px;
-                                                    background: #ffffff;
-                                                    animate x { duration: 120ms; }
-                                                }
-
-                                                TouchArea {
-                                                    mouse-cursor: pointer;
-                                                    clicked => {
-                                                        root.set-recording(false);
-                                                        root.toggle-default-effect-controls();
-                                                    }
+                                            SettingsToggle {
+                                                checked: root.open-effect-controls-default;
+                                                label: "Always open Effect Controls on Enter";
+                                                toggled => {
+                                                    root.set-recording(false);
+                                                    root.toggle-default-effect-controls();
                                                 }
                                             }
                                         }
@@ -1324,7 +1348,49 @@ export component SpotlightWindow inherits Window {
                                     }
                                 }
 
-                                // Card 6: Config file location & actions
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 8px;
+
+                                        ShortcutRecorderRow {
+                                            label: "Preview Audio Shortcut";
+                                            shortcut-text: root.audio-preview-hotkey-label;
+                                            recording: root.recording-hotkey && root.recording-target == "audio_preview";
+                                            toggle-record => { root.begin-recording("audio_preview"); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut("audio_preview");
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Auto-preview audio";
+                                                font-size: 12px;
+                                                color: #f3f4f8;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                            SettingsToggle {
+                                                checked: root.auto-preview-audio;
+                                                label: "Auto-preview audio";
+                                                toggled => {
+                                                    root.set-recording(false);
+                                                    root.toggle-auto-preview-audio();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Config file location & actions
                                 Rectangle {
                                     background: #171822;
                                     border-radius: 8px;
@@ -1449,9 +1515,27 @@ export component SpotlightWindow inherits Window {
                     for item[idx] in root.results : Rectangle {
                         height: 36px;
                         border-radius: 6px;
+                        clip: true;
                         background: idx == root.selected-index ? #6366f12e : (row-touch.has-hover ? #1c1e2b : transparent);
                         border-width: idx == root.selected-index ? 1px : 0px;
                         border-color: #6366f188;
+
+                        row-touch := TouchArea {
+                            property <bool> shift-click;
+                            mouse-cursor: pointer;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    self.shift-click = root.is-alternate-modifier(event.modifiers);
+                                }
+                            }
+                            clicked => {
+                                if (self.shift-click) {
+                                    root.shift-activate-index(idx);
+                                } else {
+                                    root.activate-index(idx);
+                                }
+                            }
+                        }
 
                         HorizontalLayout {
                             padding-left: 12px;
@@ -1504,6 +1588,41 @@ export component SpotlightWindow inherits Window {
                                 }
                             }
 
+                            if root.preview-active && idx == root.selected-index : VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 32px;
+                                    height: 24px;
+                                    border-radius: 5px;
+                                    background: playback-button.has-hover ? #6366f133 : transparent;
+                                    accessible-role: button;
+                                    accessible-label: !root.preview-can-toggle ? "Loading audio preview"
+                                        : root.preview-playing ? "Pause audio preview" : "Play audio preview";
+                                    accessible-enabled: root.preview-can-toggle;
+                                    accessible-action-default => {
+                                        if root.preview-can-toggle { root.toggle-preview-playback(); }
+                                    }
+                                    Path {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 12px;
+                                        height: 12px;
+                                        viewbox-width: 12;
+                                        viewbox-height: 12;
+                                        fill: root.preview-can-toggle ? #c7d2fe : #8187a4;
+                                        commands: root.preview-playing
+                                            ? "M2 1 H5 V11 H2 Z M7 1 H10 V11 H7 Z"
+                                            : "M2 1 L11 6 L2 11 Z";
+                                    }
+                                    playback-button := TouchArea {
+                                        mouse-cursor: root.preview-can-toggle ? MouseCursor.pointer : MouseCursor.default;
+                                        clicked => {
+                                            if root.preview-can-toggle { root.toggle-preview-playback(); }
+                                        }
+                                    }
+                                }
+                            }
+
                             // Category pill
                             VerticalLayout {
                                 alignment: center;
@@ -1524,20 +1643,47 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        row-touch := TouchArea {
-                            property <bool> shift-click;
-                            mouse-cursor: pointer;
-                            pointer-event(event) => {
-                                if (event.kind == PointerEventKind.down) {
-                                    self.shift-click = root.is-alternate-modifier(event.modifiers);
+                        if root.preview-active && idx == root.selected-index && root.preview-can-seek : Rectangle {
+                            x: 0px;
+                            y: parent.height - self.height - 1px;
+                            width: parent.width;
+                            height: 8px;
+                            accessible-role: slider;
+                            accessible-label: "Audio preview position";
+                            accessible-value: root.preview-progress;
+                            accessible-value-minimum: 0;
+                            accessible-value-maximum: 1;
+                            accessible-action-increment => {
+                                root.seek-audio-preview(min(1, root.preview-progress + 0.05));
+                            }
+                            accessible-action-decrement => {
+                                root.seek-audio-preview(max(0, root.preview-progress - 0.05));
+                            }
+                            accessible-action-set-value(value) => {
+                                if value.is-float() { root.seek-audio-preview(value.to-float()); }
+                            }
+
+                            Rectangle {
+                                y: parent.height - self.height - 1px;
+                                width: 100%;
+                                height: 2px;
+                                border-radius: 1px;
+                                background: #3e425a;
+                                Rectangle {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: parent.width * root.preview-progress;
+                                    height: parent.height;
+                                    border-radius: parent.border-radius;
+                                    background: #a5b4fc;
                                 }
                             }
-                            clicked => {
-                                if (self.shift-click) {
-                                    root.shift-activate-index(idx);
-                                } else {
-                                    root.activate-index(idx);
-                                }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.seek-audio-preview(self.mouse-x / self.width); }
+                            }
+                            Tooltip {
+                                text: @markdown("\{root.preview-time}");
                             }
                         }
                     }
@@ -1582,7 +1728,7 @@ export component SpotlightWindow inherits Window {
                             horizontal-stretch: 1;
                             alignment: center;
                             Text {
-                                text: root.status-message;
+                                text: root.preview-message != "" ? root.preview-message : root.status-message;
                                 font-size: 11px;
                                 color: #8b90aa;
                                 wrap: word-wrap;

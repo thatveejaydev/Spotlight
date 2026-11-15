@@ -31,6 +31,7 @@ cargo run --release
 ## Keyboard Controls (Inside Spotlight Popup)
 - **Type:** Fuzzy search effects, transitions, custom presets, and items in the active project. Selected presets and project items show their folder path.
 - **`↑` / `↓` Arrows:** Navigate results
+- **`Ctrl+P` (configurable):** Play or pause the highlighted audio clip in Project or All. The highlighted audio row also has a play/pause icon. During preview, click the progress line to seek within the clip’s Premiere In and Out points. Audio preview requires Premiere Pro 25.6 or later and supports WAV, PCM AIFF, MP3, FLAC, AAC, and AAC/ALAC in M4A.
 - **`Tab` (or click the search-bar badge):** Switch catalogs (`All` → `Effects` → `Project`). Spotlight opens in `All` and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, drill into a project bin to browse/search its contents, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
 - **`Enter` (or Click) on a `Preset` result:** Open Premiere’s Effects panel and search for that preset by name. Drag it onto a clip to apply it. Spotlight uses the Effects and Select Find Box bindings from Premiere’s Keyboard Shortcuts and refreshes presets after Premiere saves them to your profile.
@@ -44,4 +45,5 @@ cargo run --release
   - Toggle **Always open Effect Controls on Enter** (swaps primary and alternate actions for effects).
   - Choose the **Alternate Action Modifier** (`Shift`, `Ctrl`, or `Alt`, default `Shift`) used with `Enter` / Click.
   - Customize the **Open Settings Shortcut** (default `Ctrl+,`) and optional **Direct Catalog Shortcuts** for **All**, **Effects**, and **Project** (all empty by default).
+  - Customize the **Preview Audio Shortcut** (default `Ctrl+P`) and enable **Auto-preview audio** to play a clip after its highlight settles. Auto-preview is off by default.
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.

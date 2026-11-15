@@ -89,7 +89,7 @@ function fixture() {
     WebSocket: { OPEN: 1 }, console, socket
   });
   const exports = vm.runInContext(
-    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, ensureCatalogScanned, scanPremiereCatalog });", context
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog });", context
   );
   const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = exports;
   return {
@@ -101,9 +101,67 @@ function fixture() {
     openSource(itemId = "take") {
       return openInSourceMonitor({ itemId, projectId: "project" });
     },
+    previewAudio(itemId = "take") {
+      return exports.resolveAudioPreview({ itemId, projectId: "project" });
+    },
     scan(id) { return syncProjectItems(socket, id); }
   };
 }
+
+test("resolves an audio file and its In and Out points without an active timeline", async () => {
+  const f = fixture();
+  f.project.getActiveSequence = () => null;
+  f.clip.getMediaFilePath = () => "C:\\Media\\Audio\\Original.wav";
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.clip.getInPoint = (type) => {
+    assert.equal(type, "audio");
+    return time(254016000000n * 2n);
+  };
+  f.clip.getOutPoint = (type) => {
+    assert.equal(type, "audio");
+    return time(254016000000n * 5n);
+  };
+  await f.scan(1);
+  assert.equal(f.messages[0].items.find((item) => item.itemId === "take").path, undefined);
+  f.project.getRootItem = () => assert.fail("the indexed item should be reused");
+  const result = await f.previewAudio();
+  assert.equal(result.path, "C:\\Media\\Audio\\Original.wav");
+  assert.equal(result.inSeconds, 2);
+  assert.equal(result.outSeconds, 5);
+  assert.deepEqual(f.commits, []);
+});
+
+test("previews a standalone audio file when Premiere omits component metadata and marks", async () => {
+  const f = fixture();
+  f.clip.getMediaFilePath = () => "C:\\Media\\Music.M4A";
+  f.clip.getComponentChain = () => { throw new Error("No chain"); };
+  f.clip.getInPoint = () => time(-1);
+  f.clip.getOutPoint = () => { throw new Error("No Out point"); };
+  assert.deepEqual({ ...await f.previewAudio() }, {
+    path: "C:\\Media\\Music.M4A", inSeconds: null, outSeconds: null
+  });
+});
+
+test("skips video and rejects offline, missing, and stale audio sources", async () => {
+  const f = fixture();
+  f.clip.getMediaFilePath = () => "C:\\Media\\Take.mov";
+  f.clip.getComponentChain = () => ({});
+  assert.equal(await f.previewAudio(), null);
+  assert.equal(await f.previewAudio("bin"), null);
+  assert.equal(await f.previewAudio("draft"), null);
+
+  f.clip.isOffline = () => true;
+  await assert.rejects(f.previewAudio(), /offline/);
+  f.clip.isOffline = () => false;
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.clip.getMediaFilePath = () => "";
+  await assert.rejects(f.previewAudio(), /could not provide the audio source/);
+  f.clip.getMediaFilePath = () => {
+    f.ppro.Project.getActiveProject = () => null;
+    return "C:\\Media\\Original.wav";
+  };
+  await assert.rejects(f.previewAudio(), /Active project changed/);
+});
 
 test("indexes nested bins, sequences, and unsupported Project panel items", async () => {
   const f = fixture();

@@ -229,6 +229,13 @@ pub enum IncomingPluginMessage {
         #[serde(default)]
         message: String,
     },
+    #[serde(rename = "audio_preview_ack", rename_all = "camelCase")]
+    AudioPreviewAck {
+        request_id: u64,
+        source: Option<AudioPreviewSource>,
+        #[serde(default)]
+        message: String,
+    },
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "show_window")]
@@ -256,6 +263,12 @@ pub enum OutgoingHelperMessage {
     },
     #[serde(rename = "open_in_source_monitor", rename_all = "camelCase")]
     OpenInSourceMonitor {
+        request_id: u64,
+        project_id: String,
+        item_id: String,
+    },
+    #[serde(rename = "request_audio_preview", rename_all = "camelCase")]
+    RequestAudioPreview {
         request_id: u64,
         project_id: String,
         item_id: String,
@@ -740,6 +753,7 @@ pub enum BridgeEvent {
     ProjectItemsChanged,
     PlacementResult(PlacementResult),
     SourceMonitorResult(PlacementResult),
+    AudioPreviewResult(AudioPreviewResult),
     ShowWindowRequested,
 }
 
@@ -754,6 +768,21 @@ pub struct PlacementResult {
     pub peer_id: usize,
     pub request_id: u64,
     pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPreviewSource {
+    pub path: std::path::PathBuf,
+    pub in_seconds: Option<f64>,
+    pub out_seconds: Option<f64>,
+}
+
+pub struct AudioPreviewResult {
+    pub peer_id: usize,
+    pub request_id: u64,
+    pub source: Option<AudioPreviewSource>,
     pub message: String,
 }
 
@@ -800,6 +829,25 @@ pub struct MediaCatalog {
     pub project_id: Option<String>,
     pub sequence_id: Option<String>,
     pub items: Vec<ProjectItemEntry>,
+}
+
+fn project_source<'a>(
+    peers: &'a [Peer],
+    catalog: &MediaCatalog,
+    item_id: &str,
+) -> Result<(&'a Peer, &'a ProjectItemEntry, &'a str), &'static str> {
+    let mut catalogs = peers.iter().filter_map(|peer| Some((peer, peer.media.as_ref()?)));
+    let (peer, current) = catalogs.next().ok_or("Premiere media bridge disconnected.")?;
+    if catalogs.next().is_some() {
+        return Err("Close the other Premiere session before opening media.");
+    }
+    if peer.id != catalog.peer_id || current.project_id != catalog.project_id {
+        return Err("Project media changed. Search again.");
+    }
+    let entry = current.items.iter().find(|entry| entry.item_id == item_id)
+        .ok_or("Project media changed. Search again.")?;
+    let project_id = current.project_id.as_deref().ok_or("Open a Premiere project first.")?;
+    Ok((peer, entry, project_id))
 }
 
 impl BridgeClients {
@@ -932,30 +980,14 @@ impl BridgeClients {
         item_id: String,
     ) -> Result<u64, &'static str> {
         let peers = self.peers.lock().unwrap();
-        let mut media_peers = peers.iter().filter(|peer| peer.media.is_some());
-        let Some(peer) = media_peers.next() else {
-            return Err("Premiere media bridge disconnected.");
-        };
-        if media_peers.next().is_some() {
-            return Err("Close the other Premiere session before opening media.");
-        }
-        let current = peer.media.as_ref().unwrap();
-        if peer.id != catalog.peer_id || current.project_id != catalog.project_id {
-            return Err("Project media changed. Search again.");
-        }
-        let entry = current.items.iter().find(|entry| entry.item_id == item_id)
-            .ok_or("Project media changed. Search again.")?;
+        let (peer, entry, project_id) = project_source(&peers, catalog, &item_id)?;
         if let Some(message) = entry.source_monitor_error() {
             return Err(message);
         }
-        let project_id = current
-            .project_id
-            .clone()
-            .ok_or("Open a Premiere project first.")?;
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
         let msg = OutgoingHelperMessage::OpenInSourceMonitor {
             request_id,
-            project_id,
+            project_id: project_id.to_owned(),
             item_id,
         };
         peer.tx
@@ -967,6 +999,32 @@ impl BridgeClients {
             "BRIDGE",
             format!("-> open_in_source_monitor (id={request_id})"),
         );
+        Ok(request_id)
+    }
+
+    pub fn request_audio_preview(
+        &self,
+        catalog: &MediaCatalog,
+        item_id: &str,
+    ) -> Result<u64, &'static str> {
+        let peers = self.peers.lock().unwrap();
+        let (peer, entry, project_id) = project_source(&peers, catalog, item_id)?;
+        if entry.kind != crate::catalog::ProjectItemKind::Media {
+            return Err("Select an audio clip to preview.");
+        }
+        if entry.offline {
+            return Err("Relink the offline media before previewing it.");
+        }
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let msg = OutgoingHelperMessage::RequestAudioPreview {
+            request_id,
+            project_id: project_id.to_owned(),
+            item_id: item_id.to_owned(),
+        };
+        peer.tx
+            .send(serde_json::to_string(&msg).unwrap())
+            .map_err(|_| "Premiere media bridge disconnected.")?;
+        self.track_request(request_id, "request_audio_preview");
         Ok(request_id)
     }
 
@@ -1104,6 +1162,7 @@ where
                                     | IncomingPluginMessage::Ack { .. }
                                     | IncomingPluginMessage::PlacementAck { .. }
                                     | IncomingPluginMessage::SourceMonitorAck { .. }
+                                    | IncomingPluginMessage::AudioPreviewAck { .. }
                             )
                         {
                             is_plugin_client = true;
@@ -1186,6 +1245,14 @@ where
                                         request_id,
                                         ok,
                                         message,
+                                    }));
+                                }
+                            }
+                            IncomingPluginMessage::AudioPreviewAck { request_id, source, message } => {
+                                bridge.finish_request(request_id);
+                                if is_plugin_client {
+                                    cb(BridgeEvent::AudioPreviewResult(AudioPreviewResult {
+                                        peer_id, request_id, source, message,
                                     }));
                                 }
                             }

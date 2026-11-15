@@ -8,6 +8,7 @@ use std::{
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Space";
 pub const DEFAULT_SETTINGS_HOTKEY: &str = "Ctrl+,";
+pub const DEFAULT_AUDIO_PREVIEW_HOTKEY: &str = "Ctrl+P";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +47,8 @@ pub struct AppSettings {
     pub catalog_all_hotkey: String,
     pub catalog_effects_hotkey: String,
     pub catalog_project_hotkey: String,
+    pub audio_preview_hotkey: String,
+    pub auto_preview_audio: bool,
 }
 
 impl Default for AppSettings {
@@ -58,6 +61,8 @@ impl Default for AppSettings {
             catalog_all_hotkey: String::new(),
             catalog_effects_hotkey: String::new(),
             catalog_project_hotkey: String::new(),
+            audio_preview_hotkey: DEFAULT_AUDIO_PREVIEW_HOTKEY.into(),
+            auto_preview_audio: false,
         }
     }
 }
@@ -66,6 +71,7 @@ impl Default for AppSettings {
 pub enum PaletteShortcutAction {
     ToggleSettings,
     SelectCatalog(&'static str),
+    PreviewAudio,
 }
 
 pub fn config_path() -> PathBuf {
@@ -86,8 +92,10 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load_settings() -> AppSettings {
-    let path = config_path();
-    let mut settings = load_settings_from(&path);
+    normalize_settings(load_settings_from(&config_path()))
+}
+
+fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.hotkey = parse_hotkey_spec(&settings.hotkey)
         .map(|(_, canonical)| canonical)
         .unwrap_or_else(|_| DEFAULT_HOTKEY.to_string());
@@ -100,6 +108,11 @@ pub fn load_settings() -> AppSettings {
         normalize_optional_hotkey(&settings.catalog_effects_hotkey, "");
     settings.catalog_project_hotkey =
         normalize_optional_hotkey(&settings.catalog_project_hotkey, "");
+    settings.audio_preview_hotkey =
+        normalize_optional_hotkey(&settings.audio_preview_hotkey, DEFAULT_AUDIO_PREVIEW_HOTKEY);
+    if shortcut_conflict("audio_preview", &settings.audio_preview_hotkey, &settings).is_some() {
+        settings.audio_preview_hotkey.clear();
+    }
     settings
 }
 
@@ -347,10 +360,20 @@ pub fn match_palette_shortcut(
             return Some(PaletteShortcutAction::SelectCatalog(catalog));
         }
     }
-    None
+    matches_spec(&settings.audio_preview_hotkey).then_some(PaletteShortcutAction::PreviewAudio)
 }
 
 pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> Option<String> {
+    if target == "audio_preview"
+        && parse_palette_hotkey_spec(label).is_ok_and(|(hotkey, _)| {
+            matches!(
+                hotkey.key,
+                Code::Enter | Code::Tab | Code::ArrowUp | Code::ArrowDown | Code::Backspace | Code::F12
+            )
+        })
+    {
+        return Some("That key is reserved for palette navigation or actions.".into());
+    }
     let slots = [
         ("launch", "Launch Hotkey", settings.hotkey.as_str()),
         ("settings", "Open Settings", settings.settings_hotkey.as_str()),
@@ -365,6 +388,7 @@ pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> O
             "Project Catalog",
             settings.catalog_project_hotkey.as_str(),
         ),
+        ("audio_preview", "Preview Audio", settings.audio_preview_hotkey.as_str()),
     ];
     for (slot, name, existing) in slots {
         if slot != target && !existing.is_empty() && existing.eq_ignore_ascii_case(label) {
@@ -548,6 +572,8 @@ mod tests {
             catalog_all_hotkey: "Ctrl+1".into(),
             catalog_effects_hotkey: "Ctrl+2".into(),
             catalog_project_hotkey: "Ctrl+3".into(),
+            audio_preview_hotkey: "Alt+P".into(),
+            auto_preview_audio: true,
         };
         save_settings_to(&file, &saved).unwrap();
         assert_eq!(load_settings_from(&file), saved);
@@ -556,6 +582,31 @@ mod tests {
         assert_eq!(load_settings_from(&file), AppSettings::default());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_preview_shortcut_defaults_and_preserves_existing_bindings() {
+        let default = normalize_settings(serde_json::from_str("{}").unwrap());
+        assert_eq!(default.audio_preview_hotkey, "Ctrl+P");
+        assert!(!default.auto_preview_audio);
+        assert_eq!(
+            match_palette_shortcut(&default, false, "p", true, false, false, false),
+            Some(PaletteShortcutAction::PreviewAudio)
+        );
+        assert_eq!(match_palette_shortcut(&default, true, "p", true, false, false, false), None);
+        assert!(shortcut_conflict("audio_preview", "Alt+Enter", &default).is_some());
+        assert!(shortcut_conflict("catalog_project", "Ctrl+P", &default).is_some());
+
+        let migrated = normalize_settings(
+            serde_json::from_str(r#"{"catalog_project_hotkey":"ctrl+p"}"#).unwrap(),
+        );
+        assert_eq!(migrated.catalog_project_hotkey, "Ctrl+P");
+        assert!(migrated.audio_preview_hotkey.is_empty());
+        let cleared = normalize_settings(
+            serde_json::from_str(r#"{"audio_preview_hotkey":"","auto_preview_audio":true}"#).unwrap(),
+        );
+        assert!(cleared.audio_preview_hotkey.is_empty());
+        assert!(cleared.auto_preview_audio);
     }
 
     #[test]

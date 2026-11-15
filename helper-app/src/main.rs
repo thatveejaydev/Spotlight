@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio_preview;
 mod bridge;
 mod catalog;
 mod debug_log;
@@ -10,6 +11,7 @@ mod settings;
 mod tray;
 mod win_focus;
 
+use audio_preview::AudioPreview;
 use bridge::{
     ApplyResult, BridgeClients, BridgeEvent, EffectControlsShortcut, MediaCatalog, PlacementResult,
 };
@@ -52,6 +54,7 @@ struct AppState {
     media_catalog: Option<MediaCatalog>,
     pending_placement: Option<PendingPlacement>,
     pending_source_open: Option<PendingSourceOpen>,
+    audio_preview: AudioPreview,
     active_bin_path: Option<String>,
     settings: AppSettings,
     selected_abs_index: usize,
@@ -253,6 +256,28 @@ fn step_out_bin(ui: &SpotlightWindow, state: &mut AppState) {
 }
 
 fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
+    rebuild_results_ui(ui, state);
+    sync_audio_selection(ui, state);
+}
+
+fn sync_audio_selection(ui: &SpotlightWindow, state: &mut AppState) {
+    let item = if state.is_visible && !ui.get_settings_open() {
+        match state.matched_items.get(state.selected_abs_index) {
+            Some(SearchResult::ProjectItem(item)) => Some(item.as_ref()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    state.audio_preview.select(
+        ui,
+        state.media_catalog.as_ref(),
+        item,
+        state.settings.auto_preview_audio,
+    );
+}
+
+fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     let query = ui.get_search_text();
     let catalog = ui.get_active_catalog();
     let show_history =
@@ -304,7 +329,7 @@ fn refresh_catalog_ui(ui: &SpotlightWindow, state: &mut AppState, preserve_media
     let selected = state.matched_items.get(state.selected_abs_index).cloned();
     state.selected_abs_index = 0;
     state.scroll_offset = 0;
-    refresh_results_ui(ui, state);
+    rebuild_results_ui(ui, state);
     if let Some(selected) =
         selected.filter(|item| preserve_media || !matches!(item, SearchResult::ProjectItem(_)))
     {
@@ -317,6 +342,7 @@ fn refresh_catalog_ui(ui: &SpotlightWindow, state: &mut AppState, preserve_media
             sync_viewport_slice(ui, state);
         }
     }
+    sync_audio_selection(ui, state);
 }
 
 fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
@@ -436,6 +462,7 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     if !ui.get_settings_open() {
         ui.invoke_focus_search();
     }
+    sync_audio_selection(ui, state);
 }
 
 fn restore_premiere_focus(hwnd: isize) {
@@ -448,6 +475,7 @@ fn restore_premiere_focus(hwnd: isize) {
 }
 
 fn hide_palette(ui: &SpotlightWindow, state: &mut AppState) {
+    state.audio_preview.cancel(ui);
     win_focus::set_palette_visible(false);
     stop_focus_grace_timer();
     stop_shortcut_recording(ui, None);
@@ -805,6 +833,7 @@ fn main() -> Result<(), slint::PlatformError> {
         media_catalog: None,
         pending_placement: None,
         pending_source_open: None,
+        audio_preview: AudioPreview::default(),
         active_bin_path: None,
         settings: initial_settings.clone(),
         selected_abs_index: 0,
@@ -849,6 +878,17 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Start localhost WebSocket bridge on 127.0.0.1:3847
     let bridge = BridgeClients::new();
+    {
+        let ui = ui.as_weak();
+        let state_ref = Rc::downgrade(&state);
+        let bridge = bridge.clone();
+        state.borrow().audio_preview.set_poll_callback(move || {
+            if let (Some(ui), Some(state)) = (ui.upgrade(), state_ref.upgrade()) {
+                let st = &mut *state.borrow_mut();
+                st.audio_preview.poll(&ui, &bridge, st.media_catalog.as_ref());
+            }
+        });
+    }
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
@@ -991,6 +1031,9 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                         schedule_action_deadlines(&st);
                     }
+                    BridgeEvent::AudioPreviewResult(result) => {
+                        state_ref.borrow_mut().audio_preview.resolved(&ui, result);
+                    }
                     BridgeEvent::ShowWindowRequested => {
                         let fg_hwnd = win_focus::get_foreground_hwnd();
                         if win_focus::is_premiere_active_and_unminimized(fg_hwnd) {
@@ -1023,6 +1066,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 st.selected_abs_index = 0;
                 st.scroll_offset = 0;
                 refresh_results_ui(&ui, &mut st);
+                st.audio_preview.defer_autoplay();
             }
         });
     }
@@ -1071,6 +1115,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let next = (cur + delta as isize).rem_euclid(total as isize) as usize;
                 st.selected_abs_index = next;
                 sync_viewport_slice(&ui, &mut st);
+                sync_audio_selection(&ui, &mut st);
             }
         });
     }
@@ -1102,6 +1147,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
+                sync_viewport_slice(&ui, &mut st);
+                sync_audio_selection(&ui, &mut st);
                 let result = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref);
                 finish_activation(result, &error_toast, st.previous_hwnd);
             }
@@ -1134,6 +1181,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
                 sync_viewport_slice(&ui, &mut st);
+                sync_audio_selection(&ui, &mut st);
                 let result = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref);
                 finish_activation(result, &error_toast, st.previous_hwnd);
             }
@@ -1272,6 +1320,7 @@ fn main() -> Result<(), slint::PlatformError> {
             "catalog_project" => {
                 Some(("Project catalog shortcut", &mut settings.catalog_project_hotkey))
             }
+            "audio_preview" => Some(("Preview audio shortcut", &mut settings.audio_preview_hotkey)),
             _ => None,
         }
     }
@@ -1284,6 +1333,8 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_catalog_all_hotkey_label(settings.catalog_all_hotkey.clone().into());
         ui.set_catalog_effects_hotkey_label(settings.catalog_effects_hotkey.clone().into());
         ui.set_catalog_project_hotkey_label(settings.catalog_project_hotkey.clone().into());
+        ui.set_audio_preview_hotkey_label(settings.audio_preview_hotkey.clone().into());
+        ui.set_auto_preview_audio(settings.auto_preview_audio);
         ui.set_config_path_display(settings::config_path().to_string_lossy().into_owned().into());
         if !ui.get_bridge_connected() {
             ui.set_status_message(format!("Ready · {}", settings.hotkey).into());
@@ -1372,6 +1423,8 @@ fn main() -> Result<(), slint::PlatformError> {
         state.settings.catalog_all_hotkey = loaded.catalog_all_hotkey;
         state.settings.catalog_effects_hotkey = loaded.catalog_effects_hotkey;
         state.settings.catalog_project_hotkey = loaded.catalog_project_hotkey;
+        state.settings.audio_preview_hotkey = loaded.audio_preview_hotkey;
+        state.settings.auto_preview_audio = loaded.auto_preview_audio;
 
         let mut error_msg = None;
         if let Ok((hotkey, label)) = settings::parse_hotkey_spec(&loaded.hotkey) {
@@ -1384,6 +1437,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
         if let Some(err) = error_msg {
+            if settings::shortcut_conflict("audio_preview", &state.settings.audio_preview_hotkey, &state.settings).is_some() {
+                state.settings.audio_preview_hotkey.clear();
+            }
             ui.set_settings_feedback_error(true);
             ui.set_settings_feedback(err.into());
         } else {
@@ -1393,11 +1449,12 @@ fn main() -> Result<(), slint::PlatformError> {
         sync_settings_ui(ui, &state.settings);
     }
 
-    fn toggle_settings_view(ui: &SpotlightWindow, rec_flag: &AtomicBool) {
+    fn toggle_settings_view(ui: &SpotlightWindow, state: &mut AppState, rec_flag: &AtomicBool) {
         let next = !ui.get_settings_open();
         stop_shortcut_recording(ui, Some(rec_flag));
         ui.set_settings_feedback("".into());
         ui.set_settings_open(next);
+        sync_audio_selection(ui, state);
         if !next {
             ui.invoke_focus_search();
         }
@@ -1447,10 +1504,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
         let rec_flag = recording_hotkey_flag.clone();
         ui.on_toggle_settings(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                toggle_settings_view(&ui, &rec_flag);
+                toggle_settings_view(&ui, &mut state_ref.borrow_mut(), &rec_flag);
             }
         });
     }
@@ -1576,7 +1634,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let rec_flag = recording_hotkey_flag.clone();
-        ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta| {
+        ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta, repeat| {
             let Some(ui) = ui_weak.upgrade() else {
                 return false;
             };
@@ -1595,7 +1653,7 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             match action {
                 Some(PaletteShortcutAction::ToggleSettings) => {
-                    toggle_settings_view(&ui, &rec_flag);
+                    toggle_settings_view(&ui, &mut state_ref.borrow_mut(), &rec_flag);
                     true
                 }
                 Some(PaletteShortcutAction::SelectCatalog(target)) => {
@@ -1609,7 +1667,51 @@ fn main() -> Result<(), slint::PlatformError> {
                     jump_to_catalog(&ui, &mut st, target);
                     true
                 }
+                Some(PaletteShortcutAction::PreviewAudio) => {
+                    if !repeat {
+                        ui.invoke_toggle_preview_playback();
+                    }
+                    true
+                }
                 None => false,
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge = bridge.clone();
+        ui.on_toggle_preview_playback(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let st = &mut *state_ref.borrow_mut();
+                if st.is_visible && !ui.get_settings_open() {
+                    st.audio_preview.toggle(&ui, &bridge, st.media_catalog.as_ref());
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        ui.on_seek_audio_preview(move |fraction| {
+            if let Some(ui) = ui_weak.upgrade() {
+                state_ref.borrow_mut().audio_preview.seek(&ui, fraction);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        ui.on_toggle_auto_preview_audio(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                st.settings.auto_preview_audio = !st.settings.auto_preview_audio;
+                let message = if st.settings.auto_preview_audio {
+                    "Auto-preview audio enabled."
+                } else {
+                    "Auto-preview audio disabled."
+                };
+                let _ = save_and_sync_settings(&ui, &st.settings, message.into());
             }
         });
     }
@@ -1712,11 +1814,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 FocusOutcome::HideLostFocus => {
                     debug_log::log_event(LogKind::Focus, "FOCUS", "Lost focus -> hide palette");
-                    win_focus::set_palette_visible(false);
-                    stop_focus_grace_timer();
                     stop_shortcut_recording(&ui, Some(&rec_flag));
-                    ui.set_settings_open(false);
-                    let _ = ui.hide();
+                    hide_palette(ui, &mut state_ref.borrow_mut());
                 }
             }
         })
@@ -1897,6 +1996,171 @@ mod tests {
     }
 
     #[test]
+    fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        let item = |id: &str| ProjectItemEntry {
+            item_id: id.into(),
+            name: if id == "first" { "Renamed clip".into() } else { format!("{id}.wav") },
+            bin_path: "Audio".into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+        let catalog = MediaCatalog {
+            peer_id: 7,
+            project_id: Some("project".into()),
+            sequence_id: None,
+            items: vec![item("first"), item("second")],
+        };
+        let bridge = BridgeClients::new();
+        let outbound = bridge.connect_test_peer(catalog.clone());
+        let mut preview = AudioPreview::default();
+        let select = |preview: &mut AudioPreview, index: usize| {
+            preview.select(&ui, Some(&catalog), Some(&catalog.items[index]), true);
+        };
+        select(&mut preview, 0);
+        preview.poll(&ui, &bridge, Some(&catalog));
+        assert!(outbound.try_recv().is_err());
+        select(&mut preview, 1);
+        assert!(ui.get_preview_active() && ui.get_preview_can_toggle());
+        assert!(!ui.get_preview_playing());
+        std::thread::sleep(Duration::from_millis(260));
+        preview.poll(&ui, &bridge, Some(&catalog));
+        let request: serde_json::Value = serde_json::from_str(&outbound.try_recv().unwrap()).unwrap();
+        assert_eq!(request["type"], "request_audio_preview");
+        assert_eq!(request["projectId"], "project");
+        assert_eq!(request["itemId"], "second");
+        assert_eq!(request.get("sequenceId"), None);
+        select(&mut preview, 0);
+        preview.resolved(&ui, bridge::AudioPreviewResult {
+            peer_id: 7,
+            request_id: request["requestId"].as_u64().unwrap(),
+            source: Some(bridge::AudioPreviewSource {
+                path: "stale.wav".into(),
+                in_seconds: None,
+                out_seconds: None,
+            }),
+            message: String::new(),
+        });
+        assert!(!ui.get_preview_active());
+
+        preview.toggle(&ui, &bridge, Some(&catalog));
+        let manual: serde_json::Value = serde_json::from_str(&outbound.try_recv().unwrap()).unwrap();
+        assert_eq!(manual["itemId"], "first");
+        preview.cancel(&ui);
+        preview.resolved(&ui, bridge::AudioPreviewResult {
+            peer_id: 7,
+            request_id: manual["requestId"].as_u64().unwrap(),
+            source: None,
+            message: "Stale error".into(),
+        });
+        assert!(!ui.get_status_message().as_str().contains("Stale error"));
+
+        preview.select(&ui, Some(&catalog), Some(&catalog.items[0]), false);
+        std::thread::sleep(Duration::from_millis(260));
+        preview.poll(&ui, &bridge, Some(&catalog));
+        let identify: serde_json::Value = serde_json::from_str(&outbound.try_recv().unwrap()).unwrap();
+        preview.resolved(&ui, bridge::AudioPreviewResult {
+            peer_id: 7,
+            request_id: identify["requestId"].as_u64().unwrap(),
+            source: Some(bridge::AudioPreviewSource {
+                path: "renamed.wav".into(),
+                in_seconds: None,
+                out_seconds: None,
+            }),
+            message: String::new(),
+        });
+        assert!(ui.get_preview_active() && ui.get_preview_can_toggle());
+        assert!(!ui.get_preview_playing());
+        assert!(ui.get_preview_message().is_empty());
+    }
+
+    #[test]
+    fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
+        use std::cell::Cell;
+        use slint::platform::PointerEventButton;
+
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        let row = |name: &str| EffectItemUI {
+            name: name.into(),
+            category: "Media".into(),
+            folder: "Audio".into(),
+            badge_bg: Color::from_rgb_u8(0x21, 0x41, 0x68),
+            badge_fg: Color::from_rgb_u8(0xb9, 0xe5, 0xff),
+        };
+        ui.set_results(ModelRc::new(VecModel::from(vec![
+            row("Music.wav"),
+            row("SFX.wav"),
+        ])));
+        ui.set_total_matches(2);
+        ui.set_preview_active(true);
+        ui.set_preview_time("0:01 / 0:04".into());
+        ui.set_preview_progress(0.25);
+        ui.set_preview_can_toggle(true);
+        ui.set_preview_can_seek(true);
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+
+        let width = WINDOW_WIDTH as usize;
+        let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
+        assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+        let fill = Rgb8Pixel { r: 0xa5, g: 0xb4, b: 0xfc };
+        assert_eq!(pixels[94 * width + 10], fill);
+        assert_eq!(pixels[94 * width + 609], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
+        assert_ne!(pixels[94 * width + 400], fill);
+        assert_ne!(pixels[132 * width + 80], fill);
+        let icon = Rgb8Pixel { r: 0xc7, g: 0xd2, b: 0xfe };
+        let icon_pixels = |pixels: &[Rgb8Pixel]| {
+            (69..88).flat_map(|y| &pixels[y * width + 460..y * width + 489])
+                .filter(|&&pixel| pixel == icon).count()
+        };
+        assert!(icon_pixels(&pixels) > 0);
+        ui.set_preview_playing(true);
+        assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+        assert!(icon_pixels(&pixels) > 0);
+
+        let played = Rc::new(Cell::new(false));
+        let position = Rc::new(Cell::new(None));
+        let activated = Rc::new(Cell::new(None));
+        let played_cb = played.clone();
+        let seek_cb = position.clone();
+        let activated_cb = activated.clone();
+        ui.on_toggle_preview_playback(move || played_cb.set(true));
+        ui.on_seek_audio_preview(move |fraction| seek_cb.set(Some(fraction)));
+        ui.on_activate_selected(|| panic!("preview control activated the search result"));
+        ui.on_activate_index(move |index| activated_cb.set(Some(index)));
+
+        let click = |x, y| {
+            let position = LogicalPosition::new(x, y);
+            let button = PointerEventButton::Left;
+            ui.window().dispatch_event(WindowEvent::PointerMoved { position });
+            ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+            ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+        };
+        click(472., 78.);
+        assert!(played.get());
+        click(310., 94.);
+        assert!(
+            position.get().is_some_and(|value| (0.35..0.55).contains(&value)),
+            "click produced seek position {:?}",
+            position.get(),
+        );
+        assert_eq!(activated.get(), None);
+        ui.set_preview_can_toggle(false);
+        played.set(false);
+        click(472., 78.);
+        assert!(!played.get());
+        assert_eq!(activated.get(), None);
+        click(472., 116.);
+        assert_eq!(activated.get(), Some(1));
+        click(48., 78.);
+        assert_eq!(activated.get(), Some(0));
+    }
+
+    #[test]
     fn error_toast_renders_a_separate_notification() {
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
@@ -1948,6 +2212,7 @@ mod tests {
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
             selected_abs_index: 0,
@@ -2073,6 +2338,7 @@ mod tests {
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
             selected_abs_index: 0,
@@ -2239,6 +2505,7 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
             selected_abs_index: 0,
@@ -2528,6 +2795,7 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
             selected_abs_index: 0,
@@ -2598,6 +2866,7 @@ mod tests {
             media_catalog: Some(catalog),
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
             selected_abs_index: 0,
@@ -2803,6 +3072,7 @@ mod tests {
             media_catalog: Some(catalog),
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings {
                 hotkey: "Alt+Space".into(),
@@ -2969,6 +3239,7 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            audio_preview: AudioPreview::default(),
             active_bin_path: Some("01_Footage".into()),
             settings: AppSettings {
                 settings_hotkey: "Ctrl+,".into(),
@@ -3009,7 +3280,7 @@ mod tests {
 
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
-        ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta| {
+        ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta, _repeat| {
             let Some(ui) = ui_weak.upgrade() else {
                 return false;
             };
@@ -3039,6 +3310,7 @@ mod tests {
                     }
                     true
                 }
+                Some(PaletteShortcutAction::PreviewAudio) => false,
                 None => false,
             }
         });
