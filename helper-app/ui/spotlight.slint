@@ -1598,7 +1598,7 @@ export component SpotlightWindow inherits Window {
                     spacing: 2px;
                     alignment: start;
 
-                    for item[idx] in root.results : Rectangle {
+                    for item[idx] in root.results : result-row := Rectangle {
                         height: 36px;
                         border-radius: 6px;
                         clip: true;
@@ -1733,9 +1733,10 @@ export component SpotlightWindow inherits Window {
                                 if value.is-float() { root.seek-audio-preview(value.to-float()); }
                             }
 
-                            Rectangle {
-                                y: parent.height - self.height - 1px;
-                                width: 100%;
+                            progress-track := Rectangle {
+                                x: result-row.border-radius;
+                                y: parent.height - self.height;
+                                width: parent.width - 2 * self.x;
                                 height: 2px;
                                 border-radius: 1px;
                                 background: Theme.progress-track;
@@ -1750,7 +1751,9 @@ export component SpotlightWindow inherits Window {
                             }
                             TouchArea {
                                 mouse-cursor: pointer;
-                                clicked => { root.seek-audio-preview(self.mouse-x / self.width); }
+                                clicked => {
+                                    root.seek-audio-preview(((self.mouse-x - progress-track.x) / progress-track.width).clamp(0, 1));
+                                }
                             }
                             Tooltip {
                                 text: @markdown("\{root.preview-time}");

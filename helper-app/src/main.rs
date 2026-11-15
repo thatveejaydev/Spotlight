@@ -2307,10 +2307,29 @@ mod tests {
         let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
         assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
         let fill = Rgb8Pixel { r: 0xa5, g: 0xb4, b: 0xfc };
-        assert_eq!(pixels[127 * width + 10], fill);
-        assert_eq!(pixels[127 * width + 609], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
+        assert_eq!(pixels[127 * width + 14], fill);
+        assert_eq!(pixels[127 * width + 605], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
         assert_ne!(pixels[127 * width + 400], fill);
         assert_ne!(pixels[165 * width + 80], fill);
+        // The progress fill and track meet the outline on y=129.
+        assert_eq!(pixels[128 * width + 40], fill);
+        assert_eq!(pixels[128 * width + 580], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
+
+        let corner_pixels = |pixels: &[Rgb8Pixel]| {
+            (127..130)
+                .flat_map(|y| (6..12).chain(608..614).map(move |x| pixels[y * width + x]))
+                .collect::<Vec<_>>()
+        };
+        let corners_with_track = corner_pixels(&pixels);
+        ui.set_preview_can_seek(false);
+        assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+        assert_eq!(corner_pixels(&pixels), corners_with_track);
+        ui.set_preview_can_seek(true);
+        ui.set_preview_progress(1.0);
+        assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
+        assert_eq!(corner_pixels(&pixels), corners_with_track);
+        assert_eq!(pixels[128 * width + 605], fill);
+        ui.set_preview_progress(0.25);
         let icon = Rgb8Pixel { r: 0xc7, g: 0xd2, b: 0xfe };
         let icon_pixels = |pixels: &[Rgb8Pixel]| {
             (102..121).flat_map(|y| &pixels[y * width + 574..y * width + 599])
@@ -2329,9 +2348,9 @@ mod tests {
             apply_palette_theme(&ui, theme);
             assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
             let [r, g, b] = fill;
-            assert_eq!(pixels[127 * width + 10], Rgb8Pixel { r, g, b });
+            assert_eq!(pixels[127 * width + 14], Rgb8Pixel { r, g, b });
             let [r, g, b] = track;
-            assert_eq!(pixels[127 * width + 609], Rgb8Pixel { r, g, b });
+            assert_eq!(pixels[127 * width + 605], Rgb8Pixel { r, g, b });
         }
 
         let played = Rc::new(Cell::new(false));
