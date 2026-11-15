@@ -11,6 +11,40 @@ export struct DebugLogEntryUI {
     color: color,
 }
 
+component DebugMetric inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <color> accent;
+
+    background: #1a1c28;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: #25283a;
+
+    VerticalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        spacing: 2px;
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: "Consolas";
+            color: root.accent;
+            overflow: elide;
+        }
+        Text {
+            text: root.hint;
+            font-size: 9.5px;
+            color: #8b90aa;
+            overflow: elide;
+        }
+    }
+}
+
 export component DebugLogWindow inherits Window {
     title: "Premiere Spotlight Debug Log";
     no-frame: true;
@@ -19,8 +53,8 @@ export component DebugLogWindow inherits Window {
     height: panel-height;
     background: #12131a;
 
-    out property <length> panel-width: 540px;
-    out property <length> panel-height: 360px;
+    out property <length> panel-width: 560px;
+    out property <length> panel-height: 410px;
     in property <string> ui-timer-rate: "0/s";
     in property <string> ws-poll-rate: "0/s";
     in property <string> fg-hook-rate: "0/s";
@@ -147,55 +181,47 @@ export component DebugLogWindow inherits Window {
 
             // Live metrics bar
             Rectangle {
-                height: 46px;
                 background: #151620;
 
                 VerticalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    padding-top: 6px;
-                    padding-bottom: 6px;
-                    spacing: 4px;
+                    padding: 8px;
+                    spacing: 6px;
 
                     HorizontalLayout {
-                        spacing: 16px;
-                        Text {
-                            text: "UI Timer: " + root.ui-timer-rate;
-                            font-size: 11px;
-                            font-family: "Consolas";
-                            color: #fbbf24;
+                        spacing: 6px;
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "UI Timer: " + root.ui-timer-rate;
+                            hint: "Idle UI wakeups (0/s best)";
+                            accent: #fbbf24;
                         }
-                        Text {
-                            text: "WS Polls: " + root.ws-poll-rate;
-                            font-size: 11px;
-                            font-family: "Consolas";
-                            color: #fbbf24;
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "WS Polls: " + root.ws-poll-rate;
+                            hint: "Empty bridge checks (0/s best)";
+                            accent: #fbbf24;
                         }
-                        Text {
-                            text: "FG Hooks: " + root.fg-hook-rate;
-                            font-size: 11px;
-                            font-family: "Consolas";
-                            color: #93c5fd;
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "FG Hooks: " + root.fg-hook-rate;
+                            hint: "App focus switches (0/s hidden)";
+                            accent: #93c5fd;
                         }
                     }
 
                     HorizontalLayout {
-                        spacing: 16px;
-                        Text {
-                            text: "Last Search: " + root.last-search-text;
-                            font-size: 11px;
-                            font-family: "Consolas";
-                            color: #c4b5fd;
+                        spacing: 6px;
+                        DebugMetric {
                             horizontal-stretch: 1;
-                            overflow: elide;
+                            label: "Last Search: " + root.last-search-text;
+                            hint: "Filter speed (matches / total items)";
+                            accent: #c4b5fd;
                         }
-                        Text {
-                            text: "Bridge RTT: " + root.last-rtt-text;
-                            font-size: 11px;
-                            font-family: "Consolas";
-                            color: #6ee7b7;
+                        DebugMetric {
                             horizontal-stretch: 1;
-                            overflow: elide;
+                            label: "Bridge RTT: " + root.last-rtt-text;
+                            hint: "Premiere action round-trip time";
+                            accent: #6ee7b7;
                         }
                     }
                 }
