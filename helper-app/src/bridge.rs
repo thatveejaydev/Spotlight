@@ -709,7 +709,7 @@ mod tests {
         bridge.peers.lock().unwrap().push(peer);
         let catalog = bridge.media_catalog().unwrap().unwrap();
         for (item_id, message) in [
-            ("b", "Bins can't be placed on the timeline."),
+            ("b", "Bins can't be placed on the timeline. Bins are search only."),
             ("a", "A sequence can't nest into itself."),
             ("o", "This project item can't be placed on the timeline."),
             ("f", "Relink the offline media before placing it."),

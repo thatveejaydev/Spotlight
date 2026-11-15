@@ -30,7 +30,9 @@ pub struct ProjectItemEntry {
 impl ProjectItemEntry {
     pub fn placement_error(&self) -> Option<&'static str> {
         match self.kind {
-            ProjectItemKind::Bin => Some("Bins can't be placed on the timeline."),
+            ProjectItemKind::Bin => {
+                Some("Bins can't be placed on the timeline. Bins are search only.")
+            }
             ProjectItemKind::ActiveSequence => Some("A sequence can't nest into itself."),
             ProjectItemKind::Other => Some("This project item can't be placed on the timeline."),
             _ if self.offline => Some("Relink the offline media before placing it."),

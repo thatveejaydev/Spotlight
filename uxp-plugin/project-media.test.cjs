@@ -126,7 +126,7 @@ test("indexes offline media and rejects non-placeable items before committing", 
   f.clip.isOffline = () => true;
   await f.scan(7);
   assert.equal(f.messages[0].items.find((item) => item.itemId === "take").offline, true);
-  await assert.rejects(f.place("bin"), /Bins can't be placed/);
+  await assert.rejects(f.place("bin"), /Bins can't be placed on the timeline\. Bins are search only\./);
   await assert.rejects(f.place("other"), /project item can't be placed/);
   await assert.rejects(f.place("self"), /nest into itself/);
   await assert.rejects(f.place(), /offline/);

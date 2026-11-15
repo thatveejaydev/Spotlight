@@ -439,7 +439,7 @@ async function placeProjectItem(payload, connection) {
     }
   }
   if (!source) throw new Error("Project item was removed. Search again.");
-  if (source.bin) throw new Error("Bins can't be placed on the timeline.");
+  if (source.bin) throw new Error("Bins can't be placed on the timeline. Bins are search only.");
   if (!source.clip) throw new Error("This project item can't be placed on the timeline.");
   if ((await sequence.getProjectItem())?.getId() === source.itemId) {
     throw new Error("A sequence cannot nest into itself.");
