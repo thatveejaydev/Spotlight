@@ -313,7 +313,7 @@ pub fn default_effect_controls_shortcut() -> ShortcutSpec {
     }
 }
 
-fn find_latest_premiere_prefs_file() -> Option<PathBuf> {
+pub(crate) fn find_latest_premiere_prefs_file() -> Option<PathBuf> {
     let user_profile = env::var("USERPROFILE").ok()?;
     let candidates = [
         Path::new(&user_profile).join("Documents\\Adobe\\Premiere Pro"),
@@ -509,12 +509,19 @@ fn decode_premiere_virtual_key(raw: u32) -> Option<u16> {
 }
 
 fn parse_effect_controls_shortcut_kys(xml: &str) -> Option<EffectControlsShortcut> {
-    let scope = match xml.find("<context.global") {
-        Some(start) => match xml[start..].find("</context.global>") {
+    parse_shortcut_kys(xml, "context.global", "uif.window.Effect Controls")
+}
+
+fn parse_shortcut_kys(xml: &str, context: &str, command: &str) -> Option<EffectControlsShortcut> {
+    let open = format!("<{context}");
+    let close = format!("</{context}>");
+    let scope = match xml.find(&open) {
+        Some(start) => match xml[start..].find(&close) {
             Some(len) => &xml[start..start + len],
             None => &xml[start..],
         },
-        None => xml,
+        None if context == "context.global" => xml,
+        None => return None,
     };
 
     let mut saw_command = false;
@@ -544,9 +551,7 @@ fn parse_effect_controls_shortcut_kys(xml: &str) -> Option<EffectControlsShortcu
         let item_body = &scope[body_start..body_end];
         cursor = body_end + close_tag.len();
 
-        if extract_xml_tag_value(item_body, "commandname").as_deref()
-            != Some("uif.window.Effect Controls")
-        {
+        if extract_xml_tag_value(item_body, "commandname").as_deref() != Some(command) {
             continue;
         }
         saw_command = true;
@@ -579,6 +584,65 @@ fn parse_effect_controls_shortcut_kys(xml: &str) -> Option<EffectControlsShortcu
     }
 
     saw_command.then_some(EffectControlsShortcut::Unbound)
+}
+
+fn parse_preset_search_shortcuts(xml: &str) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
+    use EffectControlsShortcut::Bound;
+
+    let window = parse_shortcut_kys(xml, "context.global", "uif.window.Effects");
+    let Some(Bound(effects)) = window
+        .filter(|binding| matches!(binding, Bound(_)))
+        .or_else(|| parse_shortcut_kys(xml, "context.global", "cmd.window.effects"))
+    else {
+        return Err("Assign a shortcut to Effects in Premiere Keyboard Shortcuts.");
+    };
+    let find_box = parse_shortcut_kys(xml, "context.effects", "cmd.select.find.box")
+        .or_else(|| parse_shortcut_kys(xml, "context.global", "cmd.select.find.box"));
+    let Some(Bound(find_box)) = find_box else {
+        return Err("Assign a shortcut to Select Find Box in Premiere Keyboard Shortcuts.");
+    };
+    Ok((effects, find_box))
+}
+
+pub(crate) fn read_preset_search_shortcuts(
+    premiere_exe: &Path,
+) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
+    const UNREADABLE: &str = "Could not read Premiere's keyboard shortcuts.";
+    let mut name = None;
+    let mut custom_path = None;
+    if let Some(prefs) = find_latest_premiere_prefs_file() {
+        let xml = fs::read_to_string(&prefs).map_err(|_| UNREADABLE)?;
+        let document = roxmltree::Document::parse(&xml).map_err(|_| UNREADABLE)?;
+        name = document
+            .descendants()
+            .find(|node| node.has_tag_name("FE.Prefs.Shortcuts.Filename"))
+            .and_then(|node| node.text())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if let (Some(name), Some(profile)) = (&name, prefs.parent()) {
+            if Path::new(name).file_name().is_none_or(|file| file != name.as_str()) {
+                return Err(UNREADABLE);
+            }
+            custom_path = Some(profile.join("Win").join(name));
+        }
+    }
+
+    let xml = match custom_path.map(fs::read_to_string) {
+        Some(Ok(xml)) => xml,
+        Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => return Err(UNREADABLE),
+        _ => {
+            // Premiere stores its bundled shortcut sets beside the executable.
+            // The command identifiers in those sets are language independent.
+            let bundled = premiere_exe
+                .parent()
+                .ok_or(UNREADABLE)?
+                .join("Keyboard Shortcuts")
+                .join("en");
+            let name = name.as_deref().unwrap_or("Adobe Premiere Pro Defaults.kys");
+            fs::read_to_string(bundled.join(name)).map_err(|_| UNREADABLE)?
+        }
+    };
+    parse_preset_search_shortcuts(&xml)
 }
 
 struct CachedEffectControlsShortcut {
@@ -907,6 +971,9 @@ impl BridgeClients {
     }
 
     pub fn send_apply(&self, entry: &EffectEntry) -> Option<(u64, Vec<usize>)> {
+        if entry.is_preset() {
+            return None;
+        }
         let (video_transition_duration, audio_transition_duration) =
             if entry.effect_type == "videoTransition" || entry.effect_type == "audioTransition" {
                 read_premiere_transition_prefs()
@@ -1478,5 +1545,56 @@ mod tests {
         // Missing entry falls back via None -> Default.
         let missing = r#"<context.global Version="1"></context.global>"#;
         assert_eq!(parse_effect_controls_shortcut_kys(missing), None);
+    }
+
+    #[test]
+    fn uses_premiere_bindings_for_effects_and_the_find_box() {
+        let shortcuts = r#"
+        <context.global Version="1">
+          <item.10 Version="1">
+            <commandname>uif.window.Effects</commandname>
+            <virtualkey>2147483717</virtualkey>
+            <modifier.ctrl>true</modifier.ctrl>
+          </item.10>
+          <item.11 Version="1">
+            <commandname>cmd.select.find.box</commandname>
+            <virtualkey>2147483718</virtualkey>
+            <modifier.shift>true</modifier.shift>
+          </item.11>
+        </context.global>
+        <context.effects Version="1">
+          <item.0 Version="1">
+            <commandname>cmd.select.find.box</commandname>
+            <virtualkey>2147483731</virtualkey>
+            <modifier.alt>true</modifier.alt>
+          </item.0>
+        </context.effects>"#;
+        let (effects, find_box) = parse_preset_search_shortcuts(shortcuts).unwrap();
+        assert_eq!(
+            effects,
+            ShortcutSpec {
+                vk: b'E' as u16,
+                ctrl: true,
+                alt: false,
+                shift: false,
+            }
+        );
+        assert_eq!(
+            find_box,
+            ShortcutSpec {
+                vk: b'S' as u16,
+                ctrl: false,
+                alt: true,
+                shift: false,
+            }
+        );
+        let unbound = shortcuts.replace("<virtualkey>2147483731</virtualkey>", "");
+        assert!(parse_preset_search_shortcuts(&unbound)
+            .unwrap_err()
+            .contains("Select Find Box"));
+        let unbound = shortcuts.replace("<virtualkey>2147483717</virtualkey>", "");
+        assert!(parse_preset_search_shortcuts(&unbound)
+            .unwrap_err()
+            .contains("Effects"));
     }
 }

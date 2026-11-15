@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 pub struct EffectEntry {
     pub name: String,
     pub match_name: String,
-    /// "videoEffect" | "audioEffect" | "videoTransition" | "audioTransition"
+    /// "videoEffect" | "audioEffect" | "videoTransition" | "audioTransition" | "preset"
     pub effect_type: String,
     #[serde(default)]
     pub folder: String,
@@ -190,23 +190,32 @@ impl CatalogEntry<'_> {
 }
 
 impl EffectEntry {
+    pub fn is_preset(&self) -> bool {
+        self.effect_type == "preset"
+    }
+
     pub fn category_short(&self) -> &'static str {
         match self.effect_type.as_str() {
             "videoEffect" => "Video Effect",
             "audioEffect" => "Audio Effect",
             "videoTransition" => "Video Transition",
             "audioTransition" => "Audio Transition",
+            "preset" => "Preset",
             _ => "Effect",
         }
     }
 
     fn is_supported(&self) -> bool {
-        matches!(self.effect_type.as_str(), "videoEffect" | "audioEffect" | "videoTransition")
+        matches!(
+            self.effect_type.as_str(),
+            "videoEffect" | "audioEffect" | "videoTransition" | "preset"
+        )
     }
 }
 
 pub struct CatalogStore {
     items: Vec<IndexedEffect>,
+    presets: Vec<IndexedEffect>,
     project_items: Vec<IndexedProjectItem>,
     usage_counts: HashMap<String, u32>,
     matcher: Matcher,
@@ -221,6 +230,7 @@ impl CatalogStore {
             .collect();
         Self {
             items,
+            presets: Vec::new(),
             project_items: Vec::new(),
             usage_counts: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
@@ -229,13 +239,14 @@ impl CatalogStore {
     }
 
     pub fn set_catalog(&mut self, new_items: Vec<EffectEntry>) {
-        if new_items.is_empty() {
-            return;
-        }
         let mut indexed: Vec<IndexedEffect> = new_items
             .into_iter()
+            .filter(|entry| !entry.is_preset())
             .map(IndexedEffect::new)
             .collect();
+        if indexed.is_empty() {
+            return;
+        }
         indexed.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
         indexed.dedup_by(|a, b| {
             a.entry.effect_type == b.entry.effect_type
@@ -243,6 +254,10 @@ impl CatalogStore {
                 && a.entry.name == b.entry.name
         });
         self.items = indexed;
+    }
+
+    pub fn set_presets(&mut self, presets: Vec<EffectEntry>) {
+        self.presets = presets.into_iter().map(IndexedEffect::new).collect();
     }
 
     pub fn record_usage(&mut self, match_name: &str) {
@@ -258,7 +273,7 @@ impl CatalogStore {
     }
 
     pub fn counts(&self) -> (usize, usize) {
-        (self.items.len(), self.project_items.len())
+        (self.items.len() + self.presets.len(), self.project_items.len())
     }
 
     pub fn contains_bin_path(&self, bin_path: &str) -> bool {
@@ -283,6 +298,7 @@ impl CatalogStore {
         let effects = self
             .items
             .iter()
+            .chain(&self.presets)
             .filter(move |item| include_effects && item.supported)
             .map(CatalogEntry::Effect);
         let include_project = catalog != "effects";

@@ -5,6 +5,7 @@ mod catalog;
 mod debug_log;
 mod error_toast;
 mod installer;
+mod presets;
 mod settings;
 mod tray;
 mod win_focus;
@@ -19,6 +20,7 @@ use global_hotkey::{
     hotkey::HotKey,
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
+use presets::PresetHandoff;
 use settings::{AlternateModifier, AppSettings, PaletteShortcutAction};
 use slint::{
     Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
@@ -104,6 +106,10 @@ fn badge_colors(effect_type: &str) -> (Color, Color) {
         "audioTransition" => (
             Color::from_argb_u8(45, 236, 72, 153),
             Color::from_rgb_u8(249, 168, 212),
+        ),
+        "preset" => (
+            Color::from_argb_u8(68, 248, 78, 66),
+            Color::from_rgb_u8(255, 174, 162),
         ),
         "media" => (
             Color::from_argb_u8(52, 56, 189, 248),
@@ -343,7 +349,11 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
                 SearchResult::Effect(entry) => (
                     entry.name.as_str(),
                     entry.category_short(),
-                    "",
+                    if entry.is_preset() {
+                        entry.folder.as_str()
+                    } else {
+                        ""
+                    },
                     badge_colors(&entry.effect_type),
                 ),
                 SearchResult::ProjectItem(entry) => (
@@ -615,7 +625,7 @@ fn apply_entry_at(
     ui: &SpotlightWindow,
     state: &mut AppState,
     bridge: &BridgeClients,
-) -> Result<(), SharedString> {
+) -> Result<Option<PresetHandoff>, SharedString> {
     let open_effect_controls =
         settings::resolve_open_effect_controls(state.settings.open_effect_controls_by_default, false);
     apply_entry_with_options(abs_index, ui, state, bridge, open_effect_controls)
@@ -627,13 +637,21 @@ fn apply_entry_with_options(
     state: &mut AppState,
     bridge: &BridgeClients,
     open_effect_controls: bool,
-) -> Result<(), SharedString> {
+) -> Result<Option<PresetHandoff>, SharedString> {
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
-        return Ok(());
+        return Ok(None);
     };
+    if let SearchResult::Effect(entry) = &chosen {
+        if entry.is_preset() {
+            let reveal = PresetHandoff::new(state.previous_hwnd, entry.clone())?;
+            hide_palette(ui, state);
+            restore_premiere_focus(state.previous_hwnd);
+            return Ok(Some(reveal));
+        }
+    }
     if state.pending_placement.is_some() {
         ui.set_status_message("A media placement is already in progress.".into());
-        return Ok(());
+        return Ok(None);
     }
     match chosen {
         SearchResult::Effect(entry) => {
@@ -655,7 +673,7 @@ fn apply_entry_with_options(
         SearchResult::ProjectItem(entry) => {
             if entry.kind == ProjectItemKind::Bin {
                 enter_bin(&entry, ui, state);
-                return Ok(());
+                return Ok(None);
             }
             let Some(catalog) = &state.media_catalog else {
                 return Err("Project media changed. Search again.".into());
@@ -679,7 +697,7 @@ fn apply_entry_with_options(
     // Hide before transferring focus, since Premiere may already be processing the edit.
     hide_palette(ui, state);
     restore_premiere_focus(state.previous_hwnd);
-    Ok(())
+    Ok(None)
 }
 
 fn shift_activate_at(
@@ -687,9 +705,9 @@ fn shift_activate_at(
     ui: &SpotlightWindow,
     state: &mut AppState,
     bridge: &BridgeClients,
-) -> Result<(), SharedString> {
+) -> Result<Option<PresetHandoff>, SharedString> {
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
-        return Ok(());
+        return Ok(None);
     };
     match chosen {
         SearchResult::Effect(_) => {
@@ -715,8 +733,20 @@ fn shift_activate_at(
             schedule_action_deadlines(state);
             hide_palette(ui, state);
             restore_premiere_focus(state.previous_hwnd);
-            Ok(())
+            Ok(None)
         }
+    }
+}
+
+fn finish_activation(
+    result: Result<Option<PresetHandoff>, SharedString>,
+    toast: &Rc<ErrorToast>,
+    premiere_hwnd: isize,
+) {
+    match result {
+        Ok(Some(handoff)) => handoff.start(toast),
+        Ok(None) => {}
+        Err(message) => toast.show(message, premiere_hwnd),
     }
 }
 
@@ -790,6 +820,30 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let mut st = state.borrow_mut();
         refresh_results_ui(&ui, &mut st);
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        PRESET_CATALOG_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |presets| {
+                if let Some(ui) = ui_weak.upgrade() {
+                    let mut st = state_ref.borrow_mut();
+                    st.catalog.set_presets(presets);
+                    refresh_catalog_ui(&ui, &mut st, true);
+                }
+            }));
+        });
+        presets::watch_library(|presets| {
+            slint::invoke_from_event_loop(move || {
+                PRESET_CATALOG_DISPATCH.with(|slot| {
+                    if let Some(callback) = slot.borrow_mut().as_mut() {
+                        callback(presets);
+                    }
+                });
+            })
+            .is_ok()
+        });
     }
 
     // Start localhost WebSocket bridge on 127.0.0.1:3847
@@ -1030,7 +1084,7 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Enter key applies selected effect
+    // Enter activates the selected result.
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
@@ -1040,14 +1094,13 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.selected_abs_index;
-                if let Err(message) = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref) {
-                    error_toast.show(message, st.previous_hwnd);
-                }
+                let result = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref);
+                finish_activation(result, &error_toast, st.previous_hwnd);
             }
         });
     }
 
-    // Mouse click on a row applies that row
+    // Mouse click activates the row.
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
@@ -1058,9 +1111,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
-                if let Err(message) = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref) {
-                    error_toast.show(message, st.previous_hwnd);
-                }
+                let result = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref);
+                finish_activation(result, &error_toast, st.previous_hwnd);
             }
         });
     }
@@ -1075,9 +1127,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.selected_abs_index;
-                if let Err(message) = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref) {
-                    error_toast.show(message, st.previous_hwnd);
-                }
+                let result = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref);
+                finish_activation(result, &error_toast, st.previous_hwnd);
             }
         });
     }
@@ -1092,9 +1143,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
                 sync_viewport_slice(&ui, &mut st);
-                if let Err(message) = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref) {
-                    error_toast.show(message, st.previous_hwnd);
-                }
+                let result = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref);
+                finish_activation(result, &error_toast, st.previous_hwnd);
             }
         });
     }
@@ -1883,6 +1933,7 @@ fn schedule_action_deadlines(state: &AppState) {
 
 thread_local! {
     static BRIDGE_DISPATCH: RefCell<Option<Box<dyn FnMut(BridgeEvent)>>> = const { RefCell::new(None) };
+    static PRESET_CATALOG_DISPATCH: RefCell<Option<Box<dyn FnMut(Vec<EffectEntry>)>>> = const { RefCell::new(None) };
     static HOTKEY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static SYNC_FOCUS_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static DEADLINE_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };

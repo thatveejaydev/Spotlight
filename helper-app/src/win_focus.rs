@@ -19,13 +19,15 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             keybd_event, GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0,
             INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-            MAPVK_VK_TO_VSC, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL,
-            VK_RMENU, VK_RSHIFT, VK_SHIFT,
+            KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+            VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
             AllowSetForegroundWindow, BringWindowToTop, CallWindowProcW, DefWindowProcW,
-            EnumWindows, GetAncestor, GetForegroundWindow, GetWindowLongW, GetWindowRect,
-            GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+            EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+            GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
+            IsWindowVisible, IsZoomed, GUI_INMENUMODE, GUI_INMOVESIZE, GUI_POPUPMENUMODE,
+            GUI_SYSTEMMENUMODE, GUITHREADINFO,
             SetForegroundWindow, SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
             EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
             GA_ROOTOWNER, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SC_MAXIMIZE,
@@ -49,30 +51,53 @@ pub fn get_foreground_hwnd() -> isize {
 }
 
 #[cfg(windows)]
-pub fn is_premiere_hwnd(hwnd: isize) -> bool {
+pub(crate) fn window_process_id(hwnd: isize) -> Option<u32> {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd as _, &mut pid) };
+    (pid != 0).then_some(pid)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn window_process_id(_hwnd: isize) -> Option<u32> {
+    None
+}
+
+#[cfg(windows)]
+pub(crate) fn premiere_executable(hwnd: isize) -> Option<std::path::PathBuf> {
     if hwnd == 0 {
-        return false;
+        return None;
     }
     unsafe {
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd as _, &mut pid);
-        if pid == 0 {
-            return false;
-        }
+        use std::os::windows::ffi::OsStringExt;
+
+        let pid = window_process_id(hwnd)?;
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return false;
+            return None;
         }
         let mut buf = [0u16; 512];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
         CloseHandle(handle);
         if ok == 0 || len == 0 {
-            return false;
+            return None;
         }
-        let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
-        path.ends_with("adobe premiere pro.exe")
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize]));
+        path.to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with("adobe premiere pro.exe")
+            .then_some(path)
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn premiere_executable(_hwnd: isize) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+pub fn is_premiere_hwnd(hwnd: isize) -> bool {
+    premiere_executable(hwnd).is_some()
 }
 
 #[cfg(not(windows))]
@@ -278,6 +303,11 @@ pub fn open_effect_controls(premiere_hwnd: isize, shortcut: crate::bridge::Short
         }
     }
 
+    send_inputs(&shortcut_inputs(shortcut))
+}
+
+#[cfg(windows)]
+fn shortcut_inputs(shortcut: crate::bridge::ShortcutSpec) -> Vec<INPUT> {
     let mut inputs = Vec::with_capacity(10);
 
     // Clear held modifier keys that conflict with the target shortcut (e.g. Shift from Shift+Enter).
@@ -330,6 +360,11 @@ pub fn open_effect_controls(premiere_hwnd: isize, shortcut: crate::bridge::Short
         inputs.push(keyboard_input(VK_CONTROL, true));
     }
 
+    inputs
+}
+
+#[cfg(windows)]
+fn send_inputs(inputs: &[INPUT]) -> bool {
     let sent = unsafe {
         SendInput(
             inputs.len() as u32,
@@ -338,6 +373,129 @@ pub fn open_effect_controls(premiere_hwnd: isize, shortcut: crate::bridge::Short
         )
     };
     sent == inputs.len() as u32
+}
+
+#[cfg(windows)]
+pub(crate) fn preset_handoff_keys_released() -> bool {
+    [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN, VK_RETURN]
+        .into_iter()
+        .all(|vk| !is_vk_down(vk))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn preset_handoff_keys_released() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn can_send_preset_input(process_id: u32) -> bool {
+    let foreground = get_foreground_hwnd();
+    if window_process_id(foreground) != Some(process_id) {
+        return false;
+    }
+    unsafe {
+        let mut info: GUITHREADINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        let thread = GetWindowThreadProcessId(foreground as _, std::ptr::null_mut());
+        let mut class = [0u16; 32];
+        let class_len = GetClassNameW(foreground as _, class.as_mut_ptr(), class.len() as i32);
+        thread != 0
+            && GetGUIThreadInfo(thread, &mut info) != 0
+            && info.flags & (GUI_INMENUMODE | GUI_INMOVESIZE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE)
+                == 0
+            && String::from_utf16_lossy(&class[..class_len.max(0) as usize]) != "#32770"
+            && get_foreground_hwnd() == foreground
+    }
+}
+
+#[cfg(windows)]
+thread_local! {
+    static PRESET_MODIFIERS: std::cell::Cell<Option<crate::bridge::ShortcutSpec>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(not(windows))]
+pub(crate) fn begin_preset_shortcut(_process_id: u32, _shortcut: crate::bridge::ShortcutSpec) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn preset_modifiers(shortcut: crate::bridge::ShortcutSpec) -> impl DoubleEndedIterator<Item = u16> {
+    [(VK_LCONTROL, shortcut.ctrl), (VK_LMENU, shortcut.alt), (VK_LSHIFT, shortcut.shift)]
+        .into_iter()
+        .filter_map(|(key, enabled)| enabled.then_some(key))
+}
+
+#[cfg(windows)]
+pub(crate) fn begin_preset_shortcut(process_id: u32, shortcut: crate::bridge::ShortcutSpec) -> bool {
+    if !can_send_preset_input(process_id) || !preset_handoff_keys_released() {
+        return false;
+    }
+    PRESET_MODIFIERS.set(Some(shortcut));
+    let inputs: Vec<_> = preset_modifiers(shortcut)
+        .map(|key| keyboard_input(key, false))
+        .collect();
+    inputs.is_empty() || send_inputs(&inputs)
+}
+
+#[cfg(windows)]
+pub(crate) fn press_preset_shortcut(process_id: u32, shortcut: crate::bridge::ShortcutSpec) -> bool {
+    can_send_preset_input(process_id)
+        && is_vk_down(VK_CONTROL) == shortcut.ctrl
+        && is_vk_down(VK_MENU) == shortcut.alt
+        && is_vk_down(VK_SHIFT) == shortcut.shift
+        && !is_vk_down(VK_LWIN)
+        && !is_vk_down(VK_RWIN)
+        && send_inputs(&[keyboard_input(shortcut.vk, false), keyboard_input(shortcut.vk, true)])
+}
+
+#[cfg(not(windows))]
+pub(crate) fn press_preset_shortcut(_process_id: u32, _shortcut: crate::bridge::ShortcutSpec) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn release_preset_modifiers() {
+    if let Some(shortcut) = PRESET_MODIFIERS.take() {
+        let inputs: Vec<_> = preset_modifiers(shortcut)
+            .rev()
+            .map(|key| keyboard_input(key, true))
+            .collect();
+        if !inputs.is_empty() {
+            send_inputs(&inputs);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn release_preset_modifiers() {}
+
+#[cfg(windows)]
+pub(crate) fn type_effects_search(process_id: u32, name: &str) -> bool {
+    let mut inputs = Vec::with_capacity(name.len() * 2);
+    // Unicode input preserves the preset name independently of the keyboard layout and clipboard.
+    for unit in name.encode_utf16() {
+        for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: 0,
+                        wScan: unit,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+        }
+    }
+    can_send_preset_input(process_id) && preset_handoff_keys_released() && send_inputs(&inputs)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn type_effects_search(_process_id: u32, _name: &str) -> bool {
+    false
 }
 
 #[cfg(not(windows))]
@@ -508,13 +666,16 @@ impl ForegroundHook {
 #[cfg(windows)]
 unsafe extern "system" fn winevent_proc(
     _hook: HWINEVENTHOOK,
-    _event: u32,
-    _hwnd: HWND,
+    event: u32,
+    hwnd: HWND,
     _id_object: i32,
     _id_child: i32,
     _id_event_thread: u32,
     _event_time: u32,
 ) {
+    if event == EVENT_SYSTEM_FOREGROUND {
+        crate::presets::foreground_changed(hwnd as isize);
+    }
     if !PALETTE_VISIBLE.load(std::sync::atomic::Ordering::Acquire) {
         return;
     }

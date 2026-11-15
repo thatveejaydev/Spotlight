@@ -7,7 +7,7 @@ An ultra-lightweight, zero-WebView Spotlight launcher for Adobe Premiere Pro eff
 1. **`helper-app/` (Rust + Slint Software Renderer)**
    - **Single process, zero WebView2:** Compiles `.slint` declarative UI directly to native Rust machine code rendered via Slint's CPU software renderer (`renderer-software`).
    - **Global Hotkey (`Ctrl + Space`):** Toggles the frameless centered floating window (`620×407`).
-   - **Fuzzy Search (`nucleo-matcher`):** Sub-millisecond typo-tolerant fuzzy search across Video Effects, Audio Effects, and Transitions, boosted by usage frequency.
+   - **Fuzzy Search (`nucleo-matcher`):** Typo-tolerant fuzzy search across Video Effects, Audio Effects, Transitions, and custom presets, boosted by usage frequency.
    - **Localhost WebSocket Bridge (`ws://127.0.0.1:3847`):** Event-driven, 0% idle CPU bridge to Premiere Pro.
 
 2. **`uxp-plugin/` (Adobe Premiere Pro UXP Plugin)**
@@ -29,10 +29,11 @@ cargo run --release
 3. With Adobe Premiere Pro open, click **Load** on **Premiere Spotlight Bridge**.
 
 ## Keyboard Controls (Inside Spotlight Popup)
-- **Type:** Fuzzy search effects, transitions, and items in the active project. The selected project result shows its bin path.
+- **Type:** Fuzzy search effects, transitions, custom presets, and items in the active project. Selected presets and project items show their folder path.
 - **`↑` / `↓` Arrows:** Navigate results
 - **`Tab` (or click the search-bar badge):** Switch catalogs (`All` → `Effects` → `Project`). Spotlight opens in `All` and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, drill into a project bin to browse/search its contents, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
+- **`Enter` (or Click) on a `Preset` result:** Open Premiere’s Effects panel and search for that preset by name. Drag it onto a clip to apply it. Spotlight uses the Effects and Select Find Box bindings from Premiere’s Keyboard Shortcuts and refreshes presets after Premiere saves them to your profile.
 - **`Backspace` (when search is empty inside a bin, or Click the bin pill):** Step back up one folder level (or exit bin view).
 - **`Shift + Enter` (or `Shift` + Click; configurable to `Ctrl` or `Alt`):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, or open a project item in the Source Monitor.
 - **`Esc`:** Close popup and return focus to Premiere (or exit Settings back to Search if Settings is open)

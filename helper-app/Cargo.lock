@@ -3261,6 +3261,7 @@ dependencies = [
  "global-hotkey",
  "nucleo-matcher",
  "raw-window-handle",
+ "roxmltree",
  "serde",
  "serde_json",
  "slint",
