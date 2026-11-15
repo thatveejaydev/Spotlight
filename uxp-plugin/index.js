@@ -286,13 +286,21 @@ function readTicks(time) {
   throw new Error("Premiere could not provide a valid timeline time.");
 }
 
-async function sourceFootprint(clip, nested) {
+async function sourceFootprint({ clip, item }, nested) {
   if (nested) {
     // Premiere determines a nest's routing. Reserve both track groups.
     const end = readTicks(await nested.getEndTime());
     return { video: end > 0n ? end : null, audio: end > 0n ? end : null };
   }
   const mediaTypes = ppro.Constants.MediaType;
+  let path;
+  try {
+    path = await clip.getMediaFilePath?.();
+  } catch (_) {
+    // Some project items do not expose their media path.
+  }
+  // Recognize audio-only sources by their project filename if the media path is unavailable.
+  const audioOnly = /\.(?:wav|wave|bwf|aif|aiff|aifc|flac|mp3|aac)$/i.test(path || item.name);
   let mediaDuration = null;
   try {
     const media = await clip.getMedia?.();
@@ -301,15 +309,17 @@ async function sourceFootprint(clip, nested) {
     // Stills and some generated sources have no finite media duration.
   }
 
-  async function span(type) {
-    let chain;
-    try {
-      chain = await clip.getComponentChain(type);
-    } catch (_) {
-      return null;
+  async function span(type, knownPresent = false) {
+    if (!knownPresent) {
+      let chain;
+      try {
+        chain = await clip.getComponentChain(type);
+      } catch (_) {
+        return null;
+      }
+      if (chain === null) return 0n;
+      if (!chain) return null;
     }
-    if (chain === null) return 0n;
-    if (!chain) return null;
     try {
       const start = readTicks(await clip.getInPoint(type));
       const end = readTicks(await clip.getOutPoint(type));
@@ -319,6 +329,7 @@ async function sourceFootprint(clip, nested) {
     }
     return mediaDuration > 0n ? mediaDuration : null;
   }
+  if (audioOnly) return { video: 0n, audio: await span(mediaTypes.AUDIO, true) };
   const [video, audio] = await Promise.all([span(mediaTypes.VIDEO), span(mediaTypes.AUDIO)]);
   return { video, audio };
 }
@@ -337,15 +348,22 @@ async function trackLayout(sequence, kind) {
     if (typeof track.isLocked === "function") locked = await track.isLocked();
     let ranges = null;
     try {
-      const clips = track.getTrackItems(trackItemType.CLIP, false);
-      const transitions = track.getTrackItems(trackItemType.TRANSITION, false);
+      const clips = (await track.getTrackItems(trackItemType.CLIP, false)) ?? [];
+      const transitions = (await track.getTrackItems(trackItemType.TRANSITION, false)) ?? [];
       if (Array.isArray(clips) && Array.isArray(transitions)) {
-        ranges = await Promise.all([...clips, ...transitions].map(async (item) => {
+        const items = [...clips, ...transitions].filter((item) => item != null);
+        ranges = await Promise.all(items.map(async (item) => {
           const start = readTicks(await item.getStartTime());
-          const end = readTicks(await item.getEndTime());
-          if (end <= start) throw new Error("Unverified track item span");
+          let end;
+          try {
+            end = readTicks(await item.getEndTime());
+          } catch (_) {
+            end = start + readTicks(await item.getDuration());
+          }
+          if (end < start) throw new Error("Unverified track item span");
           return [start, end];
         }));
+        ranges = ranges.filter(([start, end]) => end > start);
       }
     } catch (_) {
       // Treat a track with unreadable clip or transition bounds as occupied.
@@ -357,13 +375,47 @@ async function trackLayout(sequence, kind) {
 
 function firstSafeTrack(tracks, start, duration, maySpanTracks) {
   if (duration === 0n) return 0;
+  // If the duration is unknown, only an open-ended gap is safe.
+  const end = duration === null ? null : start + duration;
   const hasRoom = (track) => !track.locked && track.ranges !== null &&
-    (duration === null ? track.ranges.length === 0 :
-      track.ranges.every(([itemStart, itemEnd]) => start + duration <= itemStart || itemEnd <= start));
-  // Source channel mapping is not exposed. Reserve every possible downstream audio lane.
+    track.ranges.every(([itemStart, itemEnd]) => itemEnd <= start || (end !== null && end <= itemStart));
+  // A nested sequence can affect downstream tracks with unknown routing.
   const index = tracks.findIndex((track, index) => hasRoom(track) &&
     (!maySpanTracks || tracks.slice(index + 1).every(hasRoom)));
   return index === -1 ? tracks.length : index;
+}
+
+// Premiere may route the edit to a different track. Verify the new clip before reporting its lane.
+async function placedAudioTracks(sequence, itemId, start, frame, previousTracks) {
+  const tracks = [];
+  const count = await sequence.getAudioTrackCount();
+  for (let index = 0; index < count; index++) {
+    const previous = previousTracks[index]?.ranges;
+    if (previous === null) continue;
+    let items;
+    try {
+      const track = await sequence.getAudioTrack(index);
+      items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+    } catch (_) {
+      continue;
+    }
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      try {
+        const itemStart = readTicks(await item.getStartTime());
+        if (itemStart <= start - frame || itemStart >= start + frame) continue;
+        const itemEnd = readTicks(await item.getEndTime());
+        if (previous?.some(([beforeStart, beforeEnd]) =>
+          beforeStart === itemStart && beforeEnd === itemEnd)) continue;
+        if ((await item.getProjectItem())?.getId() !== itemId) continue;
+        tracks.push(`A${index + 1}`);
+        break;
+      } catch (_) {
+        // This clip cannot verify the placement.
+      }
+    }
+  }
+  return tracks;
 }
 
 async function placeProjectItem(payload, connection) {
@@ -401,7 +453,7 @@ async function placeProjectItem(payload, connection) {
   const position = await sequence.getPlayerPosition();
   const start = readTicks(position);
   if (start < 0n) throw new Error("Move the playhead into the timeline before placing media.");
-  const footprint = await sourceFootprint(source.clip, nested);
+  const footprint = await sourceFootprint(source, nested);
   if (footprint.video === 0n && footprint.audio === 0n) {
     throw new Error("Premiere could not identify editable media in this item.");
   }
@@ -415,7 +467,7 @@ async function placeProjectItem(payload, connection) {
   };
   const snapshot = () => Promise.all([trackLayout(sequence, "Video"), trackLayout(sequence, "Audio")]);
   const trials = await snapshot();
-  const confirmedFootprint = await sourceFootprint(source.clip, nested);
+  const confirmedFootprint = await sourceFootprint(source, nested);
   const latest = await snapshot();
   if (await source.clip.isOffline?.()) throw new Error("Relink the offline media before placing it.");
   const latestProject = await ppro.Project.getActiveProject();
@@ -434,7 +486,9 @@ async function placeProjectItem(payload, connection) {
   const videoSpan = footprint.video === 0n ? 0n : longest;
   const audioSpan = footprint.audio === 0n ? 0n : longest;
   const video = firstSafeTrack(videoTracks, protectedStart, protectedDuration(videoSpan), Boolean(nested));
-  const audio = firstSafeTrack(audioTracks, protectedStart, protectedDuration(audioSpan), true);
+  const audio = firstSafeTrack(
+    audioTracks, protectedStart, protectedDuration(audioSpan), Boolean(nested)
+  );
   const usesNewTrack = (footprint.video !== 0n && video === videoTracks.length) ||
     (footprint.audio !== 0n && audio === audioTracks.length);
   let committed = false;
@@ -458,7 +512,25 @@ async function placeProjectItem(payload, connection) {
       ? "Premiere could not place media on new tracks. Add an empty track and retry."
       : "Premiere rejected the placement. Check track locks and media compatibility.");
   }
-  return `Placed "${source.item.name}" at the playhead.`;
+  const message = `Placed "${source.item.name}" at the playhead`;
+  if (footprint.audio === 0n) return `${message}.`;
+
+  const requested = `A${audio + 1}`;
+  let observed = [];
+  try {
+    observed = await placedAudioTracks(sequence, source.itemId, start, frame, audioTracks);
+  } catch (_) {
+    // A read failure after commit must not turn a successful edit into a failed placement.
+  }
+  const location = observed.length ? ` on ${observed.join(", ")}` : "";
+  const routing = observed[0] === requested ? "" : ` (requested ${requested})`;
+  const firstTrack = audioTracks[0];
+  const skippedA1 = audio === 0 || !firstTrack ? "" : firstTrack.locked ? " A1 is locked."
+    : firstTrack.ranges === null ? " Premiere did not return readable clip or transition times for A1."
+    : firstSafeTrack([firstTrack], protectedStart, protectedDuration(audioSpan), false) === 0
+      ? " A1 has room, but the nested sequence needs more tracks."
+      : " A1 has no verified gap at the playhead.";
+  return `${message}${location}${routing}.${skippedA1}`;
 }
 
 function resolveEffectEntry(payload) {

@@ -177,6 +177,109 @@ test("audio-only sources avoid occupied audio lanes", async () => {
   assert.equal(f.commits[0].action.audio, 1);
 });
 
+test("audio-only media uses the first gap that fits even when later tracks overlap", async () => {
+  const f = fixture();
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.clip.getInPoint = () => null;
+  f.clip.getOutPoint = () => null;
+  f.clip.getMedia = () => ({ duration: Promise.resolve(time(50)) });
+  f.seq.audio = [
+    track({ clips: [[149, 180]] }),
+    track({ clips: [[20, 100], [150, 180]] }),
+    track({ clips: [[110, 130]] }),
+    empty()
+  ];
+  await f.place();
+  assert.equal(f.commits[0].action.audio, 1);
+});
+
+test("WAV with unavailable source bounds uses A1 when all its clips end before the playhead", async () => {
+  const f = fixture();
+  f.clip.getMediaFilePath = () => "C:\\Media\\sting.wav";
+  // A missing video component chain can reject instead of returning null.
+  f.clip.getComponentChain = (type) => {
+    if (type === "video") throw new Error("No video component chain");
+    return {};
+  };
+  f.clip.getInPoint = () => null;
+  f.clip.getOutPoint = () => null;
+  f.seq.audio = [
+    track({ clips: [[40, 85]] }),
+    track({ clips: [[60, 200]] }),
+    track({ clips: [[0, 40]] }),
+    empty()
+  ];
+  await f.place();
+  assert.deepEqual(f.commits[0].action, {
+    itemId: "take", position: "100", video: 0, audio: 0
+  });
+});
+
+test("audio with unavailable duration skips a track with a future clip", async () => {
+  const f = fixture();
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.clip.getOutPoint = () => null;
+  f.seq.audio = [track({ clips: [[250, 270]] }), track({ clips: [[0, 90]] }), empty()];
+  await f.place();
+  assert.equal(f.commits[0].action.audio, 1);
+});
+
+test("audio can use A1 when its prior clip bounds come from start plus duration", async () => {
+  const f = fixture();
+  f.clip.getMediaFilePath = () => "C:\\Media\\bamboo hit_sfx.mp3";
+  f.seq.audio = [{
+    async getTrackItems(type) {
+      return type === 1 ? [{ getStartTime: () => time(40), getDuration: () => time(45) }] : [];
+    }
+  }, track({ clips: [[60, 200]] }), empty(), empty()];
+  await f.place();
+  assert.equal(f.commits[0].action.audio, 0);
+});
+
+test("audio can use A1 when Premiere omits its empty transition list", async () => {
+  const f = fixture();
+  f.clip.getMediaFilePath = () => "C:\\Media\\achievement_sfx.mp3";
+  const first = track({ clips: [[40, 85]] });
+  f.seq.audio = [
+    { getTrackItems: (type) => type === 1 ? [...first.getTrackItems(type), null] : undefined },
+    track({ clips: [[60, 200]] }),
+    empty(),
+    empty()
+  ];
+  await f.place();
+  assert.equal(f.commits[0].action.audio, 0);
+});
+
+test("placement status distinguishes Premiere routing to A4 from requesting A1", async () => {
+  const f = fixture();
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.seq.audio = [track({ clips: [[40, 85]] }), track({ clips: [[60, 200]] }), empty(), empty()];
+  const execute = f.project.executeTransaction;
+  f.project.executeTransaction = (callback, label) => {
+    const committed = execute(callback, label);
+    f.seq.audio[3] = {
+      getTrackItems: (type) => type === 1 ? [{
+        getStartTime: () => time(100), getEndTime: () => time(150),
+        getProjectItem: () => ({ getId: () => "take" })
+      }] : []
+    };
+    return committed;
+  };
+  assert.match(await f.place(), /on A4 \(requested A1\)/);
+  assert.equal(f.commits[0].action.audio, 0);
+});
+
+test("recognizes the MP3 filename when Premiere omits the media path and audio chain", async () => {
+  const f = fixture();
+  f.bin.children[1].name = "achievement_sfx.mp3";
+  f.clip.getMediaFilePath = () => "";
+  f.clip.getComponentChain = (type) => type === "audio" ? null : {};
+  f.seq.audio = [empty(), track({ clips: [[60, 200]] }), empty(), empty()];
+
+  assert.match(await f.place(), /achievement_sfx\.mp3.*requested A1/);
+  assert.equal(f.commits[0].action.audio, 0);
+});
+
 test("linked media checks both track groups", async () => {
   const f = fixture();
   f.clip.getComponentChain = () => ({});
@@ -184,6 +287,23 @@ test("linked media checks both track groups", async () => {
   await f.place();
   assert.equal(f.commits[0].action.video, 0);
   assert.equal(f.commits[0].action.audio, 1);
+});
+
+test("linked media uses the gap on A1 even when A2 overlaps", async () => {
+  const f = fixture();
+  f.bin.children[1].name = "reference.mp4";
+  f.clip.getComponentChain = () => ({});
+  f.seq.video = [track({ clips: [[0, 90]] }), track({ clips: [[95, 200]] })];
+  f.seq.audio = [
+    track({ clips: [[0, 90]] }),
+    track({ clips: [[95, 200]] }),
+    empty()
+  ];
+
+  await f.place();
+  assert.deepEqual(f.commits[0].action, {
+    itemId: "take", position: "100", video: 0, audio: 0
+  });
 });
 
 test("stills with unknown duration use an empty track", async () => {
