@@ -13,9 +13,10 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DestroyIcon, DestroyMenu, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW,
-            SetForegroundWindow, TrackPopupMenu, CW_USEDEFAULT, HICON, ICONINFO, MF_GRAYED,
-            MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-            WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_USER, WNDCLASSW,
+            SetForegroundWindow, TrackPopupMenu, CW_USEDEFAULT, HICON, ICONINFO, MF_CHECKED,
+            MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            TPM_NONOTIFY, TPM_RETURNCMD, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+            WM_USER, WNDCLASSW,
         },
     },
 };
@@ -23,18 +24,29 @@ use windows_sys::Win32::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     OpenSpotlight,
+    OpenSettings,
+    ToggleDefaultEffectControls,
+    OpenConfigFile,
+    ReloadConfig,
     Quit,
 }
 
 thread_local! {
     static TRAY_ACTIONS: RefCell<Vec<TrayAction>> = const { RefCell::new(Vec::new()) };
     static TRAY_CONNECTED: RefCell<bool> = const { RefCell::new(false) };
+    static HOTKEY_LABEL: RefCell<String> = RefCell::new(String::from("Ctrl+Space"));
     static HOTKEY_AVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static DEFAULT_EFFECT_CONTROLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TRAY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
 }
 
-pub fn mark_hotkey_unavailable() {
-    HOTKEY_AVAILABLE.set(false);
+pub fn set_hotkey_status(label: &str, available: bool) {
+    HOTKEY_LABEL.with(|slot| *slot.borrow_mut() = label.to_string());
+    HOTKEY_AVAILABLE.set(available);
+}
+
+pub fn set_default_effect_controls(enabled: bool) {
+    DEFAULT_EFFECT_CONTROLS.set(enabled);
 }
 
 pub fn set_action_handler<F: FnMut() + 'static>(handler: F) {
@@ -74,6 +86,14 @@ const TRAY_ICON_UID: u32 = 1;
 const ID_TRAY_OPEN: usize = 1001;
 #[cfg(windows)]
 const ID_TRAY_QUIT: usize = 1002;
+#[cfg(windows)]
+const ID_TRAY_SETTINGS: usize = 1003;
+#[cfg(windows)]
+const ID_TRAY_TOGGLE_EC: usize = 1004;
+#[cfg(windows)]
+const ID_TRAY_OPEN_CONFIG: usize = 1005;
+#[cfg(windows)]
+const ID_TRAY_RELOAD_CONFIG: usize = 1006;
 
 pub struct SystemTray {
     #[cfg(windows)]
@@ -132,7 +152,8 @@ impl SystemTray {
             nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             nid.uCallbackMessage = WM_TRAYICON;
             nid.hIcon = hicon;
-            write_tip(&mut nid.szTip, "Premiere Spotlight · Ctrl+Space in Premiere Pro");
+            let hotkey = HOTKEY_LABEL.with(|s| s.borrow().clone());
+            write_tip(&mut nid.szTip, &format!("Premiere Spotlight · {hotkey} in Premiere Pro"));
 
             Shell_NotifyIconW(NIM_ADD, &nid);
 
@@ -149,6 +170,11 @@ impl SystemTray {
         Some(Self {})
     }
 
+    pub fn refresh_tooltip(&self) {
+        let connected = TRAY_CONNECTED.with(|c| *c.borrow());
+        self.set_connected(connected);
+    }
+
     pub fn set_connected(&self, connected: bool) {
         TRAY_CONNECTED.with(|c| *c.borrow_mut() = connected);
         #[cfg(windows)]
@@ -158,12 +184,13 @@ impl SystemTray {
             nid.hWnd = self.hwnd;
             nid.uID = TRAY_ICON_UID;
             nid.uFlags = NIF_TIP;
+            let hotkey = HOTKEY_LABEL.with(|s| s.borrow().clone());
             let tip = if connected {
-                "Premiere Spotlight — Connected (Ctrl+Space)"
+                format!("Premiere Spotlight — Connected ({hotkey})")
             } else {
-                "Premiere Spotlight — Waiting for Premiere Pro..."
+                format!("Premiere Spotlight — Waiting for Premiere Pro ({hotkey})...")
             };
-            write_tip(&mut nid.szTip, tip);
+            write_tip(&mut nid.szTip, &tip);
             Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
     }
@@ -252,17 +279,23 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     } else {
         to_wide("Premiere Spotlight · Premiere Active")
     };
+    let hotkey_label = HOTKEY_LABEL.with(|s| s.borrow().clone());
     let hotkey_available = HOTKEY_AVAILABLE.get();
-    let open_label = to_wide(if hotkey_available {
-        "Open Spotlight (Ctrl+Space)"
+    let default_ec = DEFAULT_EFFECT_CONTROLS.get();
+    let open_label = to_wide(&if hotkey_available {
+        format!("Open Spotlight ({hotkey_label})")
     } else {
-        "Open Spotlight"
+        "Open Spotlight".to_string()
     });
+    let settings_label = to_wide("Settings…");
+    let ec_toggle_label = to_wide("Always Open Effect Controls on Enter");
+    let open_config_label = to_wide("Open config.json");
+    let reload_config_label = to_wide("Reload Config");
     let quit_label = to_wide("Quit Premiere Spotlight");
 
     AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, status_label.as_ptr());
     if !hotkey_available {
-        let unavailable = to_wide("Ctrl+Space unavailable");
+        let unavailable = to_wide(&format!("{hotkey_label} unavailable"));
         AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, unavailable.as_ptr());
     }
     AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
@@ -273,6 +306,12 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         MF_STRING | MF_GRAYED
     };
     AppendMenuW(hmenu, open_flags, ID_TRAY_OPEN, open_label.as_ptr());
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, settings_label.as_ptr());
+    AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
+    let ec_flags = MF_STRING | if default_ec { MF_CHECKED } else { MF_UNCHECKED };
+    AppendMenuW(hmenu, ec_flags, ID_TRAY_TOGGLE_EC, ec_toggle_label.as_ptr());
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN_CONFIG, open_config_label.as_ptr());
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_RELOAD_CONFIG, reload_config_label.as_ptr());
     AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
     AppendMenuW(hmenu, MF_STRING, ID_TRAY_QUIT, quit_label.as_ptr());
 
@@ -293,10 +332,14 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(hmenu);
 
-    if cmd == ID_TRAY_OPEN {
-        push_tray_action(TrayAction::OpenSpotlight);
-    } else if cmd == ID_TRAY_QUIT {
-        push_tray_action(TrayAction::Quit);
+    match cmd {
+        ID_TRAY_OPEN => push_tray_action(TrayAction::OpenSpotlight),
+        ID_TRAY_SETTINGS => push_tray_action(TrayAction::OpenSettings),
+        ID_TRAY_TOGGLE_EC => push_tray_action(TrayAction::ToggleDefaultEffectControls),
+        ID_TRAY_OPEN_CONFIG => push_tray_action(TrayAction::OpenConfigFile),
+        ID_TRAY_RELOAD_CONFIG => push_tray_action(TrayAction::ReloadConfig),
+        ID_TRAY_QUIT => push_tray_action(TrayAction::Quit),
+        _ => {}
     }
 }
 

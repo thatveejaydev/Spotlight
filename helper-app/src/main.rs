@@ -5,6 +5,7 @@ mod catalog;
 mod debug_log;
 mod error_toast;
 mod installer;
+mod settings;
 mod tray;
 mod win_focus;
 
@@ -15,9 +16,10 @@ use catalog::{CatalogStore, EffectEntry, ProjectItemEntry, ProjectItemKind, Sear
 use debug_log::{DebugLogController, LogKind};
 use error_toast::ErrorToast;
 use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
+    hotkey::HotKey,
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
+use settings::{AlternateModifier, AppSettings, PaletteShortcutAction};
 use slint::{
     Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
 };
@@ -26,7 +28,7 @@ use std::{
     collections::HashMap,
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -49,6 +51,7 @@ struct AppState {
     pending_placement: Option<PendingPlacement>,
     pending_source_open: Option<PendingSourceOpen>,
     active_bin_path: Option<String>,
+    settings: AppSettings,
     selected_abs_index: usize,
     scroll_offset: usize,
     rendered_scroll_offset: Option<usize>,
@@ -375,7 +378,18 @@ fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
     win_focus::window_hwnd(ui.window())
 }
 
+fn stop_shortcut_recording(ui: &SpotlightWindow, rec_flag: Option<&AtomicBool>) {
+    ui.set_recording_hotkey(false);
+    ui.set_recording_target("".into());
+    if let Some(flag) = rec_flag {
+        flag.store(false, Ordering::Release);
+    }
+}
+
 fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
+    stop_shortcut_recording(ui, None);
+    ui.set_settings_open(false);
+    ui.set_settings_feedback("".into());
     ui.set_active_catalog("all".into());
     ui.set_search_text(SharedString::from(""));
     clear_bin_scope(ui, state);
@@ -409,7 +423,9 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     win_focus::force_foreground(our_hwnd);
     win_focus::set_palette_visible(true);
     start_focus_grace_timer();
-    ui.invoke_focus_search();
+    if !ui.get_settings_open() {
+        ui.invoke_focus_search();
+    }
 }
 
 fn restore_premiere_focus(hwnd: isize) {
@@ -424,6 +440,8 @@ fn restore_premiere_focus(hwnd: isize) {
 fn hide_palette(ui: &SpotlightWindow, state: &mut AppState) {
     win_focus::set_palette_visible(false);
     stop_focus_grace_timer();
+    stop_shortcut_recording(ui, None);
+    ui.set_settings_open(false);
     let _ = ui.hide();
     state.is_visible = false;
     state.shown_at = None;
@@ -537,18 +555,30 @@ fn toggle_palette_from_hotkey_with_focus(
     palette_actively_open: bool,
 ) {
     if state.is_visible && palette_actively_open {
-        debug_log::log_event(LogKind::Focus, "HOTKEY", "Ctrl+Space -> hide palette");
+        debug_log::log_event(
+            LogKind::Focus,
+            "HOTKEY",
+            &format!("{} -> hide palette", state.settings.hotkey),
+        );
         hide_and_restore_focus(ui, state);
         return;
     }
     if is_premiere_fg {
-        debug_log::log_event(LogKind::Focus, "HOTKEY", "Ctrl+Space -> show palette");
+        debug_log::log_event(
+            LogKind::Focus,
+            "HOTKEY",
+            &format!("{} -> show palette", state.settings.hotkey),
+        );
         state.previous_hwnd = fg_hwnd;
         center_and_show(ui, state, bridge);
         return;
     }
     if state.is_visible {
-        debug_log::log_event(LogKind::Focus, "HOTKEY", "Ctrl+Space -> clear stale visibility");
+        debug_log::log_event(
+            LogKind::Focus,
+            "HOTKEY",
+            &format!("{} -> clear stale visibility", state.settings.hotkey),
+        );
         hide_and_restore_focus(ui, state);
     }
 }
@@ -586,7 +616,9 @@ fn apply_entry_at(
     state: &mut AppState,
     bridge: &BridgeClients,
 ) -> Result<(), SharedString> {
-    apply_entry_with_options(abs_index, ui, state, bridge, false)
+    let open_effect_controls =
+        settings::resolve_open_effect_controls(state.settings.open_effect_controls_by_default, false);
+    apply_entry_with_options(abs_index, ui, state, bridge, open_effect_controls)
 }
 
 fn apply_entry_with_options(
@@ -660,7 +692,13 @@ fn shift_activate_at(
         return Ok(());
     };
     match chosen {
-        SearchResult::Effect(_) => apply_entry_with_options(abs_index, ui, state, bridge, true),
+        SearchResult::Effect(_) => {
+            let open_effect_controls = settings::resolve_open_effect_controls(
+                state.settings.open_effect_controls_by_default,
+                true,
+            );
+            apply_entry_with_options(abs_index, ui, state, bridge, open_effect_controls)
+        }
         SearchResult::ProjectItem(entry) => {
             let Some(catalog) = &state.media_catalog else {
                 return Err("Project media changed. Search again.".into());
@@ -723,6 +761,8 @@ fn main() -> Result<(), slint::PlatformError> {
     win_focus::init_palette_window(extract_window_hwnd(&ui));
     debug_log::log_event(LogKind::Info, "INIT", "Premiere Spotlight helper started");
 
+    let initial_settings = settings::load_settings();
+
     // Create native Windows System Tray icon (no taskbar icon)
     let tray = Rc::new(RefCell::new(SystemTray::new()));
 
@@ -735,6 +775,7 @@ fn main() -> Result<(), slint::PlatformError> {
         pending_placement: None,
         pending_source_open: None,
         active_bin_path: None,
+        settings: initial_settings.clone(),
         selected_abs_index: 0,
         scroll_offset: 0,
         rendered_scroll_offset: None,
@@ -766,10 +807,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
                 match event {
                     BridgeEvent::ClientConnected => {
+                        let hotkey = state_ref.borrow().settings.hotkey.clone();
                         ui.set_bridge_connected(true);
-                        ui.set_status_message(SharedString::from(
-                            "Connected to Premiere Pro · Ctrl+Space",
-                        ));
+                        ui.set_status_message(SharedString::from(format!(
+                            "Connected to Premiere Pro · {hotkey}"
+                        )));
                         if let Some(ref t) = *tray_ref.borrow() {
                             t.set_connected(true);
                         }
@@ -784,9 +826,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                     }
                     BridgeEvent::CatalogReceived(items) => {
+                        let hotkey = state_ref.borrow().settings.hotkey.clone();
                         ui.set_bridge_connected(true);
                         ui.set_status_message(SharedString::from(format!(
-                            "Premiere synced ({} effects) · Ctrl+Space",
+                            "Premiere synced ({} effects) · {hotkey}",
                             items.len()
                         )));
                         if let Some(ref t) = *tray_ref.borrow() {
@@ -1088,16 +1131,514 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Keep Ctrl+Space registered across minimize/restore. The handler checks
-    // the current foreground window before opening Spotlight.
-    let hotkey_manager =
-        GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
-    let ctrl_space = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
-    let ctrl_space_id = ctrl_space.id();
-    if let Err(error) = hotkey_manager.register(ctrl_space) {
-        eprintln!("Could not register Ctrl+Space: {error}");
-        tray::mark_hotkey_unavailable();
+    const NO_HOTKEY_ID: u32 = u32::MAX;
+
+    struct HotkeyController {
+        manager: GlobalHotKeyManager,
+        registered: Option<(HotKey, String)>,
+        active_id: Arc<AtomicU32>,
+        available: bool,
     }
+
+    impl HotkeyController {
+        fn new(initial_spec: &str) -> (Self, Option<String>) {
+            let manager =
+                GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
+            let mut ctrl = Self {
+                manager,
+                registered: None,
+                active_id: Arc::new(AtomicU32::new(NO_HOTKEY_ID)),
+                available: false,
+            };
+            let err = match settings::parse_hotkey_spec(initial_spec) {
+                Ok((hotkey, label)) => match ctrl.apply(hotkey, label.clone()) {
+                    Ok(()) => None,
+                    Err(msg) => {
+                        eprintln!("Could not register {label}: {msg}");
+                        Some(msg)
+                    }
+                },
+                Err(msg) => Some(msg),
+            };
+            (ctrl, err)
+        }
+
+        fn apply(&mut self, hotkey: HotKey, label: String) -> Result<(), String> {
+            if self.available
+                && self
+                    .registered
+                    .as_ref()
+                    .is_some_and(|(old, _)| *old == hotkey)
+            {
+                return Ok(());
+            }
+
+            let previous = self.registered.take();
+            let was_available = self.available;
+            if let Some((old_hk, _)) = previous {
+                if was_available {
+                    let _ = self.manager.unregister(old_hk);
+                }
+            }
+
+            match self.manager.register(hotkey) {
+                Ok(()) => {
+                    self.active_id.store(hotkey.id(), Ordering::Release);
+                    self.registered = Some((hotkey, label));
+                    self.available = true;
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Some((old_hk, old_label)) = previous {
+                        if was_available && self.manager.register(old_hk).is_ok() {
+                            self.active_id.store(old_hk.id(), Ordering::Release);
+                            self.registered = Some((old_hk, old_label));
+                            self.available = true;
+                        } else {
+                            self.active_id.store(NO_HOTKEY_ID, Ordering::Release);
+                            self.available = false;
+                        }
+                    } else {
+                        self.active_id.store(NO_HOTKEY_ID, Ordering::Release);
+                        self.available = false;
+                    }
+                    Err(format!(
+                        "{label} is already in use by Windows or another app ({error})."
+                    ))
+                }
+            }
+        }
+    }
+
+    fn modifier_label(modifier: AlternateModifier) -> &'static str {
+        match modifier {
+            AlternateModifier::Shift => "Shift",
+            AlternateModifier::Ctrl => "Ctrl",
+            AlternateModifier::Alt => "Alt",
+        }
+    }
+
+    fn palette_shortcut_slot_mut<'a>(
+        settings: &'a mut AppSettings,
+        target: &str,
+    ) -> Option<(&'static str, &'a mut String)> {
+        match target {
+            "settings" => Some(("Open Settings shortcut", &mut settings.settings_hotkey)),
+            "catalog_all" => Some(("All catalog shortcut", &mut settings.catalog_all_hotkey)),
+            "catalog_effects" => {
+                Some(("Effects catalog shortcut", &mut settings.catalog_effects_hotkey))
+            }
+            "catalog_project" => {
+                Some(("Project catalog shortcut", &mut settings.catalog_project_hotkey))
+            }
+            _ => None,
+        }
+    }
+
+    fn sync_settings_ui(
+        ui: &SpotlightWindow,
+        settings: &AppSettings,
+        hotkey_available: bool,
+        tray: &Rc<RefCell<Option<SystemTray>>>,
+    ) {
+        ui.set_hotkey_label(settings.hotkey.clone().into());
+        ui.set_open_effect_controls_default(settings.open_effect_controls_by_default);
+        ui.set_alternate_modifier(settings.alternate_modifier.as_str().into());
+        ui.set_settings_hotkey_label(settings.settings_hotkey.clone().into());
+        ui.set_catalog_all_hotkey_label(settings.catalog_all_hotkey.clone().into());
+        ui.set_catalog_effects_hotkey_label(settings.catalog_effects_hotkey.clone().into());
+        ui.set_catalog_project_hotkey_label(settings.catalog_project_hotkey.clone().into());
+        ui.set_config_path_display(settings::config_path().to_string_lossy().into_owned().into());
+        if !ui.get_bridge_connected() {
+            ui.set_status_message(format!("Ready · {}", settings.hotkey).into());
+        }
+        tray::set_hotkey_status(&settings.hotkey, hotkey_available);
+        tray::set_default_effect_controls(settings.open_effect_controls_by_default);
+        if let Some(ref t) = *tray.borrow() {
+            t.refresh_tooltip();
+        }
+    }
+
+    fn save_and_sync_settings(
+        ui: &SpotlightWindow,
+        settings: &AppSettings,
+        hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
+        tray: &Rc<RefCell<Option<SystemTray>>>,
+        success_msg: String,
+    ) -> Result<(), String> {
+        let available = hotkey_ctrl.borrow().available;
+        let result = match settings::save_settings(settings) {
+            Ok(()) => {
+                ui.set_settings_feedback_error(false);
+                ui.set_settings_feedback(success_msg.into());
+                Ok(())
+            }
+            Err(err) => {
+                ui.set_settings_feedback_error(true);
+                ui.set_settings_feedback(err.clone().into());
+                Err(err)
+            }
+        };
+        sync_settings_ui(ui, settings, available, tray);
+        result
+    }
+
+    fn apply_hotkey_update(
+        ui: &SpotlightWindow,
+        state: &mut AppState,
+        hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
+        tray: &Rc<RefCell<Option<SystemTray>>>,
+        hotkey: HotKey,
+        label: String,
+    ) -> Result<(), String> {
+        if let Some(conflict) = settings::shortcut_conflict("launch", &label, &state.settings) {
+            let available = hotkey_ctrl.borrow().available;
+            ui.set_settings_feedback_error(true);
+            ui.set_settings_feedback(conflict.clone().into());
+            sync_settings_ui(ui, &state.settings, available, tray);
+            return Err(conflict);
+        }
+        let result = hotkey_ctrl.borrow_mut().apply(hotkey, label.clone());
+        let available = hotkey_ctrl.borrow().available;
+        match result {
+            Ok(()) => {
+                state.settings.hotkey = label.clone();
+                save_and_sync_settings(
+                    ui,
+                    &state.settings,
+                    hotkey_ctrl,
+                    tray,
+                    format!("Saved shortcut: {label}"),
+                )
+            }
+            Err(err) => {
+                ui.set_settings_feedback_error(true);
+                ui.set_settings_feedback(err.clone().into());
+                sync_settings_ui(ui, &state.settings, available, tray);
+                Err(err)
+            }
+        }
+    }
+
+    fn toggle_default_effect_controls_setting(
+        ui: &SpotlightWindow,
+        state: &mut AppState,
+        hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
+        tray: &Rc<RefCell<Option<SystemTray>>>,
+    ) {
+        state.settings.open_effect_controls_by_default =
+            !state.settings.open_effect_controls_by_default;
+        let msg = if state.settings.open_effect_controls_by_default {
+            "Enter now applies effects and opens Effect Controls.".to_string()
+        } else {
+            format!(
+                "{}+Enter opens Effect Controls (default restored).",
+                modifier_label(state.settings.alternate_modifier)
+            )
+        };
+        let _ = save_and_sync_settings(ui, &state.settings, hotkey_ctrl, tray, msg);
+    }
+
+    fn reload_settings_live(
+        ui: &SpotlightWindow,
+        state: &mut AppState,
+        hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
+        tray: &Rc<RefCell<Option<SystemTray>>>,
+    ) {
+        let loaded = settings::load_settings();
+        state.settings.open_effect_controls_by_default = loaded.open_effect_controls_by_default;
+        state.settings.alternate_modifier = loaded.alternate_modifier;
+        state.settings.settings_hotkey = loaded.settings_hotkey;
+        state.settings.catalog_all_hotkey = loaded.catalog_all_hotkey;
+        state.settings.catalog_effects_hotkey = loaded.catalog_effects_hotkey;
+        state.settings.catalog_project_hotkey = loaded.catalog_project_hotkey;
+
+        let mut error_msg = None;
+        if let Ok((hotkey, label)) = settings::parse_hotkey_spec(&loaded.hotkey) {
+            if let Some(conflict) = settings::shortcut_conflict("launch", &label, &state.settings) {
+                error_msg = Some(conflict);
+            } else if let Err(err) = hotkey_ctrl.borrow_mut().apply(hotkey, label.clone()) {
+                error_msg = Some(err);
+            } else {
+                state.settings.hotkey = label;
+            }
+        }
+        if let Some(err) = error_msg {
+            ui.set_settings_feedback_error(true);
+            ui.set_settings_feedback(err.into());
+        } else {
+            ui.set_settings_feedback_error(false);
+            ui.set_settings_feedback("Reloaded settings from config.json".into());
+        }
+        let available = hotkey_ctrl.borrow().available;
+        sync_settings_ui(ui, &state.settings, available, tray);
+    }
+
+    fn toggle_settings_view(ui: &SpotlightWindow, rec_flag: &AtomicBool) {
+        let next = !ui.get_settings_open();
+        stop_shortcut_recording(ui, Some(rec_flag));
+        ui.set_settings_feedback("".into());
+        ui.set_settings_open(next);
+        if !next {
+            ui.invoke_focus_search();
+        }
+    }
+
+    fn jump_to_catalog(ui: &SpotlightWindow, state: &mut AppState, target: &str) {
+        if ui.get_active_catalog().as_str() == target {
+            return;
+        }
+        ui.set_active_catalog(target.into());
+        if target != "project" {
+            clear_bin_scope(ui, state);
+        }
+        state.selected_abs_index = 0;
+        state.scroll_offset = 0;
+        refresh_results_ui(ui, state);
+    }
+
+    fn open_config_file_in_editor(state: &AppState) {
+        let path = settings::config_path();
+        if !path.exists() {
+            let _ = settings::save_settings(&state.settings);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path.to_string_lossy()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
+    }
+
+    let (hotkey_ctrl_raw, initial_hotkey_err) = HotkeyController::new(&initial_settings.hotkey);
+    let hotkey_id_ref = hotkey_ctrl_raw.active_id.clone();
+    let initial_hotkey_available = hotkey_ctrl_raw.available;
+    let hotkey_ctrl = Rc::new(RefCell::new(hotkey_ctrl_raw));
+    let recording_hotkey_flag = Arc::new(AtomicBool::new(false));
+    {
+        let st = state.borrow();
+        sync_settings_ui(&ui, &st.settings, initial_hotkey_available, &tray);
+        if let Some(err) = initial_hotkey_err {
+            ui.set_settings_feedback_error(true);
+            ui.set_settings_feedback(err.into());
+        }
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rec_flag = recording_hotkey_flag.clone();
+        ui.on_toggle_settings(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                toggle_settings_view(&ui, &rec_flag);
+            }
+        });
+    }
+    {
+        let rec_flag = recording_hotkey_flag.clone();
+        ui.on_hotkey_recording_changed(move |active| {
+            rec_flag.store(active, Ordering::Release);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let tray_ref = tray.clone();
+        let rec_flag = recording_hotkey_flag.clone();
+        ui.on_capture_shortcut(move |target, text, ctrl, alt, shift, meta| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let target_str = target.as_str();
+            if target_str == "launch" {
+                match settings::hotkey_from_slint_event(text.as_str(), ctrl, alt, shift, meta) {
+                    Ok(None) => {}
+                    Ok(Some((hotkey, label))) => {
+                        stop_shortcut_recording(&ui, Some(&rec_flag));
+                        let mut st = state_ref.borrow_mut();
+                        let _ = apply_hotkey_update(&ui, &mut st, &hk_ctrl, &tray_ref, hotkey, label);
+                    }
+                    Err(msg) => {
+                        ui.set_settings_feedback_error(true);
+                        ui.set_settings_feedback(msg.into());
+                    }
+                }
+                return;
+            }
+            match settings::palette_hotkey_from_slint_event(text.as_str(), ctrl, alt, shift, meta) {
+                Ok(None) => {}
+                Ok(Some((_hotkey, label))) => {
+                    stop_shortcut_recording(&ui, Some(&rec_flag));
+                    let mut st = state_ref.borrow_mut();
+                    if let Some(conflict) =
+                        settings::shortcut_conflict(target_str, &label, &st.settings)
+                    {
+                        ui.set_settings_feedback_error(true);
+                        ui.set_settings_feedback(conflict.into());
+                        return;
+                    }
+                    if let Some((_, slot)) = palette_shortcut_slot_mut(&mut st.settings, target_str)
+                    {
+                        *slot = label.clone();
+                        let _ = save_and_sync_settings(
+                            &ui,
+                            &st.settings,
+                            &hk_ctrl,
+                            &tray_ref,
+                            format!("Saved shortcut: {label}"),
+                        );
+                    }
+                }
+                Err(msg) => {
+                    ui.set_settings_feedback_error(true);
+                    ui.set_settings_feedback(msg.into());
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let tray_ref = tray.clone();
+        let rec_flag = recording_hotkey_flag.clone();
+        ui.on_clear_shortcut(move |target| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            stop_shortcut_recording(&ui, Some(&rec_flag));
+            let mut st = state_ref.borrow_mut();
+            if let Some((slot_name, slot)) =
+                palette_shortcut_slot_mut(&mut st.settings, target.as_str())
+            {
+                slot.clear();
+                let _ = save_and_sync_settings(
+                    &ui,
+                    &st.settings,
+                    &hk_ctrl,
+                    &tray_ref,
+                    format!("Cleared {slot_name}."),
+                );
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let tray_ref = tray.clone();
+        let rec_flag = recording_hotkey_flag.clone();
+        ui.on_reset_default_hotkey(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            stop_shortcut_recording(&ui, Some(&rec_flag));
+            if let Ok((hotkey, label)) = settings::parse_hotkey_spec(settings::DEFAULT_HOTKEY) {
+                let mut st = state_ref.borrow_mut();
+                let _ = apply_hotkey_update(&ui, &mut st, &hk_ctrl, &tray_ref, hotkey, label);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let tray_ref = tray.clone();
+        ui.on_set_alternate_modifier(move |value| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let next = AlternateModifier::from_setting(value.as_str());
+            let mut st = state_ref.borrow_mut();
+            if st.settings.alternate_modifier == next {
+                return;
+            }
+            st.settings.alternate_modifier = next;
+            let _ = save_and_sync_settings(
+                &ui,
+                &st.settings,
+                &hk_ctrl,
+                &tray_ref,
+                format!("Alternate action modifier set to {}.", modifier_label(next)),
+            );
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let rec_flag = recording_hotkey_flag.clone();
+        ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return false;
+            };
+            let settings_open = ui.get_settings_open();
+            let action = {
+                let st = state_ref.borrow();
+                settings::match_palette_shortcut(
+                    &st.settings,
+                    settings_open,
+                    text.as_str(),
+                    ctrl,
+                    alt,
+                    shift,
+                    meta,
+                )
+            };
+            match action {
+                Some(PaletteShortcutAction::ToggleSettings) => {
+                    toggle_settings_view(&ui, &rec_flag);
+                    true
+                }
+                Some(PaletteShortcutAction::SelectCatalog(target)) => {
+                    if settings_open {
+                        stop_shortcut_recording(&ui, Some(&rec_flag));
+                        ui.set_settings_feedback("".into());
+                        ui.set_settings_open(false);
+                        ui.invoke_focus_search();
+                    }
+                    let mut st = state_ref.borrow_mut();
+                    jump_to_catalog(&ui, &mut st, target);
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let tray_ref = tray.clone();
+        ui.on_toggle_default_effect_controls(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                toggle_default_effect_controls_setting(&ui, &mut st, &hk_ctrl, &tray_ref);
+            }
+        });
+    }
+    {
+        let state_ref = state.clone();
+        ui.on_open_config_file(move || {
+            let st = state_ref.borrow();
+            open_config_file_in_editor(&st);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let tray_ref = tray.clone();
+        ui.on_reload_settings(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                reload_settings_live(&ui, &mut st, &hk_ctrl, &tray_ref);
+            }
+        });
+    }
+
     let hotkey_pending = Arc::new(AtomicBool::new(false));
     {
         let ui_weak = ui.as_weak();
@@ -1118,8 +1659,12 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let pending_flag = hotkey_pending.clone();
+        let rec_flag = recording_hotkey_flag.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-            if event.id == ctrl_space_id && event.state == HotKeyState::Pressed {
+            if event.state == HotKeyState::Pressed
+                && !rec_flag.load(Ordering::Acquire)
+                && event.id == hotkey_id_ref.load(Ordering::Acquire)
+            {
                 // Capture WM_HOTKEY foreground rights immediately and wake the event loop without timer lag.
                 win_focus::allow_current_process_foreground();
                 pending_flag.store(true, Ordering::Release);
@@ -1137,6 +1682,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let sync_palette_focus = {
         let state_ref = state.clone();
         let hook_active = foreground_hook_active.clone();
+        let rec_flag = recording_hotkey_flag.clone();
         Rc::new(move |ui: &SpotlightWindow| {
             if !state_ref.borrow().is_visible {
                 stop_focus_grace_timer();
@@ -1165,6 +1711,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     debug_log::log_event(LogKind::Focus, "FOCUS", "Lost focus -> hide palette");
                     win_focus::set_palette_visible(false);
                     stop_focus_grace_timer();
+                    stop_shortcut_recording(&ui, Some(&rec_flag));
+                    ui.set_settings_open(false);
                     let _ = ui.hide();
                 }
             }
@@ -1197,6 +1745,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let state_ref = state.clone();
         let tray_ref = tray.clone();
         let bridge_ref = bridge.clone();
+        let hk_ctrl = hotkey_ctrl.clone();
+        let rec_flag = recording_hotkey_flag.clone();
         tray::set_action_handler(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -1211,6 +1761,33 @@ fn main() -> Result<(), slint::PlatformError> {
                             st.previous_hwnd = unminimized_premiere_hwnd;
                             center_and_show(&ui, &mut st, &bridge_ref);
                         }
+                    }
+                    TrayAction::OpenSettings => {
+                        let (_, unminimized_premiere_hwnd) =
+                            win_focus::query_premiere_window_state();
+                        let mut st = state_ref.borrow_mut();
+                        st.previous_hwnd = unminimized_premiere_hwnd;
+                        stop_shortcut_recording(&ui, Some(&rec_flag));
+                        ui.set_settings_feedback("".into());
+                        ui.set_settings_open(true);
+                        show_palette(&ui, &mut st);
+                    }
+                    TrayAction::ToggleDefaultEffectControls => {
+                        let mut st = state_ref.borrow_mut();
+                        toggle_default_effect_controls_setting(
+                            &ui,
+                            &mut st,
+                            &hk_ctrl,
+                            &tray_ref,
+                        );
+                    }
+                    TrayAction::OpenConfigFile => {
+                        let st = state_ref.borrow();
+                        open_config_file_in_editor(&st);
+                    }
+                    TrayAction::ReloadConfig => {
+                        let mut st = state_ref.borrow_mut();
+                        reload_settings_live(&ui, &mut st, &hk_ctrl, &tray_ref);
                     }
                     TrayAction::Quit => {
                         if let Some(ref mut t) = *tray_ref.borrow_mut() {
@@ -1386,6 +1963,7 @@ mod tests {
             pending_placement: None,
             pending_source_open: None,
             active_bin_path: None,
+            settings: AppSettings::default(),
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1510,6 +2088,7 @@ mod tests {
             pending_placement: None,
             pending_source_open: None,
             active_bin_path: None,
+            settings: AppSettings::default(),
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1675,6 +2254,7 @@ mod tests {
             pending_placement: None,
             pending_source_open: None,
             active_bin_path: None,
+            settings: AppSettings::default(),
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1963,6 +2543,7 @@ mod tests {
             pending_placement: None,
             pending_source_open: None,
             active_bin_path: None,
+            settings: AppSettings::default(),
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -2032,6 +2613,7 @@ mod tests {
             pending_placement: None,
             pending_source_open: None,
             active_bin_path: None,
+            settings: AppSettings::default(),
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -2199,5 +2781,351 @@ mod tests {
                 .any(|x| long_base[y * width + x] != long_with_folder[y * width + x])
         });
         assert!(!leaked_into_badge);
+    }
+
+    #[test]
+    fn default_effect_controls_setting_swaps_enter_and_shift_enter_for_effects() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        let effect = SearchResult::Effect(Arc::new(EffectEntry {
+            name: "Gaussian Blur".into(),
+            match_name: "blur".into(),
+            effect_type: "videoEffect".into(),
+            folder: String::new(),
+        }));
+        let clip = catalog::ProjectItemEntry {
+            item_id: "clip".into(),
+            name: "Clip".into(),
+            bin_path: "Footage".into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+        let catalog = MediaCatalog {
+            peer_id: 7,
+            project_id: Some("project".into()),
+            sequence_id: Some("sequence".into()),
+            items: vec![clip.clone()],
+        };
+        let bridge = BridgeClients::new();
+        let requests = bridge.connect_test_peer(catalog.clone());
+        let mut state = AppState {
+            catalog: CatalogStore::new_with_defaults(),
+            matched_items: vec![effect, SearchResult::ProjectItem(Arc::new(clip))],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: Some(catalog),
+            pending_placement: None,
+            pending_source_open: None,
+            active_bin_path: None,
+            settings: AppSettings {
+                hotkey: "Alt+Space".into(),
+                open_effect_controls_by_default: true,
+                ..AppSettings::default()
+            },
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
+            is_visible: false,
+            shown_at: None,
+            saw_foreground: false,
+            previous_hwnd: 0,
+        };
+
+        show_palette(&ui, &mut state);
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+        let msg: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        let req1 = msg["requestId"].as_u64().unwrap();
+        assert!(state.pending_effects.get(&req1).unwrap().open_effect_controls);
+
+        show_palette(&ui, &mut state);
+        shift_activate_at(0, &ui, &mut state, &bridge).unwrap();
+        let msg2: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        let req2 = msg2["requestId"].as_u64().unwrap();
+        assert!(!state.pending_effects.get(&req2).unwrap().open_effect_controls);
+
+        // Project items still open in Source Monitor on Shift+Enter and place on Enter.
+        show_palette(&ui, &mut state);
+        shift_activate_at(1, &ui, &mut state, &bridge).unwrap();
+        assert!(requests.try_recv().unwrap().contains("open_in_source_monitor"));
+    }
+
+    #[test]
+    fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
+        use std::cell::Cell;
+
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+
+        let closed = Rc::new(Cell::new(0usize));
+        let closed_cb = closed.clone();
+        ui.on_close_requested(move || closed_cb.set(closed_cb.get() + 1));
+
+        let ui_weak = ui.as_weak();
+        ui.on_toggle_settings(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_settings_open(!ui.get_settings_open());
+            }
+        });
+
+        let captured = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+        let captured_cb = captured.clone();
+        ui.on_capture_shortcut(move |target, text, ctrl, alt, shift, meta| {
+            if let Ok(Some((_, label))) =
+                settings::hotkey_from_slint_event(text.as_str(), ctrl, alt, shift, meta)
+            {
+                captured_cb.borrow_mut().push((target.to_string(), label));
+            }
+        });
+
+        // Click the lower-right gear icon (around x=594, y=389 inside 620x407 footer).
+        let gear_pos = LogicalPosition::new(594., 389.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position: gear_pos,
+            button: PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position: gear_pos,
+            button: PointerEventButton::Left,
+        });
+        assert!(ui.get_settings_open());
+
+        // Clicking Launch Hotkey shortcut box enters recording mode and Esc cancels recording without leaving Settings.
+        let recorder_pos = LogicalPosition::new(490., 104.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position: recorder_pos,
+            button: PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position: recorder_pos,
+            button: PointerEventButton::Left,
+        });
+        assert!(ui.get_recording_hotkey());
+        assert_eq!(ui.get_recording_target().as_str(), "launch");
+
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Alt.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: " ".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: " ".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Alt.into(),
+        });
+        assert_eq!(
+            &*captured.borrow(),
+            &[("launch".to_string(), "Alt+Space".to_string())]
+        );
+
+        // Esc exits recording first, keeping Settings open; second Esc exits Settings without closing Spotlight.
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Escape.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Escape.into(),
+        });
+        assert!(!ui.get_recording_hotkey());
+        assert!(ui.get_settings_open());
+        assert_eq!(closed.get(), 0);
+
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Escape.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Escape.into(),
+        });
+        assert!(!ui.get_settings_open());
+        assert_eq!(closed.get(), 0);
+    }
+
+    #[test]
+    fn configurable_modifier_settings_hotkey_and_catalog_shortcuts_work() {
+        use std::cell::Cell;
+
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+
+        let clip = catalog::ProjectItemEntry {
+            item_id: "clip".into(),
+            name: "Clip".into(),
+            bin_path: "01_Footage".into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+        let state = Rc::new(RefCell::new(AppState {
+            catalog: CatalogStore::new_with_defaults(),
+            matched_items: vec![SearchResult::ProjectItem(Arc::new(clip))],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: None,
+            pending_placement: None,
+            pending_source_open: None,
+            active_bin_path: Some("01_Footage".into()),
+            settings: AppSettings {
+                settings_hotkey: "Ctrl+,".into(),
+                catalog_effects_hotkey: "Ctrl+2".into(),
+                ..AppSettings::default()
+            },
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
+            is_visible: true,
+            shown_at: Some(Instant::now()),
+            saw_foreground: true,
+            previous_hwnd: 0,
+        }));
+        {
+            let mut st = state.borrow_mut();
+            ui.set_active_catalog("project".into());
+            ui.set_active_bin("01_Footage".into());
+            ui.set_settings_hotkey_label(st.settings.settings_hotkey.clone().into());
+            ui.set_catalog_effects_hotkey_label(st.settings.catalog_effects_hotkey.clone().into());
+            refresh_results_ui(&ui, &mut st);
+        }
+
+        let primary_calls = Rc::new(Cell::new(0usize));
+        let alternate_calls = Rc::new(Cell::new(0usize));
+        let primary_cb = primary_calls.clone();
+        ui.on_activate_selected(move || primary_cb.set(primary_cb.get() + 1));
+        let alt_cb = alternate_calls.clone();
+        ui.on_shift_activate_selected(move || alt_cb.set(alt_cb.get() + 1));
+
+        let ui_weak = ui.as_weak();
+        ui.on_toggle_settings(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_settings_open(!ui.get_settings_open());
+            }
+        });
+
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return false;
+            };
+            let settings_open = ui.get_settings_open();
+            let action = {
+                let st = state_ref.borrow();
+                settings::match_palette_shortcut(
+                    &st.settings,
+                    settings_open,
+                    text.as_str(),
+                    ctrl,
+                    alt,
+                    shift,
+                    meta,
+                )
+            };
+            match action {
+                Some(PaletteShortcutAction::ToggleSettings) => {
+                    ui.set_settings_open(!settings_open);
+                    true
+                }
+                Some(PaletteShortcutAction::SelectCatalog(target)) => {
+                    let mut st = state_ref.borrow_mut();
+                    ui.set_active_catalog(target.into());
+                    if target != "project" {
+                        clear_bin_scope(&ui, &mut st);
+                    }
+                    true
+                }
+                None => false,
+            }
+        });
+
+        // Switch alternate action modifier to Ctrl: Ctrl+Enter fires shift-activate, Shift+Enter fires primary.
+        ui.set_alternate_modifier("ctrl".into());
+        ui.invoke_focus_search();
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Return.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Return.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+        assert_eq!(alternate_calls.get(), 1);
+        assert_eq!(primary_calls.get(), 0);
+
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Shift.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Return.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Return.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Shift.into(),
+        });
+        assert_eq!(alternate_calls.get(), 1);
+        assert_eq!(primary_calls.get(), 1);
+
+        // Ctrl+, toggles Settings open and closed even while search input had focus.
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: ",".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: ",".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+        assert!(ui.get_settings_open());
+
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: ",".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: ",".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+        assert!(!ui.get_settings_open());
+
+        // Configured direct catalog shortcut Ctrl+2 jumps straight to Effects and clears Project bin scope.
+        ui.invoke_focus_search();
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: "2".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: "2".into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+        assert_eq!(ui.get_active_catalog().as_str(), "effects");
+        assert!(state.borrow().active_bin_path.is_none());
+        assert_eq!(ui.get_search_text().as_str(), "");
     }
 }

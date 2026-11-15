@@ -34,5 +34,13 @@ cargo run --release
 - **`Tab` (or click the search-bar badge):** Switch catalogs (`All` → `Effects` → `Project`). Spotlight opens in `All` and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, drill into a project bin to browse/search its contents, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
 - **`Backspace` (when search is empty inside a bin, or Click the bin pill):** Step back up one folder level (or exit bin view).
-- **`Shift + Enter` (or `Shift` + Click):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, or open a project item in the Source Monitor.
-- **`Esc`:** Close popup and return focus to Premiere
+- **`Shift + Enter` (or `Shift` + Click; configurable to `Ctrl` or `Alt`):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, or open a project item in the Source Monitor.
+- **`Esc`:** Close popup and return focus to Premiere (or exit Settings back to Search if Settings is open)
+
+## Settings & Configuration
+- Click the **⚙** icon in the lower-right corner of the Spotlight popup, press **`Ctrl+,`** inside Spotlight (configurable), or right-click the **Premiere Spotlight** tray icon → **Settings…** to:
+  - Customize the global **Launch Hotkey** (default `Ctrl+Space`).
+  - Toggle **Always open Effect Controls on Enter** (swaps primary and alternate actions for effects; also toggleable directly from the System Tray menu).
+  - Choose the **Alternate Action Modifier** (`Shift`, `Ctrl`, or `Alt`, default `Shift`) used with `Enter` / Click.
+  - Customize the **Open Settings Shortcut** (default `Ctrl+,`) and optional **Direct Catalog Shortcuts** for **All**, **Effects**, and **Project** (all empty by default).
+- Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.

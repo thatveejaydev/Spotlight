@@ -313,6 +313,104 @@ export component ErrorToastWindow inherits Window {
     }
 }
 
+component ShortcutRecorderRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> hint: "";
+    in property <string> shortcut-text;
+    in property <string> empty-text: "Not set";
+    in property <bool> recording: false;
+    in property <bool> show-clear: true;
+    callback toggle-record();
+    callback clear-clicked();
+
+    spacing: 10px;
+    alignment: stretch;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: root.label;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: #f3f4f8;
+        }
+        if root.hint != "" : Text {
+            text: root.hint;
+            font-size: 11px;
+            color: #8b90aa;
+            overflow: elide;
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: center;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                min-width: 112px;
+                height: 26px;
+                border-radius: 6px;
+                background: root.recording ? #6366f130 : (slot-touch.has-hover ? #25283a : #1f2233);
+                border-width: 1px;
+                border-color: root.recording ? #818cf8 : #3a3f5c;
+                accessible-role: button;
+                accessible-label: root.label;
+                accessible-action-default => { root.toggle-record(); }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+                    Text {
+                        text: root.recording ? "Press keys…"
+                            : (root.shortcut-text != "" ? root.shortcut-text : root.empty-text);
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: root.recording ? #c7d2fe
+                            : (root.shortcut-text != "" ? #e2e8f0 : #6b708b);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                slot-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-record(); }
+                }
+            }
+        }
+
+        if root.show-clear && root.shortcut-text != "" : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 6px;
+                background: clear-touch.has-hover ? #38252d : #1f2130;
+                border-width: 1px;
+                border-color: clear-touch.has-hover ? #ca7c85 : #363952;
+                accessible-role: button;
+                accessible-label: "Clear " + root.label;
+                accessible-action-default => { root.clear-clicked(); }
+                Text {
+                    text: "×";
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: #cbd5e1;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                clear-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.clear-clicked(); }
+                }
+            }
+        }
+    }
+}
+
 export component SpotlightWindow inherits Window {
     title: "";
     no-frame: true;
@@ -332,7 +430,24 @@ export component SpotlightWindow inherits Window {
     in property <bool> show-recent-items: false;
     in-out property <bool> bridge-connected: false;
     in-out property <int> total-matches: 0;
-    in-out property <string> status-message: "Ready · Ctrl+Space";
+    private property <string> gear-tooltip: settings-open ? "Back to Search"
+        : (settings-hotkey-label != "" ? "Settings (" + settings-hotkey-label + ")" : "Settings");
+    in-out property <string> hotkey-label: "Ctrl+Space";
+    in-out property <string> status-message: "Ready · " + root.hotkey-label;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> recording-hotkey: false;
+    in-out property <string> recording-target: "";
+    in-out property <bool> open-effect-controls-default: false;
+    in-out property <string> alternate-modifier: "shift";
+    private property <string> alternate-modifier-label: alternate-modifier == "ctrl" ? "Ctrl"
+        : alternate-modifier == "alt" ? "Alt" : "Shift";
+    in-out property <string> settings-hotkey-label: "Ctrl+,";
+    in-out property <string> catalog-all-hotkey-label: "";
+    in-out property <string> catalog-effects-hotkey-label: "";
+    in-out property <string> catalog-project-hotkey-label: "";
+    in-out property <string> config-path-display: "";
+    in-out property <string> settings-feedback: "";
+    in-out property <bool> settings-feedback-error: false;
     in property <[EffectItemUI]> results: [];
 
     callback search-edited(string);
@@ -345,10 +460,61 @@ export component SpotlightWindow inherits Window {
     callback shift-activate-index(int);
     callback close-requested();
     callback toggle-debug-log();
+    callback toggle-settings();
+    callback hotkey-recording-changed(bool);
+    callback capture-shortcut(string, string, bool, bool, bool, bool);
+    callback clear-shortcut(string);
+    callback reset-default-hotkey();
+    callback toggle-default-effect-controls();
+    callback set-alternate-modifier(string);
+    callback try-palette-shortcut(string, bool, bool, bool, bool) -> bool;
+    callback open-config-file();
+    callback reload-settings();
 
     public function focus-search() {
         search-input.focus();
         search-input.select-all();
+    }
+
+    function begin-recording(target: string) {
+        if (root.recording-target == target && root.recording-hotkey) {
+            root.set-recording(false);
+            return;
+        }
+        root.recording-target = target;
+        root.set-recording(true);
+    }
+
+    function set-recording(active: bool) {
+        if (!active) {
+            root.recording-target = "";
+        }
+        if (root.recording-hotkey != active) {
+            root.recording-hotkey = active;
+            root.hotkey-recording-changed(active);
+        }
+        if (active) {
+            if (root.recording-target == "") {
+                root.recording-target = "launch";
+            }
+            root.settings-feedback = "";
+            root.settings-feedback-error = false;
+            recorder-focus.focus();
+        } else if (root.settings-open) {
+            settings-focus.focus();
+        }
+    }
+
+    changed settings-open => {
+        if (root.settings-open && !root.recording-hotkey) {
+            settings-focus.focus();
+        }
+    }
+
+    function is-alternate-modifier(mods: KeyboardModifiers) -> bool {
+        return root.alternate-modifier == "ctrl" ? mods.control
+            : root.alternate-modifier == "alt" ? mods.alt
+            : mods.shift;
     }
 
     function switch-catalog() {
@@ -365,7 +531,40 @@ export component SpotlightWindow inherits Window {
         forward-focus: search-input;
 
         key-pressed(event) => {
-            if (event.text == Key.Return && event.modifiers.shift) {
+            if (root.settings-open) {
+                if (event.text == Key.Escape) {
+                    if (root.recording-hotkey) {
+                        root.set-recording(false);
+                    } else {
+                        root.toggle-settings();
+                    }
+                    return accept;
+                }
+                if (!root.recording-hotkey && root.try-palette-shortcut(
+                    event.text,
+                    event.modifiers.control,
+                    event.modifiers.alt,
+                    event.modifiers.shift,
+                    event.modifiers.meta,
+                )) {
+                    return accept;
+                }
+                if (event.text == Key.F12 && !root.recording-hotkey) {
+                    root.toggle-debug-log();
+                    return accept;
+                }
+                return reject;
+            }
+            if (root.try-palette-shortcut(
+                event.text,
+                event.modifiers.control,
+                event.modifiers.alt,
+                event.modifiers.shift,
+                event.modifiers.meta,
+            )) {
+                return accept;
+            }
+            if (event.text == Key.Return && root.is-alternate-modifier(event.modifiers)) {
                 root.shift-activate-selected();
                 return accept;
             }
@@ -408,12 +607,70 @@ export component SpotlightWindow inherits Window {
             padding: 0px;
             spacing: 0px;
 
-            // 1. Search Bar Header
+            // 1. Search Bar Header (or Settings Header when settings-open)
             Rectangle {
                 height: 54px;
                 background: #171822;
 
                 HorizontalLayout {
+                    visible: root.settings-open;
+                    width: 100%;
+                    height: 100%;
+                    padding-left: 16px;
+                    padding-right: 14px;
+                    spacing: 12px;
+                    alignment: stretch;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: "Settings";
+                            font-size: 14px;
+                            font-weight: 700;
+                            color: #f3f4f8;
+                        }
+                        Text {
+                            text: "Hotkeys and preferences apply immediately";
+                            font-size: 11px;
+                            color: #8b90aa;
+                            overflow: elide;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 72px;
+                            height: 26px;
+                            border-radius: 6px;
+                            background: back-touch.has-hover ? #282b3d : #1f2130;
+                            border-width: 1px;
+                            border-color: #363952;
+                            accessible-role: button;
+                            accessible-label: "Back to search";
+                            accessible-action-default => { root.toggle-settings(); }
+                            Text {
+                                text: "← Back";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: #dcdfe8;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            back-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-settings(); }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    visible: !root.settings-open;
+                    width: 100%;
+                    height: 100%;
                     padding-left: 16px;
                     padding-right: 14px;
                     spacing: 12px;
@@ -514,6 +771,7 @@ export component SpotlightWindow inherits Window {
                         }
 
                         search-input := TextInput {
+                            enabled: !root.settings-open;
                             x: 0px;
                             width: 100%;
                             height: 100%;
@@ -534,7 +792,16 @@ export component SpotlightWindow inherits Window {
                             }
 
                             key-pressed(event) => {
-                                if (event.text == Key.Return && event.modifiers.shift) {
+                                if (root.try-palette-shortcut(
+                                    event.text,
+                                    event.modifiers.control,
+                                    event.modifiers.alt,
+                                    event.modifiers.shift,
+                                    event.modifiers.meta,
+                                )) {
+                                    return accept;
+                                }
+                                if (event.text == Key.Return && root.is-alternate-modifier(event.modifiers)) {
                                     root.shift-activate-selected();
                                     return accept;
                                 }
@@ -571,13 +838,500 @@ export component SpotlightWindow inherits Window {
                 background: #26283a;
             }
 
-            // Eight visible results
+            // Eight visible results (or Settings panel)
             Rectangle {
                 height: 314px;
                 background: #12131a;
                 clip: true;
 
-                if root.results.length == 0 : VerticalLayout {
+                // Scrollable Settings Panel
+                Rectangle {
+                    visible: root.settings-open;
+                    width: 100%;
+                    height: 100%;
+
+                    settings-focus := FocusScope {
+                        width: 0px;
+                        height: 0px;
+                        enabled: root.settings-open && !root.recording-hotkey;
+                    }
+
+                    recorder-focus := FocusScope {
+                        width: 0px;
+                        height: 0px;
+                        enabled: root.settings-open && root.recording-hotkey;
+                        key-pressed(event) => {
+                            if (!root.recording-hotkey) {
+                                return reject;
+                            }
+                            if (event.text == Key.Escape) {
+                                root.set-recording(false);
+                                return accept;
+                            }
+                            root.capture-shortcut(
+                                root.recording-target,
+                                event.text,
+                                event.modifiers.control,
+                                event.modifiers.alt,
+                                event.modifiers.shift,
+                                event.modifiers.meta,
+                            );
+                            return accept;
+                        }
+                    }
+
+                    VerticalLayout {
+                        width: 100%;
+                        height: 100%;
+                        padding: 0px;
+                        spacing: 0px;
+
+                        if root.settings-feedback != "" : Rectangle {
+                            background: root.settings-feedback-error ? #3b1d24 : #163028;
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                padding-top: 6px;
+                                padding-bottom: 6px;
+                                Text {
+                                    text: root.settings-feedback;
+                                    font-size: 11px;
+                                    color: root.settings-feedback-error ? #fca5a5 : #6ee7b7;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        Flickable {
+                            vertical-stretch: 1;
+                            content-height: settings-list.preferred-height;
+                            interactive: true;
+
+                            settings-list := VerticalLayout {
+                                width: 100%;
+                                padding: 14px;
+                                spacing: 10px;
+                                alignment: start;
+
+                                // Card 1: Launch Hotkey
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 8px;
+
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            alignment: stretch;
+
+                                            VerticalLayout {
+                                                horizontal-stretch: 1;
+                                                alignment: center;
+                                                spacing: 2px;
+                                                Text {
+                                                    text: "Launch Hotkey";
+                                                    font-size: 13px;
+                                                    font-weight: 600;
+                                                    color: #f3f4f8;
+                                                }
+                                                Text {
+                                                    text: "Global shortcut to open Spotlight in Premiere Pro";
+                                                    font-size: 11px;
+                                                    color: #8b90aa;
+                                                    overflow: elide;
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                alignment: center;
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        min-width: 122px;
+                                                        height: 28px;
+                                                        border-radius: 6px;
+                                                        background: (root.recording-hotkey && root.recording-target == "launch") ? #6366f130
+                                                            : (record-touch.has-hover ? #25283a : #1f2233);
+                                                        border-width: 1px;
+                                                        border-color: (root.recording-hotkey && root.recording-target == "launch") ? #818cf8 : #3a3f5c;
+                                                        accessible-role: button;
+                                                        accessible-label: "Change launch hotkey";
+                                                        accessible-action-default => { root.begin-recording("launch"); }
+
+                                                        HorizontalLayout {
+                                                            padding-left: 10px;
+                                                            padding-right: 10px;
+                                                            alignment: center;
+                                                            Text {
+                                                                text: (root.recording-hotkey && root.recording-target == "launch") ? "Press keys…" : root.hotkey-label;
+                                                                font-size: 11.5px;
+                                                                font-weight: 700;
+                                                                color: (root.recording-hotkey && root.recording-target == "launch") ? #c7d2fe : #e2e8f0;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+
+                                                        record-touch := TouchArea {
+                                                            mouse-cursor: pointer;
+                                                            clicked => { root.begin-recording("launch"); }
+                                                        }
+                                                        Tooltip {
+                                                            text: @markdown("Click then press a new key combination (Esc to cancel)");
+                                                        }
+                                                    }
+                                                }
+
+                                                if root.hotkey-label != "Ctrl+Space" : VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 52px;
+                                                        height: 28px;
+                                                        border-radius: 6px;
+                                                        background: reset-touch.has-hover ? #282b3d : #1f2130;
+                                                        border-width: 1px;
+                                                        border-color: #363952;
+                                                        accessible-role: button;
+                                                        accessible-label: "Reset hotkey to Ctrl+Space";
+                                                        accessible-action-default => { root.reset-default-hotkey(); }
+                                                        Text {
+                                                            text: "Reset";
+                                                            font-size: 11px;
+                                                            font-weight: 600;
+                                                            color: #cbd5e1;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        reset-touch := TouchArea {
+                                                            mouse-cursor: pointer;
+                                                            clicked => {
+                                                                root.set-recording(false);
+                                                                root.reset-default-hotkey();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Card 2: Effect Controls on Enter
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    HorizontalLayout {
+                                        padding: 12px;
+                                        spacing: 12px;
+                                        alignment: stretch;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Always open Effect Controls on Enter";
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: #f3f4f8;
+                                            }
+                                            Text {
+                                                text: root.open-effect-controls-default
+                                                    ? "Enter applies & opens Effect Controls · " + root.alternate-modifier-label + "+Enter applies only"
+                                                    : "Enter applies only · " + root.alternate-modifier-label + "+Enter opens Effect Controls";
+                                                font-size: 11px;
+                                                color: #8b90aa;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 40px;
+                                                height: 22px;
+                                                border-radius: 11px;
+                                                background: root.open-effect-controls-default ? #6366f1 : #2a2d40;
+                                                border-width: 1px;
+                                                border-color: root.open-effect-controls-default ? #818cf8 : #3a3f5c;
+                                                accessible-role: checkbox;
+                                                accessible-label: "Always open Effect Controls on Enter";
+                                                accessible-checked: root.open-effect-controls-default;
+                                                accessible-action-default => { root.toggle-default-effect-controls(); }
+
+                                                Rectangle {
+                                                    x: root.open-effect-controls-default ? 20px : 3px;
+                                                    y: 3px;
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    border-radius: 7px;
+                                                    background: #ffffff;
+                                                    animate x { duration: 120ms; }
+                                                }
+
+                                                TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        root.set-recording(false);
+                                                        root.toggle-default-effect-controls();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Card 3: Alternate Action Modifier
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    HorizontalLayout {
+                                        padding: 12px;
+                                        spacing: 12px;
+                                        alignment: stretch;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Alternate Action Modifier";
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: #f3f4f8;
+                                            }
+                                            Text {
+                                                text: root.alternate-modifier-label + "+Enter / " + root.alternate-modifier-label + "+Click triggers Source Monitor or Effect Controls swap";
+                                                font-size: 11px;
+                                                color: #8b90aa;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            alignment: center;
+
+                                            for opt in [
+                                                { id: "shift", title: "Shift" },
+                                                { id: "ctrl", title: "Ctrl" },
+                                                { id: "alt", title: "Alt" },
+                                            ] : VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 44px;
+                                                    height: 26px;
+                                                    border-radius: 5px;
+                                                    background: root.alternate-modifier == opt.id ? #6366f130
+                                                        : (mod-touch.has-hover ? #282b3d : #1f2130);
+                                                    border-width: 1px;
+                                                    border-color: root.alternate-modifier == opt.id ? #818cf8 : #363952;
+                                                    Text {
+                                                        text: opt.title;
+                                                        font-size: 11px;
+                                                        font-weight: root.alternate-modifier == opt.id ? 700 : 500;
+                                                        color: root.alternate-modifier == opt.id ? #c7d2fe : #cbd5e1;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    mod-touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => {
+                                                            root.set-recording(false);
+                                                            root.set-alternate-modifier(opt.id);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Card 4: Open Settings Shortcut
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        ShortcutRecorderRow {
+                                            label: "Open Settings Shortcut";
+                                            hint: "Press inside Spotlight to toggle Settings";
+                                            shortcut-text: root.settings-hotkey-label;
+                                            recording: root.recording-hotkey && root.recording-target == "settings";
+                                            toggle-record => { root.begin-recording("settings"); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut("settings");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Card 5: Direct Catalog Shortcuts
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 8px;
+
+                                        ShortcutRecorderRow {
+                                            label: "Switch to All Catalog";
+                                            hint: "Optional shortcut inside Spotlight (empty by default)";
+                                            shortcut-text: root.catalog-all-hotkey-label;
+                                            recording: root.recording-hotkey && root.recording-target == "catalog_all";
+                                            toggle-record => { root.begin-recording("catalog_all"); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut("catalog_all");
+                                            }
+                                        }
+
+                                        ShortcutRecorderRow {
+                                            label: "Switch to Effects Catalog";
+                                            shortcut-text: root.catalog-effects-hotkey-label;
+                                            recording: root.recording-hotkey && root.recording-target == "catalog_effects";
+                                            toggle-record => { root.begin-recording("catalog_effects"); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut("catalog_effects");
+                                            }
+                                        }
+
+                                        ShortcutRecorderRow {
+                                            label: "Switch to Project Catalog";
+                                            shortcut-text: root.catalog-project-hotkey-label;
+                                            recording: root.recording-hotkey && root.recording-target == "catalog_project";
+                                            toggle-record => { root.begin-recording("catalog_project"); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut("catalog_project");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Card 6: Config file location & actions
+                                Rectangle {
+                                    background: #171822;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #26293d;
+
+                                    HorizontalLayout {
+                                        padding: 12px;
+                                        spacing: 10px;
+                                        alignment: stretch;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Config File";
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: #f3f4f8;
+                                            }
+                                            Text {
+                                                text: root.config-path-display;
+                                                font-size: 10.5px;
+                                                font-family: "Consolas";
+                                                color: #8b90aa;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: center;
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 72px;
+                                                    height: 26px;
+                                                    border-radius: 6px;
+                                                    background: open-cfg-touch.has-hover ? #282b3d : #1f2130;
+                                                    border-width: 1px;
+                                                    border-color: #363952;
+                                                    accessible-role: button;
+                                                    accessible-label: "Open config file";
+                                                    accessible-action-default => { root.open-config-file(); }
+                                                    Text {
+                                                        text: "Open File";
+                                                        font-size: 11px;
+                                                        font-weight: 600;
+                                                        color: #cbd5e1;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    open-cfg-touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => {
+                                                            root.set-recording(false);
+                                                            root.open-config-file();
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 58px;
+                                                    height: 26px;
+                                                    border-radius: 6px;
+                                                    background: reload-cfg-touch.has-hover ? #282b3d : #1f2130;
+                                                    border-width: 1px;
+                                                    border-color: #363952;
+                                                    accessible-role: button;
+                                                    accessible-label: "Reload config file";
+                                                    accessible-action-default => { root.reload-settings(); }
+                                                    Text {
+                                                        text: "Reload";
+                                                        font-size: 11px;
+                                                        font-weight: 600;
+                                                        color: #cbd5e1;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    reload-cfg-touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => {
+                                                            root.set-recording(false);
+                                                            root.reload-settings();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !root.settings-open && root.results.length == 0 : VerticalLayout {
                     alignment: center;
                     Text {
                         text: root.active-bin != "" && root.search-text == "" ? "This bin is empty"
@@ -590,6 +1344,9 @@ export component SpotlightWindow inherits Window {
                 }
 
                 VerticalLayout {
+                    visible: !root.settings-open;
+                    width: 100%;
+                    height: 100%;
                     padding: 6px;
                     spacing: 2px;
                     alignment: start;
@@ -677,7 +1434,7 @@ export component SpotlightWindow inherits Window {
                             mouse-cursor: pointer;
                             pointer-event(event) => {
                                 if (event.kind == PointerEventKind.down) {
-                                    self.shift-click = event.modifiers.shift;
+                                    self.shift-click = root.is-alternate-modifier(event.modifiers);
                                 }
                             }
                             clicked => {
@@ -741,13 +1498,58 @@ export component SpotlightWindow inherits Window {
                         }
                     }
 
-                    VerticalLayout {
+                    if !root.settings-open : VerticalLayout {
                         alignment: center;
                         Text {
                             text: root.show-recent-items ? "Recently added"
                                 : root.total-matches == 1 ? "1 result" : root.total-matches + " results";
                             font-size: 11px;
                             color: #8b90aa;
+                        }
+                    }
+
+                    // Lower-right Settings gear button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 5px;
+                            background: root.settings-open ? #6366f133
+                                : (gear-touch.has-hover ? #25283a : transparent);
+                            border-width: root.settings-open ? 1px : 0px;
+                            border-color: #818cf888;
+                            accessible-role: button;
+                            accessible-label: root.settings-open ? "Close settings" : "Open settings";
+                            accessible-action-default => { root.toggle-settings(); }
+
+                            Path {
+                                x: 5px;
+                                y: 5px;
+                                width: 14px;
+                                height: 14px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                fill: root.settings-open ? #c7d2fe
+                                    : (gear-touch.has-hover ? #dcdfe8 : #8b90aa);
+                                commands: "M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.44.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.48.48 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.03.24.23.41.47.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.48.48 0 0 0-.12-.61l-2.01-1.58z";
+                            }
+                            Rectangle {
+                                x: 9.5px;
+                                y: 9.5px;
+                                width: 5px;
+                                height: 5px;
+                                border-radius: 2.5px;
+                                background: root.settings-open ? #1d2038 : (gear-touch.has-hover ? #25283a : #151620);
+                            }
+
+                            gear-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-settings(); }
+                            }
+                            Tooltip {
+                                text: @markdown("\{root.gear-tooltip}");
+                            }
                         }
                     }
 
