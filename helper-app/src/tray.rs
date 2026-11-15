@@ -30,10 +30,29 @@ thread_local! {
     static TRAY_ACTIONS: RefCell<Vec<TrayAction>> = const { RefCell::new(Vec::new()) };
     static TRAY_CONNECTED: RefCell<bool> = const { RefCell::new(false) };
     static HOTKEY_AVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static TRAY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
 }
 
 pub fn mark_hotkey_unavailable() {
     HOTKEY_AVAILABLE.set(false);
+}
+
+pub fn set_action_handler<F: FnMut() + 'static>(handler: F) {
+    TRAY_DISPATCH.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(handler));
+    });
+}
+
+#[cfg(windows)]
+fn push_tray_action(action: TrayAction) {
+    TRAY_ACTIONS.with(|q| q.borrow_mut().push(action));
+    let _ = slint::invoke_from_event_loop(|| {
+        TRAY_DISPATCH.with(|slot| {
+            if let Some(callback) = slot.borrow_mut().as_mut() {
+                callback();
+            }
+        });
+    });
 }
 
 pub fn poll_tray_action() -> Option<TrayAction> {
@@ -203,7 +222,7 @@ unsafe extern "system" fn tray_wnd_proc(
     if msg == WM_TRAYICON {
         let mouse_msg = (lparam as u32) & 0xFFFF;
         if mouse_msg == WM_LBUTTONUP {
-            TRAY_ACTIONS.with(|q| q.borrow_mut().push(TrayAction::OpenSpotlight));
+            push_tray_action(TrayAction::OpenSpotlight);
             return 0;
         } else if mouse_msg == WM_RBUTTONUP || mouse_msg == WM_CONTEXTMENU {
             show_tray_context_menu(hwnd);
@@ -275,9 +294,9 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     DestroyMenu(hmenu);
 
     if cmd == ID_TRAY_OPEN {
-        TRAY_ACTIONS.with(|q| q.borrow_mut().push(TrayAction::OpenSpotlight));
+        push_tray_action(TrayAction::OpenSpotlight);
     } else if cmd == ID_TRAY_QUIT {
-        TRAY_ACTIONS.with(|q| q.borrow_mut().push(TrayAction::Quit));
+        push_tray_action(TrayAction::Quit);
     }
 }
 

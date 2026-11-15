@@ -308,6 +308,13 @@ const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
 const FRAMELESS_STRIP_MASK: u32 =
     WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
 
+static PALETTE_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_palette_visible(visible: bool) {
+    PALETTE_VISIBLE.store(visible, std::sync::atomic::Ordering::Release);
+}
+
 #[cfg(windows)]
 thread_local! {
     static PALETTE_FRAME: std::cell::Cell<(HWND, WNDPROC, bool)> =
@@ -350,6 +357,10 @@ impl ForegroundHook {
         }
         Self { hooks }
     }
+
+    pub fn is_active(&self) -> bool {
+        !self.hooks.is_empty()
+    }
 }
 
 #[cfg(windows)]
@@ -374,6 +385,10 @@ impl ForegroundHook {
     pub fn install<F: Fn() + 'static>(_on_change: F) -> Self {
         Self
     }
+
+    pub fn is_active(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(windows)]
@@ -386,6 +401,10 @@ unsafe extern "system" fn winevent_proc(
     _id_event_thread: u32,
     _event_time: u32,
 ) {
+    if !PALETTE_VISIBLE.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    crate::debug_log::record_fg_hook_event();
     let cb = HOOK_CALLBACK.with(|slot| slot.borrow().clone());
     if let Some(cb) = cb {
         cb();
@@ -530,10 +549,7 @@ pub fn center_palette(hwnd: isize, premiere_hwnd: isize) {
 pub fn center_palette(_hwnd: isize, _premiere_hwnd: isize) {}
 
 #[cfg(windows)]
-pub fn error_toast_position(
-    premiere_hwnd: isize,
-    logical_height: f32,
-) -> Option<slint::PhysicalPosition> {
+fn monitor_work_area_and_dpi(premiere_hwnd: isize) -> Option<(RECT, u32, u32)> {
     unsafe {
         let anchor = if premiere_hwnd == 0 {
             GetForegroundWindow()
@@ -550,18 +566,51 @@ pub fn error_toast_position(
         if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) < 0 {
             (dpi_x, dpi_y) = (96, 96);
         }
-        let margin_x = (20.0 * dpi_x as f32 / 96.0).round() as i32;
-        let bottom_offset = ((logical_height + 20.0) * dpi_y as f32 / 96.0).round() as i32;
-        Some(slint::PhysicalPosition::new(
-            info.rcWork.left + margin_x,
-            (info.rcWork.bottom - bottom_offset).max(info.rcWork.top),
-        ))
+        Some((info.rcWork, dpi_x, dpi_y))
     }
+}
+
+#[cfg(windows)]
+pub fn error_toast_position(
+    premiere_hwnd: isize,
+    logical_height: f32,
+) -> Option<slint::PhysicalPosition> {
+    let (work, dpi_x, dpi_y) = monitor_work_area_and_dpi(premiere_hwnd)?;
+    let margin_x = (20.0 * dpi_x as f32 / 96.0).round() as i32;
+    let bottom_offset = ((logical_height + 20.0) * dpi_y as f32 / 96.0).round() as i32;
+    Some(slint::PhysicalPosition::new(
+        work.left + margin_x,
+        (work.bottom - bottom_offset).max(work.top),
+    ))
 }
 
 #[cfg(not(windows))]
 pub fn error_toast_position(
     _premiere_hwnd: isize,
+    _logical_height: f32,
+) -> Option<slint::PhysicalPosition> {
+    None
+}
+
+#[cfg(windows)]
+pub fn debug_window_position(
+    premiere_hwnd: isize,
+    logical_width: f32,
+    logical_height: f32,
+) -> Option<slint::PhysicalPosition> {
+    let (work, dpi_x, dpi_y) = monitor_work_area_and_dpi(premiere_hwnd)?;
+    let right_offset = ((logical_width + 20.0) * dpi_x as f32 / 96.0).round() as i32;
+    let bottom_offset = ((logical_height + 20.0) * dpi_y as f32 / 96.0).round() as i32;
+    Some(slint::PhysicalPosition::new(
+        (work.right - right_offset).max(work.left),
+        (work.bottom - bottom_offset).max(work.top),
+    ))
+}
+
+#[cfg(not(windows))]
+pub fn debug_window_position(
+    _premiere_hwnd: isize,
+    _logical_width: f32,
     _logical_height: f32,
 ) -> Option<slint::PhysicalPosition> {
     None

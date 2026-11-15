@@ -2,6 +2,7 @@
 
 mod bridge;
 mod catalog;
+mod debug_log;
 mod error_toast;
 mod installer;
 mod tray;
@@ -9,6 +10,7 @@ mod win_focus;
 
 use bridge::{ApplyResult, BridgeClients, BridgeEvent, MediaCatalog, PlacementResult};
 use catalog::{CatalogStore, EffectEntry, ProjectItemKind, SearchResult};
+use debug_log::{DebugLogController, LogKind};
 use error_toast::ErrorToast;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -46,6 +48,8 @@ struct AppState {
     pending_source_open: Option<PendingSourceOpen>,
     selected_abs_index: usize,
     scroll_offset: usize,
+    rendered_scroll_offset: Option<usize>,
+    results_dirty: bool,
     is_visible: bool,
     shown_at: Option<Instant>,
     saw_foreground: bool,
@@ -53,7 +57,7 @@ struct AppState {
 }
 
 struct PendingEffect {
-    entry: EffectEntry,
+    entry: Arc<EffectEntry>,
     recipients: Vec<usize>,
     deadline: Instant,
 }
@@ -138,6 +142,7 @@ fn recent_results(state: &AppState) -> Vec<SearchResult> {
                     .iter()
                     .find(|entry| entry.item_id == item.item_id && entry.placement_error().is_none())
                     .cloned()
+                    .map(Arc::new)
                     .map(SearchResult::ProjectItem)
             }
         })
@@ -198,17 +203,32 @@ fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     let catalog = ui.get_active_catalog();
     let show_history = catalog.as_str() == "all" && query.trim().is_empty();
     ui.set_show_recent_items(show_history);
+    let started = Instant::now();
     state.matched_items = if show_history {
         recent_results(state)
     } else {
         state.catalog.search(query.as_str(), catalog.as_str())
     };
+    let elapsed = started.elapsed();
     let total = state.matched_items.len();
+    if state.is_visible {
+        let (effects_count, media_count) = state.catalog.counts();
+        debug_log::record_search_timing(
+            elapsed,
+            query.as_str(),
+            catalog.as_str(),
+            total,
+            effects_count + media_count,
+        );
+    }
     ui.set_total_matches(total as i32);
+    state.results_dirty = true;
 
     if total == 0 {
         state.selected_abs_index = 0;
         state.scroll_offset = 0;
+        state.rendered_scroll_offset = None;
+        state.results_dirty = false;
         ui.set_selected_index(0);
         ui.set_results(ModelRc::new(VecModel::from(Vec::<EffectItemUI>::new())));
         return;
@@ -243,6 +263,8 @@ fn refresh_catalog_ui(ui: &SpotlightWindow, state: &mut AppState, preserve_media
 fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
     let total = state.matched_items.len();
     if total == 0 {
+        state.rendered_scroll_offset = None;
+        state.results_dirty = false;
         ui.set_results(ModelRc::new(VecModel::from(Vec::<EffectItemUI>::new())));
         ui.set_selected_index(0);
         return;
@@ -252,6 +274,12 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
         state.scroll_offset = state.selected_abs_index;
     } else if state.selected_abs_index >= state.scroll_offset + VISIBLE_ROWS {
         state.scroll_offset = state.selected_abs_index + 1 - VISIBLE_ROWS;
+    }
+
+    let rel_idx = (state.selected_abs_index - state.scroll_offset) as i32;
+    if !state.results_dirty && state.rendered_scroll_offset == Some(state.scroll_offset) {
+        ui.set_selected_index(rel_idx);
+        return;
     }
 
     let end = (state.scroll_offset + VISIBLE_ROWS).min(total);
@@ -287,9 +315,10 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
         })
         .collect();
 
-    let rel_idx = (state.selected_abs_index - state.scroll_offset) as i32;
     ui.set_results(ModelRc::new(VecModel::from(slice)));
     ui.set_selected_index(rel_idx);
+    state.rendered_scroll_offset = Some(state.scroll_offset);
+    state.results_dirty = false;
 }
 
 fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
@@ -327,6 +356,8 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     }
     win_focus::ensure_palette_topmost(our_hwnd);
     win_focus::force_foreground(our_hwnd);
+    win_focus::set_palette_visible(true);
+    start_focus_grace_timer();
     ui.invoke_focus_search();
 }
 
@@ -340,6 +371,8 @@ fn restore_premiere_focus(hwnd: isize) {
 }
 
 fn hide_palette(ui: &SpotlightWindow, state: &mut AppState) {
+    win_focus::set_palette_visible(false);
+    stop_focus_grace_timer();
     let _ = ui.hide();
     state.is_visible = false;
     state.shown_at = None;
@@ -453,15 +486,18 @@ fn toggle_palette_from_hotkey_with_focus(
     palette_actively_open: bool,
 ) {
     if state.is_visible && palette_actively_open {
+        debug_log::log_event(LogKind::Focus, "HOTKEY", "Ctrl+Space -> hide palette");
         hide_and_restore_focus(ui, state);
         return;
     }
     if is_premiere_fg {
+        debug_log::log_event(LogKind::Focus, "HOTKEY", "Ctrl+Space -> show palette");
         state.previous_hwnd = fg_hwnd;
         center_and_show(ui, state, bridge);
         return;
     }
     if state.is_visible {
+        debug_log::log_event(LogKind::Focus, "HOTKEY", "Ctrl+Space -> clear stale visibility");
         hide_and_restore_focus(ui, state);
     }
 }
@@ -520,6 +556,7 @@ fn apply_entry_at(
                     deadline: Instant::now() + ACTION_TIMEOUT,
                 },
             );
+            schedule_action_deadlines(state);
         }
         SearchResult::ProjectItem(entry) => {
             let Some(catalog) = &state.media_catalog else {
@@ -538,6 +575,7 @@ fn apply_entry_at(
                     project_id: catalog.project_id.clone(),
                 },
             });
+            schedule_action_deadlines(state);
         }
     }
     // Hide before transferring focus, since Premiere may already be processing the edit.
@@ -571,6 +609,7 @@ fn open_in_source_at(
         request_id,
         deadline: Instant::now() + ACTION_TIMEOUT,
     });
+    schedule_action_deadlines(state);
     hide_palette(ui, state);
     restore_premiere_focus(state.previous_hwnd);
     Ok(())
@@ -594,7 +633,9 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::BackendSelector::new()
             .backend_name("winit".into())
             .with_winit_window_attributes_hook(|attributes| {
-                let attributes = if error_toast::CREATING_TOAST.with(|flag| flag.get()) {
+                let non_activating = error_toast::CREATING_TOAST.with(|flag| flag.get())
+                    || debug_log::CREATING_DEBUG_WINDOW.with(|flag| flag.get());
+                let attributes = if non_activating {
                     attributes.with_active(false)
                 } else {
                     attributes
@@ -611,7 +652,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let ui = SpotlightWindow::new()?;
     let error_toast = Rc::new(ErrorToast::default());
+    let debug_log_ctrl = Rc::new(DebugLogController::default());
     win_focus::init_palette_window(extract_window_hwnd(&ui));
+    debug_log::log_event(LogKind::Info, "INIT", "Premiere Spotlight helper started");
 
     // Create native Windows System Tray icon (no taskbar icon)
     let tray = Rc::new(RefCell::new(SystemTray::new()));
@@ -626,6 +669,8 @@ fn main() -> Result<(), slint::PlatformError> {
         pending_source_open: None,
         selected_abs_index: 0,
         scroll_offset: 0,
+        rendered_scroll_offset: None,
+        results_dirty: true,
         is_visible: false,
         shown_at: None,
         saw_foreground: false,
@@ -642,9 +687,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let bridge = BridgeClients::new();
     {
         let ui_weak = ui.as_weak();
-        bridge.start_server(move |event| {
-            let ui_weak = ui_weak.clone();
-            let _ = slint::invoke_from_event_loop(move || {
+        let state_ref = state.clone();
+        let tray_ref = tray.clone();
+        let bridge_ref = bridge.clone();
+        let error_toast = error_toast.clone();
+        BRIDGE_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |event: BridgeEvent| {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
@@ -654,14 +702,18 @@ fn main() -> Result<(), slint::PlatformError> {
                         ui.set_status_message(SharedString::from(
                             "Connected to Premiere Pro · Ctrl+Space",
                         ));
-                        BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(true));
+                        if let Some(ref t) = *tray_ref.borrow() {
+                            t.set_connected(true);
+                        }
                     }
                     BridgeEvent::ClientDisconnected => {
                         ui.set_bridge_connected(false);
                         ui.set_status_message(SharedString::from(
                             "Premiere disconnected · Standalone catalog active",
                         ));
-                        BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(false));
+                        if let Some(ref t) = *tray_ref.borrow() {
+                            t.set_connected(false);
+                        }
                     }
                     BridgeEvent::CatalogReceived(items) => {
                         ui.set_bridge_connected(true);
@@ -669,25 +721,97 @@ fn main() -> Result<(), slint::PlatformError> {
                             "Premiere synced ({} effects) · Ctrl+Space",
                             items.len()
                         )));
-                        CATALOG_QUEUE.with(|q| q.borrow_mut().push(items));
-                        BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(true));
+                        if let Some(ref t) = *tray_ref.borrow() {
+                            t.set_connected(true);
+                        }
+                        let mut st = state_ref.borrow_mut();
+                        st.catalog.set_catalog(items);
+                        refresh_catalog_ui(&ui, &mut st, true);
                     }
                     BridgeEvent::ApplyResult(result) => {
-                        EFFECT_RESULTS.with(|results| results.borrow_mut().push(result));
+                        let mut st = state_ref.borrow_mut();
+                        let recent_changed = complete_effect(&mut st, &result);
+                        if !result.ok {
+                            let message: SharedString = if result.message.is_empty() {
+                                "Premiere could not apply the effect.".into()
+                            } else {
+                                result.message.into()
+                            };
+                            debug_log::log_event(LogKind::Error, "APPLY", message.as_str());
+                            error_toast.show(message, st.previous_hwnd);
+                        } else if !result.message.is_empty() {
+                            debug_log::log_event(LogKind::Success, "APPLY", result.message.as_str());
+                            ui.set_status_message(format!("Premiere: {}", result.message).into());
+                        }
+                        if recent_changed {
+                            refresh_catalog_ui(&ui, &mut st, true);
+                        }
+                        st.pending_effects
+                            .retain(|_, pending| Instant::now() < pending.deadline);
+                        schedule_action_deadlines(&st);
                     }
                     BridgeEvent::ProjectItemsChanged => {
-                        MEDIA_DIRTY.with(|dirty| dirty.set(true));
+                        let mut st = state_ref.borrow_mut();
+                        let catalog = match bridge_ref.media_catalog() {
+                            Ok(catalog) => catalog,
+                            Err(message) => {
+                                if st.is_visible {
+                                    error_toast.show(message.into(), st.previous_hwnd);
+                                }
+                                None
+                            }
+                        };
+                        let preserve_media = st
+                            .media_catalog
+                            .as_ref()
+                            .zip(catalog.as_ref())
+                            .is_some_and(|(old, new)| {
+                                old.peer_id == new.peer_id
+                                    && old.project_id == new.project_id
+                                    && old.sequence_id == new.sequence_id
+                            });
+                        let items = catalog
+                            .as_ref()
+                            .map(|catalog| catalog.items.clone())
+                            .unwrap_or_default();
+                        st.catalog.set_project_items(items);
+                        st.media_catalog = catalog;
+                        refresh_catalog_ui(&ui, &mut st, preserve_media);
                     }
                     BridgeEvent::PlacementResult(result) => {
-                        PLACEMENT_QUEUE.with(|q| q.borrow_mut().push(result));
+                        let mut st = state_ref.borrow_mut();
+                        if let Some(message) = update_placement(&ui, &mut st, vec![result]) {
+                            debug_log::log_event(LogKind::Error, "PLACE", message.as_str());
+                            error_toast.show(message, st.previous_hwnd);
+                        }
+                        schedule_action_deadlines(&st);
                     }
                     BridgeEvent::SourceMonitorResult(result) => {
-                        SOURCE_MONITOR_QUEUE.with(|q| q.borrow_mut().push(result));
+                        let mut st = state_ref.borrow_mut();
+                        if let Some(message) = update_source_open(&ui, &mut st, vec![result]) {
+                            debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
+                            error_toast.show(message, st.previous_hwnd);
+                        }
+                        schedule_action_deadlines(&st);
                     }
                     BridgeEvent::ShowWindowRequested => {
-                        SHOW_WINDOW_QUEUE.with(|flag| *flag.borrow_mut() = true);
+                        let fg_hwnd = win_focus::get_foreground_hwnd();
+                        if win_focus::is_premiere_active_and_unminimized(fg_hwnd) {
+                            let mut st = state_ref.borrow_mut();
+                            st.previous_hwnd = fg_hwnd;
+                            center_and_show(&ui, &mut st, &bridge_ref);
+                        }
                     }
                 }
+            }));
+        });
+        bridge.start_server(move |event| {
+            let _ = slint::invoke_from_event_loop(move || {
+                BRIDGE_DISPATCH.with(|slot| {
+                    if let Some(callback) = slot.borrow_mut().as_mut() {
+                        callback(event);
+                    }
+                });
             });
         });
     }
@@ -808,6 +932,15 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let state_ref = state.clone();
+        let debug_ctrl = debug_log_ctrl.clone();
+        ui.on_toggle_debug_log(move || {
+            let anchor = state_ref.borrow().previous_hwnd;
+            debug_ctrl.toggle(anchor);
+        });
+    }
+
     // Escape key closes popup
     {
         let ui_weak = ui.as_weak();
@@ -876,23 +1009,38 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }));
     }
+    let foreground_hook_active = Rc::new(std::cell::Cell::new(false));
     let sync_palette_focus = {
         let state_ref = state.clone();
+        let hook_active = foreground_hook_active.clone();
         Rc::new(move |ui: &SpotlightWindow| {
+            if !state_ref.borrow().is_visible {
+                stop_focus_grace_timer();
+                return;
+            }
             let our_hwnd = extract_window_hwnd(ui);
             win_focus::init_palette_window(our_hwnd);
             let is_our_window = win_focus::is_palette_open_and_active(our_hwnd);
 
-            let focus_outcome = {
+            let (focus_outcome, saw_foreground) = {
                 let mut st = state_ref.borrow_mut();
-                evaluate_palette_focus(&mut st, is_our_window, Instant::now())
+                let outcome = evaluate_palette_focus(&mut st, is_our_window, Instant::now());
+                (outcome, st.saw_foreground)
             };
             match focus_outcome {
-                FocusOutcome::KeepVisible => {}
+                FocusOutcome::KeepVisible => {
+                    // Once Windows confirms foreground and WinEventHook is active, stop the 20ms grace timer.
+                    if saw_foreground && hook_active.get() {
+                        stop_focus_grace_timer();
+                    }
+                }
                 FocusOutcome::RetryForeground => {
                     win_focus::force_foreground(our_hwnd);
                 }
                 FocusOutcome::HideLostFocus => {
+                    debug_log::log_event(LogKind::Focus, "FOCUS", "Lost focus -> hide palette");
+                    win_focus::set_palette_visible(false);
+                    stop_focus_grace_timer();
                     let _ = ui.hide();
                 }
             }
@@ -909,7 +1057,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }));
         });
     }
-    let _foreground_hook = win_focus::ForegroundHook::install(|| {
+    let foreground_hook = win_focus::ForegroundHook::install(|| {
         let _ = slint::invoke_from_event_loop(|| {
             SYNC_FOCUS_DISPATCH.with(|slot| {
                 if let Some(callback) = slot.borrow_mut().as_mut() {
@@ -918,104 +1066,17 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         });
     });
-    let _ = slint::invoke_from_event_loop(|| {
-        SYNC_FOCUS_DISPATCH.with(|slot| {
-            if let Some(callback) = slot.borrow_mut().as_mut() {
-                callback();
-            }
-        });
-    });
+    foreground_hook_active.set(foreground_hook.is_active());
 
-    // Poll focus state and system tray actions on a 20ms timer.
-    let timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let tray_ref = tray.clone();
         let bridge_ref = bridge.clone();
-        let hotkey_pending = hotkey_pending.clone();
-        timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+        tray::set_action_handler(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
-
-            // 1. Update tray tooltip if bridge status changed
-            if let Some(connected) = BRIDGE_STATUS_QUEUE.with(|q| q.borrow_mut().take()) {
-                if let Some(ref t) = *tray_ref.borrow() {
-                    t.set_connected(connected);
-                }
-            }
-
-            // 2. Drain any newly synced Premiere catalogs
-            CATALOG_QUEUE.with(|q| {
-                let mut queue = q.borrow_mut();
-                if let Some(latest) = queue.pop() {
-                    queue.clear();
-                    let mut st = state_ref.borrow_mut();
-                    st.catalog.set_catalog(latest);
-                    refresh_catalog_ui(&ui, &mut st, true);
-                }
-            });
-            if MEDIA_DIRTY.with(|dirty| dirty.replace(false)) {
-                let mut st = state_ref.borrow_mut();
-                let catalog = match bridge_ref.media_catalog() {
-                    Ok(catalog) => catalog,
-                    Err(message) => {
-                        if st.is_visible {
-                            error_toast.show(message.into(), st.previous_hwnd);
-                        }
-                        None
-                    }
-                };
-                let preserve_media =
-                    st.media_catalog
-                        .as_ref()
-                        .zip(catalog.as_ref())
-                        .is_some_and(|(old, new)| {
-                            old.peer_id == new.peer_id
-                                && old.project_id == new.project_id
-                                && old.sequence_id == new.sequence_id
-                        });
-                let items = catalog
-                    .as_ref()
-                    .map(|catalog| catalog.items.clone())
-                    .unwrap_or_default();
-                st.catalog.set_project_items(items);
-                st.media_catalog = catalog;
-                refresh_catalog_ui(&ui, &mut st, preserve_media);
-            }
-            {
-                let mut st = state_ref.borrow_mut();
-                let effects = EFFECT_RESULTS.with(|q| std::mem::take(&mut *q.borrow_mut()));
-                let mut recent_changed = false;
-                for result in effects {
-                    recent_changed |= complete_effect(&mut st, &result);
-                    if !result.ok {
-                        let message = if result.message.is_empty() {
-                            "Premiere could not apply the effect.".into()
-                        } else {
-                            result.message.into()
-                        };
-                        error_toast.show(message, st.previous_hwnd);
-                    } else if !result.message.is_empty() {
-                        ui.set_status_message(format!("Premiere: {}", result.message).into());
-                    }
-                }
-                if recent_changed {
-                    refresh_catalog_ui(&ui, &mut st, true);
-                }
-                st.pending_effects.retain(|_, pending| Instant::now() < pending.deadline);
-                let results = PLACEMENT_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-                if let Some(message) = update_placement(&ui, &mut st, results) {
-                    error_toast.show(message, st.previous_hwnd);
-                }
-                let results = SOURCE_MONITOR_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-                if let Some(message) = update_source_open(&ui, &mut st, results) {
-                    error_toast.show(message, st.previous_hwnd);
-                }
-            }
-
-            // 3. Handle System Tray menu / click actions
             while let Some(action) = tray::poll_tray_action() {
                 match action {
                     TrayAction::OpenSpotlight => {
@@ -1035,30 +1096,31 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             }
+        });
+    }
 
-            // 4. Handle wake request (only if Premiere is active & unminimized)
-            let wake_requested = SHOW_WINDOW_QUEUE.with(|flag| {
-                let mut f = flag.borrow_mut();
-                let val = *f;
-                *f = false;
-                val
-            });
-            if wake_requested {
-                let fg_hwnd = win_focus::get_foreground_hwnd();
-                if win_focus::is_premiere_active_and_unminimized(fg_hwnd) {
-                    let mut st = state_ref.borrow_mut();
-                    st.previous_hwnd = fg_hwnd;
-                    center_and_show(&ui, &mut st, &bridge_ref);
-                }
-            }
-
-            // 5. Dispatch the shortcut if the wake callback hasn't handled it yet.
-            if hotkey_pending.swap(false, Ordering::AcqRel) {
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let error_toast = error_toast.clone();
+        DEADLINE_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
                 let mut st = state_ref.borrow_mut();
-                toggle_palette_from_hotkey(&ui, &mut st, &bridge_ref);
-            }
-            // 6. Dismiss Spotlight when it loses focus.
-            sync_palette_focus(&ui);
+                st.pending_effects
+                    .retain(|_, pending| Instant::now() < pending.deadline);
+                if let Some(message) = update_placement(&ui, &mut st, vec![]) {
+                    debug_log::log_event(LogKind::Error, "PLACE", message.as_str());
+                    error_toast.show(message, st.previous_hwnd);
+                }
+                if let Some(message) = update_source_open(&ui, &mut st, vec![]) {
+                    debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
+                    error_toast.show(message, st.previous_hwnd);
+                }
+                schedule_action_deadlines(&st);
+            }));
         });
     }
 
@@ -1067,16 +1129,64 @@ fn main() -> Result<(), slint::PlatformError> {
     Ok(())
 }
 
+fn start_focus_grace_timer() {
+    FOCUS_TIMER.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let timer = guard.get_or_insert_with(Timer::default);
+        timer.start(TimerMode::Repeated, Duration::from_millis(20), || {
+            debug_log::record_ui_timer_tick();
+            SYNC_FOCUS_DISPATCH.with(|dispatch| {
+                if let Some(callback) = dispatch.borrow_mut().as_mut() {
+                    callback();
+                }
+            });
+        });
+    });
+}
+
+fn stop_focus_grace_timer() {
+    FOCUS_TIMER.with(|slot| {
+        if let Some(timer) = slot.borrow().as_ref() {
+            timer.stop();
+        }
+    });
+}
+
+fn schedule_action_deadlines(state: &AppState) {
+    let earliest = [
+        state.pending_placement.as_ref().map(|p| p.deadline),
+        state.pending_source_open.as_ref().map(|p| p.deadline),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(state.pending_effects.values().map(|p| p.deadline))
+    .min();
+
+    DEADLINE_TIMER.with(|slot| {
+        if let Some(deadline) = earliest {
+            let delay = deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(10);
+            let mut guard = slot.borrow_mut();
+            let timer = guard.get_or_insert_with(Timer::default);
+            timer.start(TimerMode::SingleShot, delay, || {
+                DEADLINE_DISPATCH.with(|dispatch| {
+                    if let Some(callback) = dispatch.borrow_mut().as_mut() {
+                        callback();
+                    }
+                });
+            });
+        } else if let Some(timer) = slot.borrow().as_ref() {
+            timer.stop();
+        }
+    });
+}
+
 thread_local! {
-    static CATALOG_QUEUE: RefCell<Vec<Vec<EffectEntry>>> = const { RefCell::new(Vec::new()) };
-    static MEDIA_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static PLACEMENT_QUEUE: RefCell<Vec<PlacementResult>> = const { RefCell::new(Vec::new()) };
-    static SOURCE_MONITOR_QUEUE: RefCell<Vec<PlacementResult>> = const { RefCell::new(Vec::new()) };
-    static EFFECT_RESULTS: RefCell<Vec<ApplyResult>> = const { RefCell::new(Vec::new()) };
-    static SHOW_WINDOW_QUEUE: RefCell<bool> = const { RefCell::new(false) };
-    static BRIDGE_STATUS_QUEUE: RefCell<Option<bool>> = const { RefCell::new(None) };
+    static BRIDGE_DISPATCH: RefCell<Option<Box<dyn FnMut(BridgeEvent)>>> = const { RefCell::new(None) };
     static HOTKEY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static SYNC_FOCUS_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    static DEADLINE_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    static FOCUS_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
+    static DEADLINE_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1124,12 +1234,12 @@ mod tests {
         slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
         let ui = SpotlightWindow::new().unwrap();
         let bridge = BridgeClients::new();
-        let effect = SearchResult::Effect(EffectEntry {
+        let effect = SearchResult::Effect(Arc::new(EffectEntry {
             name: "Gaussian Blur".into(),
             match_name: "blur".into(),
             effect_type: "videoEffect".into(),
             folder: String::new(),
-        });
+        }));
         let item = catalog::ProjectItemEntry {
             item_id: "clip".into(),
             name: "Clip".into(),
@@ -1145,7 +1255,7 @@ mod tests {
         };
         let mut state = AppState {
             catalog: CatalogStore::new_with_defaults(),
-            matched_items: vec![effect, SearchResult::ProjectItem(item)],
+            matched_items: vec![effect, SearchResult::ProjectItem(Arc::new(item))],
             recent_items: vec![],
             pending_effects: HashMap::new(),
             media_catalog: Some(catalog.clone()),
@@ -1153,6 +1263,8 @@ mod tests {
             pending_source_open: None,
             selected_abs_index: 0,
             scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
             is_visible: false,
             shown_at: None,
             saw_foreground: false,
@@ -1235,12 +1347,12 @@ mod tests {
         window.dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
         assert_eq!((opened.get(), activated.get()), (1, 1));
 
-        let effect = SearchResult::Effect(EffectEntry {
+        let effect = SearchResult::Effect(Arc::new(EffectEntry {
             name: "Gaussian Blur".into(),
             match_name: "blur".into(),
             effect_type: "videoEffect".into(),
             folder: String::new(),
-        });
+        }));
         let item = |id: &str, kind| catalog::ProjectItemEntry {
             item_id: id.into(),
             name: id.into(),
@@ -1258,8 +1370,8 @@ mod tests {
             catalog: CatalogStore::new_with_defaults(),
             matched_items: vec![
                 effect,
-                SearchResult::ProjectItem(catalog.items[0].clone()),
-                SearchResult::ProjectItem(catalog.items[1].clone()),
+                SearchResult::ProjectItem(Arc::new(catalog.items[0].clone())),
+                SearchResult::ProjectItem(Arc::new(catalog.items[1].clone())),
             ],
             recent_items: vec![],
             pending_effects: HashMap::new(),
@@ -1268,6 +1380,8 @@ mod tests {
             pending_source_open: None,
             selected_abs_index: 0,
             scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
             is_visible: false,
             shown_at: None,
             saw_foreground: false,
@@ -1369,17 +1483,19 @@ mod tests {
             pending_source_open: None,
             selected_abs_index: 0,
             scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
             is_visible: true,
             shown_at: None,
             saw_foreground: false,
             previous_hwnd: 0,
         };
-        let effect = EffectEntry {
+        let effect = Arc::new(EffectEntry {
             name: "Gaussian Blur".into(),
             match_name: "blur".into(),
             effect_type: "videoEffect".into(),
             folder: String::new(),
-        };
+        });
         let pending = || PendingEffect {
             entry: effect.clone(),
             recipients: vec![7],
@@ -1429,7 +1545,7 @@ mod tests {
             offline: false,
         };
         remember_item(&mut state, RecentItem {
-            item: SearchResult::ProjectItem(item.clone()), project_id: Some("project".into()),
+            item: SearchResult::ProjectItem(Arc::new(item.clone())), project_id: Some("project".into()),
         });
         state.media_catalog = Some(MediaCatalog {
             peer_id: 1,
@@ -1577,5 +1693,109 @@ mod tests {
         state.is_visible = true;
         toggle_palette_from_hotkey_with_focus(&ui, &mut state, &bridge, 9999, false, false);
         assert!(!state.is_visible);
+    }
+
+    #[test]
+    fn f12_toggles_debug_log_window() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let _ = slint::platform::set_platform(Box::new(TestPlatform(adapter.clone())));
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        let ui = SpotlightWindow::new().unwrap();
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+
+        let toggled = Rc::new(std::cell::Cell::new(0u32));
+        {
+            let toggled = toggled.clone();
+            ui.on_toggle_debug_log(move || toggled.set(toggled.get() + 1));
+        }
+
+        let press_f12 = || {
+            window.dispatch_event(WindowEvent::KeyPressed { text: Key::F12.into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: Key::F12.into() });
+        };
+
+        // Works both when search-input has focus and when FocusScope handles it.
+        ui.invoke_focus_search();
+        press_f12();
+        assert_eq!(toggled.get(), 1);
+
+        let footer_pos = LogicalPosition::new(300., 390.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position: footer_pos,
+            button: PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position: footer_pos,
+            button: PointerEventButton::Left,
+        });
+        press_f12();
+        assert_eq!(toggled.get(), 2);
+
+        // DebugLogController records logs and toggles open/closed cleanly.
+        debug_log::log_event(LogKind::Info, "TEST", "F12 debug window check");
+        let ctrl = Rc::new(DebugLogController::default());
+        ctrl.toggle(0);
+        assert!(ctrl.is_open());
+        ctrl.toggle(0);
+        assert!(!ctrl.is_open());
+    }
+
+    #[test]
+    fn moving_selection_inside_visible_window_reuses_results_model() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let _ = slint::platform::set_platform(Box::new(TestPlatform(adapter)));
+        let ui = SpotlightWindow::new().unwrap();
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_project_items(
+            (1..=12)
+                .map(|i| catalog::ProjectItemEntry {
+                    item_id: i.to_string(),
+                    name: format!("Clip {i:02}"),
+                    bin_path: "Footage".into(),
+                    kind: ProjectItemKind::Media,
+                    offline: false,
+                })
+                .collect(),
+        );
+        let mut state = AppState {
+            catalog: store,
+            matched_items: vec![],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: None,
+            pending_placement: None,
+            pending_source_open: None,
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
+            is_visible: false,
+            shown_at: None,
+            saw_foreground: false,
+            previous_hwnd: 0,
+        };
+        use slint::Model;
+        let model_ptr = |ui: &SpotlightWindow| -> *const VecModel<EffectItemUI> {
+            ui.get_results()
+                .as_any()
+                .downcast_ref::<VecModel<EffectItemUI>>()
+                .unwrap() as *const VecModel<EffectItemUI>
+        };
+        ui.set_active_catalog("project".into());
+        refresh_results_ui(&ui, &mut state);
+        let initial_ptr = model_ptr(&ui);
+
+        state.selected_abs_index = 2;
+        sync_viewport_slice(&ui, &mut state);
+        assert_eq!(model_ptr(&ui), initial_ptr);
+        assert_eq!(ui.get_selected_index(), 2);
+
+        state.selected_abs_index = VISIBLE_ROWS;
+        sync_viewport_slice(&ui, &mut state);
+        assert_ne!(model_ptr(&ui), initial_ptr);
+        assert_eq!(state.scroll_offset, 1);
+        assert_eq!(ui.get_selected_index(), (VISIBLE_ROWS - 1) as i32);
     }
 }

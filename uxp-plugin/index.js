@@ -10,6 +10,9 @@ let ws = null;
 let reconnectTimer = null;
 let started = false;
 let cachedCatalog = [];
+let catalogScanPromise = null;
+let cachedCatalogStatsText = "";
+let cachedProjectEntries = { projectId: null, byId: new Map() };
 let failedConnects = 0;
 let launchAttempted = false;
 let mediaRequestId = 0;
@@ -20,6 +23,9 @@ let placementInProgress = false;
 
 const TICKS_PER_SECOND = 254016000000n;
 const DEFAULT_TICKS_PER_FRAME_30FPS = 8467200000n;
+const FOLDER_SCAN_CONCURRENCY = 8;
+const ITEM_SCAN_CONCURRENCY = 24;
+const TRACK_ITEM_READ_CONCURRENCY = 32;
 
 const HIDDEN_VIDEO_MATCH_NAMES = new Set([
   "AE.ADBE Motion",
@@ -41,6 +47,28 @@ function setBadge(online, text) {
 function setLog(msg) {
   const el = document.getElementById("statusLog");
   if (el) el.textContent = msg;
+}
+
+function nowMs() {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const concurrency = Math.max(1, Math.min(limit, items.length));
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: concurrency }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await worker(items[index], index);
+      }
+    })
+  );
+  return results;
 }
 
 function setStats(msg) {
@@ -77,115 +105,204 @@ function formatTransitionDisplayName(rawMatchName) {
   return name || String(rawMatchName || "").trim();
 }
 
-async function scanPremiereCatalog() {
+async function scanPremiereCatalogInternal() {
+  const startedAt = nowMs();
+  const [videoItems, audioItems, transitionItems] = await Promise.all([
+    (async () => {
+      const list = [];
+      try {
+        if (ppro.VideoFilterFactory) {
+          const [matchNames, displayNames] = await Promise.all([
+            Promise.resolve(ppro.VideoFilterFactory.getMatchNames?.() || []),
+            Promise.resolve(ppro.VideoFilterFactory.getDisplayNames?.() || [])
+          ]);
+          const count = Math.min(matchNames.length, displayNames.length);
+          for (let i = 0; i < count; i++) {
+            const name = String(displayNames[i] || "").trim();
+            const matchName = String(matchNames[i] || "").trim();
+            if (!name || !matchName || HIDDEN_VIDEO_MATCH_NAMES.has(matchName)) continue;
+            list.push({
+              name,
+              matchName,
+              effectType: "videoEffect",
+              folder: "Video Effect"
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("[Spotlight] VideoFilterFactory scan error:", err);
+      }
+      return list;
+    })(),
+    (async () => {
+      const list = [];
+      try {
+        if (ppro.AudioFilterFactory) {
+          const displayNames = (await Promise.resolve(ppro.AudioFilterFactory.getDisplayNames?.())) || [];
+          for (const rawName of displayNames) {
+            const name = String(rawName || "").trim();
+            if (!name) continue;
+            list.push({
+              name,
+              matchName: name,
+              effectType: "audioEffect",
+              folder: "Audio Effect"
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("[Spotlight] AudioFilterFactory scan error:", err);
+      }
+      return list;
+    })(),
+    (async () => {
+      const list = [];
+      try {
+        if (ppro.TransitionFactory) {
+          const vTrans = (await Promise.resolve(ppro.TransitionFactory.getVideoTransitionMatchNames?.())) || [];
+          for (const m of vTrans) {
+            const clean = String(m || "").trim();
+            if (!clean) continue;
+            list.push({
+              name: formatTransitionDisplayName(clean),
+              matchName: clean,
+              effectType: "videoTransition",
+              folder: "Video Transition"
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("[Spotlight] TransitionFactory scan error:", err);
+      }
+      return list;
+    })()
+  ]);
+
   const items = [];
   const seen = new Set();
-
-  // 1. Video Effects
-  try {
-    if (ppro.VideoFilterFactory) {
-      const [matchNames, displayNames] = await Promise.all([
-        Promise.resolve(ppro.VideoFilterFactory.getMatchNames?.() || []),
-        Promise.resolve(ppro.VideoFilterFactory.getDisplayNames?.() || [])
-      ]);
-      const count = Math.min(matchNames.length, displayNames.length);
-      for (let i = 0; i < count; i++) {
-        const name = String(displayNames[i] || "").trim();
-        const matchName = String(matchNames[i] || "").trim();
-        if (!name || !matchName || HIDDEN_VIDEO_MATCH_NAMES.has(matchName)) continue;
-        const key = `videoEffect:${matchName}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        items.push({
-          name,
-          matchName,
-          effectType: "videoEffect",
-          folder: "Video Effect"
-        });
-      }
-    }
-  } catch (err) {
-    console.warn("[Spotlight] VideoFilterFactory scan error:", err);
+  for (const entry of [...videoItems, ...audioItems, ...transitionItems]) {
+    const key = `${entry.effectType}:${entry.matchName}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(entry);
   }
 
-  // 2. Audio Effects (Premiere UXP exposes display names via getDisplayNames)
-  try {
-    if (ppro.AudioFilterFactory) {
-      const displayNames = (await Promise.resolve(ppro.AudioFilterFactory.getDisplayNames?.())) || [];
-      for (const rawName of displayNames) {
-        const name = String(rawName || "").trim();
-        if (!name) continue;
-        const key = `audioEffect:${name}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        items.push({
-          name,
-          matchName: name,
-          effectType: "audioEffect",
-          folder: "Audio Effect"
-        });
-      }
-    }
-  } catch (err) {
-    console.warn("[Spotlight] AudioFilterFactory scan error:", err);
-  }
-
-  // 3. Video & Audio Transitions
-  try {
-    if (ppro.TransitionFactory) {
-      const vTrans = (await Promise.resolve(ppro.TransitionFactory.getVideoTransitionMatchNames?.())) || [];
-      for (const m of vTrans) {
-        const clean = String(m || "").trim();
-        if (!clean) continue;
-        const key = `videoTransition:${clean}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        items.push({
-          name: formatTransitionDisplayName(clean),
-          matchName: clean,
-          effectType: "videoTransition",
-          folder: "Video Transition"
-        });
-      }
-    }
-  } catch (err) {
-    console.warn("[Spotlight] TransitionFactory scan error:", err);
-  }
-
+  const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
   cachedCatalog = items;
-  setStats(`Indexed ${items.length} effects & transitions`);
+  cachedCatalogStatsText = `Indexed ${items.length} effects & transitions (${elapsedMs} ms)`;
+  setStats(cachedCatalogStatsText);
   return items;
 }
 
-async function* projectEntries(project) {
-  const folders = [{ folder: await project.getRootItem(), path: "" }];
+async function scanPremiereCatalog() {
+  if (catalogScanPromise) return catalogScanPromise;
+  catalogScanPromise = (async () => {
+    try {
+      return await scanPremiereCatalogInternal();
+    } finally {
+      catalogScanPromise = null;
+    }
+  })();
+  return catalogScanPromise;
+}
+
+async function ensureCatalogScanned(force = false) {
+  if (!force && cachedCatalog.length > 0) return cachedCatalog;
+  return scanPremiereCatalog();
+}
+
+function inspectFolderItem(item, path) {
+  const itemId = item?.getId?.();
+  if (!itemId) return null;
+  let child = null;
+  try {
+    child = ppro.FolderItem.cast(item);
+  } catch (_) {
+    // Older Premiere builds throw when casting a non-bin ProjectItem.
+  }
+  if (typeof child?.getItems === "function") {
+    return {
+      item,
+      itemId,
+      path,
+      bin: true,
+      childFolder: child,
+      childPath: path ? `${path} / ${item.name}` : item.name,
+      clip: null
+    };
+  }
+  let clip = null;
+  try {
+    clip = ppro.ClipProjectItem.cast(item);
+  } catch (_) {
+    // Some Project Panel entries cannot be edited onto a timeline.
+  }
+  return {
+    item,
+    itemId,
+    path,
+    bin: false,
+    childFolder: null,
+    childPath: null,
+    clip: typeof clip?.isSequence === "function" ? clip : null
+  };
+}
+
+async function collectProjectEntries(project, { targetItemId = null, shouldAbort = null } = {}) {
+  const entries = [];
+  const byId = new Map();
   const seen = new Set();
-  while (folders.length > 0) {
-    const { folder, path } = folders.pop();
-    for (const item of await folder.getItems()) {
-      const itemId = item.getId();
-      if (!itemId || seen.has(itemId)) continue;
-      seen.add(itemId);
-      let child;
-      try {
-        child = ppro.FolderItem.cast(item);
-      } catch (_) {
-        // Older Premiere builds throw when casting a non-bin ProjectItem.
+  let frontier = [{ folder: await project.getRootItem(), path: "" }];
+
+  while (frontier.length > 0) {
+    if (shouldAbort?.()) return null;
+    const batches = await mapWithConcurrency(
+      frontier,
+      FOLDER_SCAN_CONCURRENCY,
+      async ({ folder, path }) => ({
+        path,
+        children: (await folder?.getItems?.()) || []
+      })
+    );
+    if (shouldAbort?.()) return null;
+    const nextFrontier = [];
+    for (const { path, children } of batches) {
+      for (const rawItem of children) {
+        const entry = inspectFolderItem(rawItem, path);
+        if (!entry || seen.has(entry.itemId)) continue;
+        seen.add(entry.itemId);
+        if (entry.childFolder) {
+          nextFrontier.push({ folder: entry.childFolder, path: entry.childPath });
+        }
+        const stored = {
+          item: entry.item,
+          itemId: entry.itemId,
+          path: entry.path,
+          bin: entry.bin,
+          clip: entry.clip
+        };
+        if (targetItemId !== null && entry.itemId === targetItemId) {
+          return { found: stored, entries, byId };
+        }
+        entries.push(stored);
+        byId.set(entry.itemId, stored);
       }
-      if (typeof child?.getItems === "function") {
-        folders.push({ folder: child, path: path ? `${path} / ${item.name}` : item.name });
-        yield { item, itemId, path, bin: true };
-        continue;
-      }
-      let clip;
-      try {
-        clip = ppro.ClipProjectItem.cast(item);
-      } catch (_) {
-        // Some Project Panel entries cannot be edited onto a timeline.
-      }
-      yield { item, itemId, path, clip: typeof clip?.isSequence === "function" ? clip : null };
+    }
+    frontier = nextFrontier;
+  }
+
+  return { found: null, entries, byId };
+}
+
+async function findProjectEntry(project, projectId, itemId) {
+  if (cachedProjectEntries.projectId === projectId) {
+    const cached = cachedProjectEntries.byId.get(itemId);
+    if (cached && cached.item?.getId?.() === itemId) {
+      return cached;
     }
   }
+  const result = await collectProjectEntries(project, { targetItemId: itemId });
+  return result?.found || null;
 }
 
 function guid(object) {
@@ -201,43 +318,71 @@ function sendProjectItems(connection, requestId, projectId, sequenceId, items) {
 async function syncProjectItems(connection, requestId, clear = false) {
   if (!connection || ws !== connection) return;
   const generation = ++mediaScanGeneration;
-  if (clear) sendProjectItems(connection, requestId, null, null, []);
-  const items = [];
+  const startedAt = nowMs();
+  const stale = () => generation !== mediaScanGeneration || ws !== connection;
+  if (clear) {
+    cachedProjectEntries = { projectId: null, byId: new Map() };
+    sendProjectItems(connection, requestId, null, null, []);
+  }
   try {
     const project = await ppro.Project.getActiveProject();
     const projectId = guid(project);
     const sequence = await project?.getActiveSequence();
     const sequenceId = guid(sequence);
+    if (stale()) return;
+
+    let items = [];
+    let nextById = new Map();
     if (projectId) {
-      const activeItemId = (await sequence?.getProjectItem())?.getId();
-      for await (const { item, clip, itemId, path, bin } of projectEntries(project)) {
-        if (generation !== mediaScanGeneration || ws !== connection) return;
-        let kind = bin ? "bin" : "other";
-        let offline = false;
-        if (itemId === activeItemId) {
-          kind = "activeSequence";
-        } else if (clip) {
-          try {
-            kind = await clip.isSequence() ? "sequence" : "media";
-            if (kind === "media") offline = Boolean(await clip.isOffline?.());
-          } catch (_) {
-            // Keep items visible even when Premiere cannot classify their source.
+      const [activeProjectItem, collected] = await Promise.all([
+        Promise.resolve(sequence?.getProjectItem?.()),
+        collectProjectEntries(project, { shouldAbort: stale })
+      ]);
+      if (stale() || !collected) return;
+      const activeItemId = activeProjectItem?.getId?.();
+      nextById = collected.byId;
+      items = await mapWithConcurrency(
+        collected.entries,
+        ITEM_SCAN_CONCURRENCY,
+        async ({ item, clip, itemId, path, bin }) => {
+          let kind = bin ? "bin" : "other";
+          let offline = false;
+          if (itemId === activeItemId) {
+            kind = "activeSequence";
+          } else if (clip && !stale()) {
+            try {
+              kind = (await clip.isSequence()) ? "sequence" : "media";
+              if (kind === "media" && !stale()) {
+                offline = Boolean(await clip.isOffline?.());
+              }
+            } catch (_) {
+              // Keep items visible even when Premiere cannot classify their source.
+            }
           }
+          return { itemId, name: item.name, binPath: path || "Project root", kind, offline };
         }
-        items.push({ itemId, name: item.name, binPath: path || "Project root", kind, offline });
-      }
+      );
+      if (stale()) return;
     }
+
     const currentProject = await ppro.Project.getActiveProject();
     const currentSequence = await currentProject?.getActiveSequence();
     if (generation === mediaScanGeneration) {
       if (guid(currentProject) === projectId && guid(currentSequence) === sequenceId) {
+        cachedProjectEntries = { projectId, byId: nextById };
         sendProjectItems(connection, requestId, projectId, sequenceId, items);
+        if (cachedCatalogStatsText) {
+          const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
+          setStats(`${cachedCatalogStatsText} • ${items.length} media (${elapsedMs} ms)`);
+        }
       } else {
+        cachedProjectEntries = { projectId: null, byId: new Map() };
         sendProjectItems(connection, requestId, null, null, []);
       }
     }
   } catch (error) {
     if (generation === mediaScanGeneration) {
+      cachedProjectEntries = { projectId: null, byId: new Map() };
       sendProjectItems(connection, requestId, null, null, []);
       console.warn("[Spotlight] Project media scan failed:", error);
     }
@@ -334,43 +479,75 @@ async function sourceFootprint({ clip, item }, nested) {
   return { video, audio };
 }
 
-async function trackLayout(sequence, kind) {
-  const count = await sequence[`get${kind}TrackCount`]();
-  if (!Number.isSafeInteger(count) || count < 0) {
+async function readItemRange(item) {
+  const [startTime, endTime] = await Promise.all([
+    Promise.resolve().then(() => item.getStartTime()),
+    Promise.resolve().then(() => item.getEndTime()).catch(() => null)
+  ]);
+  const start = readTicks(startTime);
+  const end = endTime !== null
+    ? readTicks(endTime)
+    : start + readTicks(await item.getDuration());
+  if (end < start) throw new Error("Unverified track item span");
+  return [start, end];
+}
+
+async function readSingleTrack(sequence, kind, index, trackItemType) {
+  const track = await sequence[`get${kind}Track`](index);
+  if (!track) throw new Error("Premiere could not verify the destination tracks.");
+  let locked = false;
+  if (typeof track.isLocked === "function") locked = await track.isLocked();
+  if (locked) return { id: track.id, locked: true, ranges: [] };
+  let ranges = null;
+  try {
+    const [clipsRaw, transitionsRaw] = await Promise.all([
+      track.getTrackItems(trackItemType.CLIP, false),
+      track.getTrackItems(trackItemType.TRANSITION, false)
+    ]);
+    const clips = clipsRaw ?? [];
+    const transitions = transitionsRaw ?? [];
+    if (Array.isArray(clips) && Array.isArray(transitions)) {
+      const items = [...clips, ...transitions].filter((item) => item != null);
+      ranges = await mapWithConcurrency(items, TRACK_ITEM_READ_CONCURRENCY, readItemRange);
+      ranges = ranges.filter(([start, end]) => end > start);
+    }
+  } catch (_) {
+    // Treat a track with unreadable clip or transition bounds as occupied.
+  }
+  return { id: track.id, locked, ranges };
+}
+
+async function trackLayout(sequence, kind, limit = null) {
+  const totalCount = await sequence[`get${kind}TrackCount`]();
+  if (!Number.isSafeInteger(totalCount) || totalCount < 0) {
     throw new Error("Premiere could not verify the destination tracks.");
   }
+  const scanCount = limit === null ? totalCount : Math.min(totalCount, limit);
   const trackItemType = ppro.Constants.TrackItemType;
-  const tracks = [];
-  for (let index = 0; index < count; index++) {
-    const track = await sequence[`get${kind}Track`](index);
-    if (!track) throw new Error("Premiere could not verify the destination tracks.");
-    let locked = false;
-    if (typeof track.isLocked === "function") locked = await track.isLocked();
-    let ranges = null;
-    try {
-      const clips = (await track.getTrackItems(trackItemType.CLIP, false)) ?? [];
-      const transitions = (await track.getTrackItems(trackItemType.TRANSITION, false)) ?? [];
-      if (Array.isArray(clips) && Array.isArray(transitions)) {
-        const items = [...clips, ...transitions].filter((item) => item != null);
-        ranges = await Promise.all(items.map(async (item) => {
-          const start = readTicks(await item.getStartTime());
-          let end;
-          try {
-            end = readTicks(await item.getEndTime());
-          } catch (_) {
-            end = start + readTicks(await item.getDuration());
-          }
-          if (end < start) throw new Error("Unverified track item span");
-          return [start, end];
-        }));
-        ranges = ranges.filter(([start, end]) => end > start);
-      }
-    } catch (_) {
-      // Treat a track with unreadable clip or transition bounds as occupied.
+  const tracks = await Promise.all(
+    Array.from({ length: scanCount }, (_, index) => readSingleTrack(sequence, kind, index, trackItemType))
+  );
+  return { tracks, totalCount };
+}
+
+function trackLayoutsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const ta = a[i];
+    const tb = b[i];
+    if (ta.id !== tb.id || ta.locked !== tb.locked) return false;
+    if (ta.ranges === null || tb.ranges === null) {
+      if (ta.ranges !== tb.ranges) return false;
+      continue;
     }
-    tracks.push({ id: track.id, locked, ranges });
+    if (ta.ranges.length !== tb.ranges.length) return false;
+    for (let j = 0; j < ta.ranges.length; j++) {
+      if (ta.ranges[j][0] !== tb.ranges[j][0] || ta.ranges[j][1] !== tb.ranges[j][1]) {
+        return false;
+      }
+    }
   }
-  return tracks;
+  return true;
 }
 
 function firstSafeTrack(tracks, start, duration, maySpanTracks) {
@@ -387,35 +564,49 @@ function firstSafeTrack(tracks, start, duration, maySpanTracks) {
 
 // Premiere may route the edit to a different track. Verify the new clip before reporting its lane.
 async function placedAudioTracks(sequence, itemId, start, frame, previousTracks) {
-  const tracks = [];
   const count = await sequence.getAudioTrackCount();
-  for (let index = 0; index < count; index++) {
-    const previous = previousTracks[index]?.ranges;
-    if (previous === null) continue;
-    let items;
-    try {
-      const track = await sequence.getAudioTrack(index);
-      items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-    } catch (_) {
-      continue;
-    }
-    if (!Array.isArray(items)) continue;
-    for (const item of items) {
+  const clipType = ppro.Constants.TrackItemType.CLIP;
+  const matches = await Promise.all(
+    Array.from({ length: count }, async (_, index) => {
+      const previous = previousTracks[index];
+      if (!previous || previous.locked || previous.ranges === null) return null;
+      const previousRanges = previous.ranges;
+      let items;
       try {
-        const itemStart = readTicks(await item.getStartTime());
-        if (itemStart <= start - frame || itemStart >= start + frame) continue;
-        const itemEnd = readTicks(await item.getEndTime());
-        if (previous?.some(([beforeStart, beforeEnd]) =>
-          beforeStart === itemStart && beforeEnd === itemEnd)) continue;
-        if ((await item.getProjectItem())?.getId() !== itemId) continue;
-        tracks.push(`A${index + 1}`);
-        break;
+        const track = await sequence.getAudioTrack(index);
+        items = await track.getTrackItems(clipType, false);
       } catch (_) {
-        // This clip cannot verify the placement.
+        return null;
       }
-    }
-  }
-  return tracks;
+      if (!Array.isArray(items) || items.length === 0) return null;
+      const startTicks = await mapWithConcurrency(
+        items,
+        TRACK_ITEM_READ_CONCURRENCY,
+        async (item) => {
+          try {
+            return readTicks(await item.getStartTime());
+          } catch (_) {
+            return null;
+          }
+        }
+      );
+      for (let i = 0; i < items.length; i++) {
+        const itemStart = startTicks[i];
+        if (itemStart === null || itemStart <= start - frame || itemStart >= start + frame) continue;
+        try {
+          const itemEnd = readTicks(await items[i].getEndTime());
+          if (previousRanges?.some(([beforeStart, beforeEnd]) =>
+            beforeStart === itemStart && beforeEnd === itemEnd)) continue;
+          if ((await items[i].getProjectItem())?.getId() !== itemId) continue;
+          return `A${index + 1}`;
+        } catch (_) {
+          // This clip cannot verify the placement.
+        }
+      }
+      return null;
+    })
+  );
+  return matches.filter(Boolean);
 }
 
 async function placeProjectItem(payload, connection) {
@@ -431,13 +622,7 @@ async function placeProjectItem(payload, connection) {
   const editor = ppro.SequenceEditor?.getEditor(sequence);
   if (!editor) throw new Error("Premiere could not open the timeline editor.");
 
-  let source;
-  for await (const candidate of projectEntries(project)) {
-    if (candidate.itemId === payload.itemId) {
-      source = candidate;
-      break;
-    }
-  }
+  const source = await findProjectEntry(project, payload.projectId, payload.itemId);
   if (!source) throw new Error("Project item was removed. Search again.");
   if (source.bin) throw new Error("Bins can't be placed on the timeline. Bins are search only.");
   if (!source.clip) throw new Error("This project item can't be placed on the timeline.");
@@ -465,32 +650,51 @@ async function placeProjectItem(payload, connection) {
     if (duration === null || duration === 0n) return duration;
     return ((start + duration + frame - 1n) / frame * frame) - protectedStart;
   };
-  const snapshot = () => Promise.all([trackLayout(sequence, "Video"), trackLayout(sequence, "Audio")]);
-  const trials = await snapshot();
-  const confirmedFootprint = await sourceFootprint(source, nested);
-  const latest = await snapshot();
-  if (await source.clip.isOffline?.()) throw new Error("Relink the offline media before placing it.");
-  const latestProject = await ppro.Project.getActiveProject();
-  const latestSequence = await latestProject?.getActiveSequence();
-  const latestPlayhead = await latestSequence?.getPlayerPosition();
-  const signature = (layout) => JSON.stringify(layout, (_, value) =>
-    typeof value === "bigint" ? value.toString() : value);
-  if (guid(latestProject) !== payload.projectId || guid(latestSequence) !== sequenceId ||
-      readTicks(latestPlayhead) !== start || signature(trials) !== signature(latest) ||
-      footprint.video !== confirmedFootprint.video || footprint.audio !== confirmedFootprint.audio) {
-    throw new Error("Timeline changed before placement. Try again.");
-  }
-  const [videoTracks, audioTracks] = latest;
+  const scanVideo = footprint.video !== 0n;
+  const scanAudio = footprint.audio !== 0n;
+  const emptyLayout = { tracks: [], totalCount: 0 };
+  const snapshot = ({ videoLimit = null, audioLimit = null } = {}) => Promise.all([
+    scanVideo && videoLimit !== 0 ? trackLayout(sequence, "Video", videoLimit) : emptyLayout,
+    scanAudio && audioLimit !== 0 ? trackLayout(sequence, "Audio", audioLimit) : emptyLayout
+  ]);
+  const [initialVideoLayout, initialAudioLayout] = await snapshot();
+  const videoTracks = initialVideoLayout.tracks;
+  const audioTracks = initialAudioLayout.tracks;
   const longest = footprint.video === null || footprint.audio === null ? null :
     (footprint.video > footprint.audio ? footprint.video : footprint.audio);
   const videoSpan = footprint.video === 0n ? 0n : longest;
   const audioSpan = footprint.audio === 0n ? 0n : longest;
-  const video = firstSafeTrack(videoTracks, protectedStart, protectedDuration(videoSpan), Boolean(nested));
+  const maySpanTracks = Boolean(nested);
+  const video = firstSafeTrack(videoTracks, protectedStart, protectedDuration(videoSpan), maySpanTracks);
   const audio = firstSafeTrack(
-    audioTracks, protectedStart, protectedDuration(audioSpan), Boolean(nested)
+    audioTracks, protectedStart, protectedDuration(audioSpan), maySpanTracks
   );
-  const usesNewTrack = (footprint.video !== 0n && video === videoTracks.length) ||
-    (footprint.audio !== 0n && audio === audioTracks.length);
+
+  const videoVerifyLimit = !scanVideo ? 0
+    : (!maySpanTracks && video < videoTracks.length ? video + 1 : null);
+  const audioVerifyLimit = !scanAudio ? 0
+    : (!maySpanTracks && audio < audioTracks.length ? audio + 1 : null);
+
+  const confirmedFootprint = await sourceFootprint(source, nested);
+  const [latestVideoLayout, latestAudioLayout] = await snapshot({
+    videoLimit: videoVerifyLimit,
+    audioLimit: audioVerifyLimit
+  });
+  if (await source.clip.isOffline?.()) throw new Error("Relink the offline media before placing it.");
+  const latestProject = await ppro.Project.getActiveProject();
+  const latestSequence = await latestProject?.getActiveSequence();
+  const latestPlayhead = await latestSequence?.getPlayerPosition();
+  if (guid(latestProject) !== payload.projectId || guid(latestSequence) !== sequenceId ||
+      readTicks(latestPlayhead) !== start ||
+      (scanVideo && (latestVideoLayout.totalCount !== initialVideoLayout.totalCount ||
+        !trackLayoutsEqual(videoTracks.slice(0, latestVideoLayout.tracks.length), latestVideoLayout.tracks))) ||
+      (scanAudio && (latestAudioLayout.totalCount !== initialAudioLayout.totalCount ||
+        !trackLayoutsEqual(audioTracks.slice(0, latestAudioLayout.tracks.length), latestAudioLayout.tracks))) ||
+      footprint.video !== confirmedFootprint.video || footprint.audio !== confirmedFootprint.audio) {
+    throw new Error("Timeline changed before placement. Try again.");
+  }
+  const usesNewTrack = (scanVideo && video === videoTracks.length) ||
+    (scanAudio && audio === audioTracks.length);
   let committed = false;
   project.lockedAccess(() => {
     if (revision !== projectContextRevision || ws !== connection || connection.readyState !== WebSocket.OPEN) {
@@ -542,13 +746,7 @@ async function openInSourceMonitor(payload) {
   if (!project || guid(project) !== payload.projectId) {
     throw new Error("Active project changed. Search again.");
   }
-  let source;
-  for await (const candidate of projectEntries(project)) {
-    if (candidate.itemId === payload.itemId) {
-      source = candidate;
-      break;
-    }
-  }
+  const source = await findProjectEntry(project, payload.projectId, payload.itemId);
   if (!source) throw new Error("Project item was removed. Search again.");
   if (source.bin) throw new Error("Bins can't open in the Source Monitor.");
   if (!source.clip) throw new Error("This project item can't open in the Source Monitor.");
@@ -817,9 +1015,7 @@ async function planTrackTransitionTargets(sequence, trackClipsList) {
 }
 
 async function applyEffectToSelection(payload) {
-  if (cachedCatalog.length === 0) {
-    await scanPremiereCatalog();
-  }
+  await ensureCatalogScanned(false);
 
   const resolved = resolveEffectEntry(payload);
   const { name, matchName, effectType } = resolved;
@@ -1048,7 +1244,7 @@ function connectBridge() {
     setBadge(true, "Connected");
     setLog(`Connected to Spotlight helper (${url}).`);
     try {
-      const items = await scanPremiereCatalog();
+      const items = await ensureCatalogScanned(false);
       if (items.length > 0 && ws === connection && connection.readyState === WebSocket.OPEN) {
         sendJson({ type: "catalog", effects: items });
       }
@@ -1171,7 +1367,7 @@ async function startPlugin() {
   started = true;
   bindProjectEvents();
   try {
-    await scanPremiereCatalog();
+    await ensureCatalogScanned(false);
   } catch (_) {}
   if (started) connectBridge();
 }
@@ -1180,6 +1376,8 @@ function stopPlugin() {
   started = false;
   ++mediaScanGeneration;
   ++projectContextRevision;
+  catalogScanPromise = null;
+  cachedProjectEntries = { projectId: null, byId: new Map() };
   for (const [event, listener] of projectEventBindings) {
     try {
       ppro.EventManager.removeGlobalEventListener?.(event, listener, true);

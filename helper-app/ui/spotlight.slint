@@ -6,6 +6,246 @@ export struct EffectItemUI {
     badge-fg: color,
 }
 
+export struct DebugLogEntryUI {
+    text: string,
+    color: color,
+}
+
+export component DebugLogWindow inherits Window {
+    title: "Premiere Spotlight Debug Log";
+    no-frame: true;
+    always-on-top: true;
+    width: panel-width;
+    height: panel-height;
+    background: #12131a;
+
+    out property <length> panel-width: 540px;
+    out property <length> panel-height: 360px;
+    in property <string> ui-timer-rate: "0/s";
+    in property <string> ws-poll-rate: "0/s";
+    in property <string> fg-hook-rate: "0/s";
+    in property <string> last-search-text: "—";
+    in property <string> last-rtt-text: "—";
+    in property <bool> paused: false;
+    in property <[DebugLogEntryUI]> log-entries: [];
+
+    callback clear-requested();
+    callback toggle-pause();
+    callback close-requested();
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #12131a;
+        border-width: 1px;
+        border-color: #363952;
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // Header bar
+            Rectangle {
+                height: 38px;
+                background: #171822;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    alignment: stretch;
+
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Spotlight Debug & Performance Log";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #f3f4f8;
+                        }
+                    }
+
+                    // Pause / Resume button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 60px;
+                            height: 22px;
+                            border-radius: 4px;
+                            background: pause-touch.has-hover ? #282b3d : #1f2130;
+                            border-width: 1px;
+                            border-color: root.paused ? #f59e0b88 : #363952;
+                            Text {
+                                text: root.paused ? "Resume" : "Pause";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: root.paused ? #fcd34d : #cbd5e1;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            pause-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-pause(); }
+                            }
+                        }
+                    }
+
+                    // Clear button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 4px;
+                            background: clear-touch.has-hover ? #282b3d : #1f2130;
+                            border-width: 1px;
+                            border-color: #363952;
+                            Text {
+                                text: "Clear";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: #cbd5e1;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            clear-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.clear-requested(); }
+                            }
+                        }
+                    }
+
+                    // Close button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 4px;
+                            background: close-touch.has-hover ? #452730 : #1f2130;
+                            border-width: 1px;
+                            border-color: close-touch.has-hover ? #ca7c85 : #363952;
+                            Text {
+                                text: "Close";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: #f8fafc;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            close-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.close-requested(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: #26283a; }
+
+            // Live metrics bar
+            Rectangle {
+                height: 46px;
+                background: #151620;
+
+                VerticalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 6px;
+                    padding-bottom: 6px;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        spacing: 16px;
+                        Text {
+                            text: "UI Timer: " + root.ui-timer-rate;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: #fbbf24;
+                        }
+                        Text {
+                            text: "WS Polls: " + root.ws-poll-rate;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: #fbbf24;
+                        }
+                        Text {
+                            text: "FG Hooks: " + root.fg-hook-rate;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: #93c5fd;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 16px;
+                        Text {
+                            text: "Last Search: " + root.last-search-text;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: #c4b5fd;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "Bridge RTT: " + root.last-rtt-text;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: #6ee7b7;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: #26283a; }
+
+            // Scrollable log list
+            Rectangle {
+                vertical-stretch: 1;
+                background: #0f1017;
+                clip: true;
+
+                if root.log-entries.length == 0 : VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "No debug events recorded yet";
+                        font-size: 11px;
+                        font-family: "Consolas";
+                        color: #6b708b;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                Flickable {
+                    width: 100%;
+                    height: 100%;
+                    content-height: log-list.preferred-height;
+                    interactive: true;
+
+                    log-list := VerticalLayout {
+                        width: 100%;
+                        padding: 8px;
+                        spacing: 3px;
+                        alignment: start;
+
+                        for entry in root.log-entries : Text {
+                            text: entry.text;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: entry.color;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component ErrorToastWindow inherits Window {
     title: "Premiere Spotlight error";
     no-frame: true;
@@ -76,6 +316,7 @@ export component SpotlightWindow inherits Window {
     callback open-selected-in-source();
     callback open-index-in-source(int);
     callback close-requested();
+    callback toggle-debug-log();
 
     public function focus-search() {
         search-input.focus();
@@ -114,6 +355,10 @@ export component SpotlightWindow inherits Window {
             }
             if (event.text == Key.Tab) {
                 root.switch-catalog();
+                return accept;
+            }
+            if (event.text == Key.F12) {
+                root.toggle-debug-log();
                 return accept;
             }
             return reject;
@@ -227,6 +472,10 @@ export component SpotlightWindow inherits Window {
                                 }
                                 if (event.text == Key.Tab) {
                                     root.switch-catalog();
+                                    return accept;
+                                }
+                                if (event.text == Key.F12) {
+                                    root.toggle-debug-log();
                                     return accept;
                                 }
                                 return reject;

@@ -88,11 +88,13 @@ function fixture() {
     document: { readyState: "loading", addEventListener() {}, getElementById: () => null },
     WebSocket: { OPEN: 1 }, console, socket
   });
-  const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = vm.runInContext(
-    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor });", context
+  const exports = vm.runInContext(
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, ensureCatalogScanned, scanPremiereCatalog });", context
   );
+  const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = exports;
   return {
-    clip, seq, bin, project, commits, messages, ppro, applyEffectToSelection,
+    ...exports,
+    clip, seq, bin, root, project, commits, messages, ppro, applyEffectToSelection,
     place(itemId = "take") {
       return placeProjectItem({ itemId, projectId: "project", sequenceId: "timeline" }, socket);
     },
@@ -385,4 +387,83 @@ test("Source Monitor rejects bins, unsupported items, stale context and host fai
   f.ppro.Project.getActiveProject = () => ({ ...f.project, guid: "other project" });
   await assert.rejects(f.openSource(), /Active project changed/);
   assert.deepEqual(opened, []);
+});
+
+test("ensureCatalogScanned reuses cached effects unless forced to rescan", async () => {
+  const f = fixture();
+  let videoScans = 0;
+  f.ppro.VideoFilterFactory = {
+    getMatchNames: () => { videoScans++; return ["test.blur"]; },
+    getDisplayNames: () => ["Blur"]
+  };
+  const first = await f.ensureCatalogScanned(false);
+  const second = await f.ensureCatalogScanned(false);
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 1);
+  assert.equal(videoScans, 1);
+  await f.scanPremiereCatalog();
+  assert.equal(videoScans, 2);
+});
+
+test("place and Source Monitor use cached project item index after sync without re-walking bins", async () => {
+  const f = fixture();
+  let rootWalks = 0;
+  const baseRoot = f.project.getRootItem;
+  f.project.getRootItem = () => {
+    rootWalks++;
+    return baseRoot();
+  };
+  f.ppro.SourceMonitor = { openProjectItem: async () => true };
+
+  await f.scan(10);
+  assert.equal(rootWalks, 1);
+
+  await f.place("alternate");
+  await f.openSource("alternate");
+  assert.equal(rootWalks, 1);
+
+  f.root.children.push({ name: "Fresh.mov", getId: () => "fresh", clip: f.clip });
+  await f.place("fresh");
+  assert.equal(rootWalks, 2);
+});
+
+test("skips unused track groups, locked tracks, and unaffected trailing tracks during placement verification", async () => {
+  const f = fixture();
+  let videoReads = 0;
+  let audioReads = 0;
+  let lockedTrackItemReads = 0;
+  const origGetVideo = f.seq.getVideoTrack.bind(f.seq);
+  const origGetAudio = f.seq.getAudioTrack.bind(f.seq);
+  f.seq.video = [
+    empty(),
+    { isLocked: () => true, getTrackItems: () => { lockedTrackItemReads++; return []; } },
+    track({ clips: [[95, 155]] })
+  ];
+  f.seq.audio = [
+    empty(),
+    empty(),
+    empty()
+  ];
+  f.seq.getVideoTrack = (i) => { videoReads++; return origGetVideo(i); };
+  f.seq.getAudioTrack = (i) => { audioReads++; return origGetAudio(i); };
+
+  await f.place();
+  // First pass reads V1..V3 (3), chosen video=0 so verification re-reads V1 only (+1 = 4); audio skipped (0).
+  assert.equal(videoReads, 4);
+  assert.equal(audioReads, 0);
+
+  // Audio-only clip skips all video tracks and locked tracks never query getTrackItems.
+  videoReads = 0;
+  audioReads = 0;
+  f.clip.getComponentChain = (type) => type === "audio" ? {} : null;
+  f.seq.audio = [
+    { isLocked: () => true, getTrackItems: () => { lockedTrackItemReads++; return []; } },
+    empty(),
+    empty()
+  ];
+  await f.place();
+  assert.equal(videoReads, 0);
+  // 3 initial track scans + 2 verification scans (A1..A2) + 2 post-commit placedAudioTracks checks (skipping locked A1).
+  assert.equal(audioReads, 7);
+  assert.equal(lockedTrackItemReads, 0);
 });

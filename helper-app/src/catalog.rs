@@ -3,7 +3,7 @@ use nucleo_matcher::{
     Config, Matcher, Utf32Str,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,14 +72,53 @@ impl ProjectItemKind {
 
 #[derive(Clone)]
 pub enum SearchResult {
-    Effect(EffectEntry),
-    ProjectItem(ProjectItemEntry),
+    Effect(Arc<EffectEntry>),
+    ProjectItem(Arc<ProjectItemEntry>),
+}
+
+struct IndexedEffect {
+    entry: Arc<EffectEntry>,
+    name_lower: String,
+    haystack: String,
+    supported: bool,
+}
+
+impl IndexedEffect {
+    fn new(entry: EffectEntry) -> Self {
+        let name_lower = entry.name.to_lowercase();
+        let haystack = format!("{} {}", entry.name, entry.folder);
+        let supported = entry.is_supported();
+        Self {
+            entry: Arc::new(entry),
+            name_lower,
+            haystack,
+            supported,
+        }
+    }
+}
+
+struct IndexedProjectItem {
+    entry: Arc<ProjectItemEntry>,
+    name_lower: String,
+    haystack: String,
+}
+
+impl IndexedProjectItem {
+    fn new(entry: ProjectItemEntry) -> Self {
+        let name_lower = entry.name.to_lowercase();
+        let haystack = format!("{} {}", entry.name, entry.bin_path);
+        Self {
+            entry: Arc::new(entry),
+            name_lower,
+            haystack,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum CatalogEntry<'a> {
-    Effect(&'a EffectEntry),
-    ProjectItem(&'a ProjectItemEntry),
+    Effect(&'a IndexedEffect),
+    ProjectItem(&'a IndexedProjectItem),
 }
 
 impl SearchResult {
@@ -97,22 +136,36 @@ impl SearchResult {
 impl CatalogEntry<'_> {
     fn name(&self) -> &str {
         match self {
-            Self::Effect(entry) => &entry.name,
-            Self::ProjectItem(entry) => &entry.name,
+            Self::Effect(item) => &item.entry.name,
+            Self::ProjectItem(item) => &item.entry.name,
+        }
+    }
+
+    fn name_lower(&self) -> &str {
+        match self {
+            Self::Effect(item) => &item.name_lower,
+            Self::ProjectItem(item) => &item.name_lower,
         }
     }
 
     fn folder(&self) -> &str {
         match self {
-            Self::Effect(entry) => &entry.folder,
-            Self::ProjectItem(entry) => &entry.bin_path,
+            Self::Effect(item) => &item.entry.folder,
+            Self::ProjectItem(item) => &item.entry.bin_path,
+        }
+    }
+
+    fn haystack(&self) -> &str {
+        match self {
+            Self::Effect(item) => &item.haystack,
+            Self::ProjectItem(item) => &item.haystack,
         }
     }
 
     fn to_result(self) -> SearchResult {
         match self {
-            Self::Effect(entry) => SearchResult::Effect(entry.clone()),
-            Self::ProjectItem(entry) => SearchResult::ProjectItem(entry.clone()),
+            Self::Effect(item) => SearchResult::Effect(Arc::clone(&item.entry)),
+            Self::ProjectItem(item) => SearchResult::ProjectItem(Arc::clone(&item.entry)),
         }
     }
 }
@@ -134,31 +187,43 @@ impl EffectEntry {
 }
 
 pub struct CatalogStore {
-    items: Vec<EffectEntry>,
-    project_items: Vec<ProjectItemEntry>,
+    items: Vec<IndexedEffect>,
+    project_items: Vec<IndexedProjectItem>,
     usage_counts: HashMap<String, u32>,
     matcher: Matcher,
+    utf32_buf: Vec<char>,
 }
 
 impl CatalogStore {
     pub fn new_with_defaults() -> Self {
+        let items = default_premiere_effects()
+            .into_iter()
+            .map(IndexedEffect::new)
+            .collect();
         Self {
-            items: default_premiere_effects(),
+            items,
             project_items: Vec::new(),
             usage_counts: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
+            utf32_buf: Vec::with_capacity(128),
         }
     }
 
-    pub fn set_catalog(&mut self, mut new_items: Vec<EffectEntry>) {
+    pub fn set_catalog(&mut self, new_items: Vec<EffectEntry>) {
         if new_items.is_empty() {
             return;
         }
-        new_items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        new_items.dedup_by(|a, b| {
-            a.effect_type == b.effect_type && a.match_name == b.match_name && a.name == b.name
+        let mut indexed: Vec<IndexedEffect> = new_items
+            .into_iter()
+            .map(IndexedEffect::new)
+            .collect();
+        indexed.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
+        indexed.dedup_by(|a, b| {
+            a.entry.effect_type == b.entry.effect_type
+                && a.entry.match_name == b.entry.match_name
+                && a.entry.name == b.entry.name
         });
-        self.items = new_items;
+        self.items = indexed;
     }
 
     pub fn record_usage(&mut self, match_name: &str) {
@@ -167,7 +232,14 @@ impl CatalogStore {
     }
 
     pub fn set_project_items(&mut self, items: Vec<ProjectItemEntry>) {
-        self.project_items = items;
+        self.project_items = items
+            .into_iter()
+            .map(IndexedProjectItem::new)
+            .collect();
+    }
+
+    pub fn counts(&self) -> (usize, usize) {
+        (self.items.len(), self.project_items.len())
     }
 
     pub fn search(&mut self, query: &str, catalog: &str) -> Vec<SearchResult> {
@@ -175,7 +247,7 @@ impl CatalogStore {
         let effects = self
             .items
             .iter()
-            .filter(|item| catalog != "project" && item.is_supported())
+            .filter(|item| catalog != "project" && item.supported)
             .map(CatalogEntry::Effect);
         let project_items = self
             .project_items
@@ -184,9 +256,9 @@ impl CatalogStore {
             .map(CatalogEntry::ProjectItem);
         let entries = effects.chain(project_items);
         let usage = |item: &CatalogEntry| match item {
-            CatalogEntry::Effect(entry) => self
+            CatalogEntry::Effect(indexed) => self
                 .usage_counts
-                .get(&entry.match_name)
+                .get(&indexed.entry.match_name)
                 .copied()
                 .unwrap_or(0),
             CatalogEntry::ProjectItem(_) => 0,
@@ -198,7 +270,7 @@ impl CatalogStore {
             filtered.sort_by(|a, b| {
                 usage(b)
                     .cmp(&usage(a))
-                    .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+                    .then_with(|| a.name_lower().cmp(b.name_lower()))
                     .then_with(|| a.folder().cmp(b.folder()))
             });
             return filtered.into_iter().map(CatalogEntry::to_result).collect();
@@ -211,14 +283,12 @@ impl CatalogStore {
             AtomKind::Fuzzy,
         );
         let q_lower = trimmed.to_lowercase();
-        let mut buf = Vec::new();
         let mut scored = Vec::new();
 
         for item in entries {
-            let hay = format!("{} {}", item.name(), item.folder());
-            let utf32 = Utf32Str::new(&hay, &mut buf);
+            let utf32 = Utf32Str::new(item.haystack(), &mut self.utf32_buf);
             if let Some(mut score) = pattern.score(utf32, &mut self.matcher) {
-                let name_lower = item.name().to_lowercase();
+                let name_lower = item.name_lower();
                 if name_lower == q_lower {
                     score += 500;
                 } else if name_lower.starts_with(&q_lower) {
