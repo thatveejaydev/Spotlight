@@ -29,7 +29,7 @@ cargo run --release
 3. With Adobe Premiere Pro open, click **Load** on **Premiere Spotlight Bridge**.
 
 ## Keyboard Controls (Inside Spotlight Popup)
-- **Type:** Fuzzy search effects, transitions, and items in the active project. Project results show their bin path.
+- **Type:** Fuzzy search effects, transitions, and items in the active project. The selected project result shows its bin path.
 - **`↑` / `↓` Arrows:** Navigate results
 - **`Tab` (or click the search-bar badge):** Switch catalogs (`All` → `Effects` → `Project`). Spotlight opens in `All` and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.

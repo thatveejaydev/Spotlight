@@ -224,7 +224,7 @@ export component SpotlightWindow inherits Window {
                             padding-right: 12px;
                             spacing: 10px;
 
-                            // Effect Name
+                            // Result name and selected project item's bin path
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 alignment: center;
@@ -235,7 +235,7 @@ export component SpotlightWindow inherits Window {
                                     color: idx == root.selected-index ? #ffffff : #dcdfe8;
                                     overflow: elide;
                                 }
-                                if item.folder != "" : Text {
+                                if idx == root.selected-index && item.folder != "" : Text {
                                     text: item.folder;
                                     font-size: 10px;
                                     color: #a5a8c0;
