@@ -449,7 +449,7 @@ export component SpotlightWindow inherits Window {
     no-frame: true;
     always-on-top: true;
     width: 620px;
-    height: 407px;
+    height: 440px;
     background: #12131a;
 
     init => { Palette.color-scheme = ColorScheme.dark; }
@@ -459,10 +459,6 @@ export component SpotlightWindow inherits Window {
     in-out property <int> selected-index: 0;
     in-out property <string> active-catalog: "all";
     in-out property <string> active-bin: "";
-    private property <string> catalog-name: active-catalog == "effects" ? "Effects"
-        : active-catalog == "project" ? "Project" : "All";
-    private property <color> catalog-accent: active-catalog == "effects" ? #c4b5fd
-        : active-catalog == "project" ? #6ee7b7 : #93c5fd;
     in property <bool> show-recent-items: false;
     in-out property <bool> bridge-connected: false;
     in-out property <int> total-matches: 0;
@@ -577,9 +573,15 @@ export component SpotlightWindow inherits Window {
     }
 
     function switch-catalog() {
-        root.active-catalog = root.active-catalog == "all" ? "effects"
-            : root.active-catalog == "effects" ? "project" : "all";
-        root.catalog-changed();
+        root.select-catalog(root.active-catalog == "all" ? "effects"
+            : root.active-catalog == "effects" ? "project" : "all");
+    }
+
+    function select-catalog(catalog: string) {
+        if (root.active-catalog != catalog) {
+            root.active-catalog = catalog;
+            root.catalog-changed();
+        }
         search-input.focus();
     }
 
@@ -674,9 +676,9 @@ export component SpotlightWindow inherits Window {
             padding: 0px;
             spacing: 0px;
 
-            // 1. Search Bar Header (or Settings Header when settings-open)
+            // Search bar or Settings header
             Rectangle {
-                height: 54px;
+                height: root.settings-open ? 54px : 50px;
                 background: #171822;
 
                 HorizontalLayout {
@@ -737,43 +739,13 @@ export component SpotlightWindow inherits Window {
 
                 HorizontalLayout {
                     visible: !root.settings-open;
+                    y: 0px;
                     width: 100%;
                     height: 100%;
                     padding-left: 16px;
                     padding-right: 14px;
                     spacing: 12px;
                     alignment: stretch;
-
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 32px;
-                            height: 24px;
-                            border-radius: 6px;
-                            background: root.catalog-accent.with-alpha(catalog-touch.has-hover ? 0.25 : 0.12);
-                            border-width: 1px;
-                            border-color: root.catalog-accent.with-alpha(0.4);
-                            accessible-role: button;
-                            accessible-label: root.catalog-name + " catalog. Switch catalog";
-                            accessible-action-default => { root.switch-catalog(); }
-                            Text {
-                                text: root.active-catalog == "effects" ? "FX"
-                                    : root.active-catalog == "project" ? "PRJ" : "ALL";
-                                font-size: 10px;
-                                font-weight: 700;
-                                color: root.catalog-accent;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                            catalog-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.switch-catalog(); }
-                            }
-                            Tooltip {
-                                text: @markdown("\{root.catalog-name}");
-                            }
-                        }
-                    }
 
                     if root.active-bin != "" : VerticalLayout {
                         alignment: center;
@@ -899,17 +871,70 @@ export component SpotlightWindow inherits Window {
                         }
                     }
                 }
+
             }
 
-            // Divider
             Rectangle {
+                height: 1px;
+                background: #26283a;
+            }
+
+            if !root.settings-open : Rectangle {
+                height: 36px;
+                background: #151620;
+                accessible-role: tab-list;
+                accessible-label: "Search catalogs";
+                accessible-item-count: 3;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-top: 6px;
+                    padding-bottom: 6px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    for catalog[index] in [
+                        { id: "all", label: "All", name: "All", accent: #93c5fd },
+                        { id: "effects", label: "FX", name: "Effects", accent: #c4b5fd },
+                        { id: "project", label: "PRJ", name: "Project", accent: #6ee7b7 },
+                    ] : Rectangle {
+                        private property <bool> active: catalog.id == root.active-catalog;
+                        width: 46px;
+                        border-radius: 5px;
+                        background: active ? catalog.accent.with-alpha(0.12) : transparent;
+                        border-width: active ? 1px : 0px;
+                        border-color: catalog.accent.with-alpha(0.4);
+                        accessible-role: tab;
+                        accessible-label: catalog.name;
+                        accessible-item-index: index;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: active;
+                        accessible-action-default => { root.select-catalog(catalog.id); }
+                        Text {
+                            text: catalog.label;
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: active ? catalog.accent : #a9adc3;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.select-catalog(catalog.id); }
+                        }
+                    }
+                }
+            }
+
+            if !root.settings-open : Rectangle {
                 height: 1px;
                 background: #26283a;
             }
 
             // Eight visible results (or Settings panel)
             Rectangle {
-                height: 314px;
+                min-height: 314px;
+                vertical-stretch: 1;
                 background: #12131a;
                 clip: true;
 

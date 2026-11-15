@@ -1071,7 +1071,7 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // The header badge and Tab share the catalog switch.
+    // Catalog tabs and the Tab key share the catalog switch.
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
@@ -1985,7 +1985,7 @@ mod tests {
     use slint::{LogicalPosition, PhysicalSize, Rgb8Pixel};
 
     const WINDOW_WIDTH: i32 = 620;
-    const WINDOW_HEIGHT: i32 = 407;
+    const WINDOW_HEIGHT: i32 = 440;
 
     struct TestPlatform(Rc<MinimalSoftwareWindow>);
 
@@ -2132,13 +2132,13 @@ mod tests {
         let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
         assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
         let fill = Rgb8Pixel { r: 0xa5, g: 0xb4, b: 0xfc };
-        assert_eq!(pixels[94 * width + 10], fill);
-        assert_eq!(pixels[94 * width + 609], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
-        assert_ne!(pixels[94 * width + 400], fill);
-        assert_ne!(pixels[132 * width + 80], fill);
+        assert_eq!(pixels[127 * width + 10], fill);
+        assert_eq!(pixels[127 * width + 609], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
+        assert_ne!(pixels[127 * width + 400], fill);
+        assert_ne!(pixels[165 * width + 80], fill);
         let icon = Rgb8Pixel { r: 0xc7, g: 0xd2, b: 0xfe };
         let icon_pixels = |pixels: &[Rgb8Pixel]| {
-            (69..88).flat_map(|y| &pixels[y * width + 460..y * width + 489])
+            (102..121).flat_map(|y| &pixels[y * width + 460..y * width + 489])
                 .filter(|&&pixel| pixel == icon).count()
         };
         assert!(icon_pixels(&pixels) > 0);
@@ -2164,9 +2164,9 @@ mod tests {
             ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
             ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
         };
-        click(472., 78.);
+        click(472., 111.);
         assert!(played.get());
-        click(310., 94.);
+        click(310., 127.);
         assert!(
             position.get().is_some_and(|value| (0.35..0.55).contains(&value)),
             "click produced seek position {:?}",
@@ -2175,12 +2175,12 @@ mod tests {
         assert_eq!(activated.get(), None);
         ui.set_preview_can_toggle(false);
         played.set(false);
-        click(472., 78.);
+        click(472., 111.);
         assert!(!played.get());
         assert_eq!(activated.get(), None);
-        click(472., 116.);
+        click(472., 149.);
         assert_eq!(activated.get(), Some(1));
-        click(48., 78.);
+        click(48., 111.);
         assert_eq!(activated.get(), Some(0));
     }
 
@@ -2377,7 +2377,7 @@ mod tests {
         sync_viewport_slice(&ui, &mut state);
 
         // Shift+Click on a result row invokes shift_activate_index with that row index.
-        let row_pos = LogicalPosition::new(120., 78.);
+        let row_pos = LogicalPosition::new(120., 111.);
         let button = PointerEventButton::Left;
         window.dispatch_event(WindowEvent::KeyPressed { text: Key::Shift.into() });
         window.dispatch_event(WindowEvent::PointerPressed { position: row_pos, button });
@@ -2475,7 +2475,7 @@ mod tests {
     }
 
     #[test]
-    fn search_header_cycles_and_reopens_to_recent_items() {
+    fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
         let ui = SpotlightWindow::new().unwrap();
@@ -2489,38 +2489,41 @@ mod tests {
             window.dispatch_event(WindowEvent::KeyPressed { text: Key::Tab.into() });
             window.dispatch_event(WindowEvent::KeyReleased { text: Key::Tab.into() });
         };
-        let click_badge = || {
-            let position = LogicalPosition::new(32., 27.);
+        let click_tab = |x| {
+            let position = LogicalPosition::new(x, 69.);
             let button = PointerEventButton::Left;
             window.dispatch_event(WindowEvent::PointerPressed { position, button });
             window.dispatch_event(WindowEvent::PointerReleased { position, button });
         };
-        let badge_color = || {
+        let assert_highlight = |selected| {
             let width = WINDOW_WIDTH as usize;
             let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
             window.request_redraw();
             assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
-            pixels[21 * width + 20]
-        };
-        let all_color = badge_color();
-        press_tab();
-        let effects_color = badge_color();
-        press_tab();
-        let project_color = badge_color();
-        assert_ne!(all_color, effects_color);
-        assert_ne!(effects_color, project_color);
-        assert_ne!(all_color, project_color);
-        press_tab();
-        for switch in [&press_tab as &dyn Fn(), &click_badge] {
-            for expected in ["effects", "project", "all"] {
-                switch();
-                assert_eq!(ui.get_active_catalog().as_str(), expected);
-                assert_eq!(ui.get_search_text().as_str(), "Take");
+            let background = pixels[64 * width + 195];
+            let divider = Rgb8Pixel { r: 0x26, g: 0x28, b: 0x3a };
+            assert_ne!(background, pixels[26 * width + 550]);
+            assert_eq!(pixels[50 * width + 550], divider);
+            assert_eq!(pixels[87 * width + 550], divider);
+            for (index, x) in [23, 77, 131].into_iter().enumerate() {
+                assert_eq!(pixels[64 * width + x] != background, index == selected);
             }
+        };
+        assert_highlight(0);
+        for (index, expected) in [(1, "effects"), (2, "project"), (0, "all")] {
+            press_tab();
+            assert_eq!(ui.get_active_catalog().as_str(), expected);
+            assert_eq!(ui.get_search_text().as_str(), "Take");
+            assert_highlight(index);
         }
-        click_badge();
+        click_tab(147.);
+        assert_eq!(ui.get_active_catalog().as_str(), "project");
+        assert_highlight(2);
+        click_tab(93.);
+        assert_eq!(ui.get_active_catalog().as_str(), "effects");
         press_tab();
         assert_eq!(ui.get_active_catalog().as_str(), "project");
+        assert_eq!(ui.get_search_text().as_str(), "Take");
         let mut state = AppState {
             catalog: CatalogStore::new_with_defaults(),
             matched_items: vec![],
@@ -2627,9 +2630,9 @@ mod tests {
         }).collect());
         refresh_results_ui(&ui, &mut state);
         assert_eq!(ui.get_total_matches(), 8);
-        click_badge();
-        click_badge();
-        click_badge();
+        click_tab(39.);
+        click_tab(93.);
+        click_tab(147.);
         assert_eq!(ui.get_active_catalog().as_str(), "project");
         ui.set_status_message("This project item can't be placed on the timeline.".into());
 
@@ -2638,11 +2641,11 @@ mod tests {
         window.request_redraw();
         assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
         for row in 0..8 {
-            let top = (61 + row * 38) * width;
+            let top = (94 + row * 38) * width;
             let bottom = top + 36 * width;
             assert!(pixels[top..bottom].iter().any(|pixel| pixel.r > 170), "row {row} should render its label");
         }
-        assert!(pixels[371 * width..].iter().any(|pixel| pixel.r > 130), "the footer should render its text");
+        assert!(pixels[404 * width..].iter().any(|pixel| pixel.r > 130), "the footer should render its text");
         let height = WINDOW_HEIGHT as usize;
         let outline = Rgb8Pixel { r: 0x36, g: 0x39, b: 0x52 };
         for edge in [
@@ -2666,7 +2669,7 @@ mod tests {
         window.dispatch_event(WindowEvent::KeyPressed { text: Key::Escape.into() });
         window.dispatch_event(WindowEvent::KeyReleased { text: Key::Escape.into() });
         assert_eq!(close_count.get(), 1);
-        let footer_pos = LogicalPosition::new(300., 390.);
+        let footer_pos = LogicalPosition::new(300., 423.);
         window.dispatch_event(WindowEvent::PointerPressed {
             position: footer_pos,
             button: PointerEventButton::Left,
@@ -2773,7 +2776,7 @@ mod tests {
         press_f12();
         assert_eq!(toggled.get(), 1);
 
-        let footer_pos = LogicalPosition::new(300., 390.);
+        let footer_pos = LogicalPosition::new(300., 423.);
         window.dispatch_event(WindowEvent::PointerPressed {
             position: footer_pos,
             button: PointerEventButton::Left,
@@ -3035,7 +3038,7 @@ mod tests {
         let without_folder = render("00_BACK UP", "");
         let with_folder = render("00_BACK UP", "04_Nests / 041_Main");
 
-        let diff_xs: Vec<usize> = (62..96)
+        let diff_xs: Vec<usize> = (95..129)
             .flat_map(|y| {
                 (18..500).filter_map({
                     let without_folder = &without_folder;
@@ -3055,7 +3058,7 @@ mod tests {
             "Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider",
             "01_Project / 04_Nests / 041_Main / Exports / Final_Master",
         );
-        let leaked_into_badge = (62..96).any(|y| {
+        let leaked_into_badge = (95..129).any(|y| {
             (504..WINDOW_WIDTH as usize - 10)
                 .any(|x| long_base[y * width + x] != long_with_folder[y * width + x])
         });
@@ -3175,7 +3178,7 @@ mod tests {
                 button: PointerEventButton::Left,
             });
         };
-        click(594., 389.);
+        click(594., 422.);
         assert!(ui.get_settings_open());
 
         click(490., 142.);
