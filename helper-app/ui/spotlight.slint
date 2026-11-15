@@ -25,6 +25,7 @@ export component SpotlightWindow inherits Window {
     in-out property <bool> bridge-connected: false;
     in-out property <int> total-matches: 0;
     in-out property <string> status-message: "Ready · Ctrl+Space";
+    in property <string> action-error: "";
     in property <[EffectItemUI]> results: [];
 
     callback search-edited(string);
@@ -311,7 +312,7 @@ export component SpotlightWindow inherits Window {
                             horizontal-stretch: 1;
                             alignment: center;
                             Text {
-                                text: root.status-message;
+                                text: root.action-error == "" ? root.status-message : root.action-error;
                                 font-size: 11px;
                                 color: #8b90aa;
                                 wrap: word-wrap;

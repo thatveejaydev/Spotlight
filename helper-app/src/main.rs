@@ -305,6 +305,10 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
 
+    show_palette(ui, state);
+}
+
+fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     ui.window().set_minimized(false);
     let our_hwnd_before = extract_window_hwnd(ui);
     win_focus::center_palette(our_hwnd_before, state.previous_hwnd);
@@ -325,16 +329,70 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
     ui.invoke_focus_search();
 }
 
-fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
-    // Restore Premiere before hiding so our foreground transfer does not need a synthetic Alt tap.
-    if state.previous_hwnd != 0 && win_focus::is_premiere_active_and_unminimized(state.previous_hwnd)
+fn restore_premiere_focus(hwnd: isize) {
+    if hwnd != 0
+        && win_focus::get_foreground_hwnd() != hwnd
+        && win_focus::is_premiere_active_and_unminimized(hwnd)
     {
-        win_focus::restore_foreground(state.previous_hwnd);
+        win_focus::restore_foreground(hwnd);
     }
+}
+
+fn hide_palette(ui: &SpotlightWindow, state: &mut AppState) {
     let _ = ui.hide();
     state.is_visible = false;
     state.shown_at = None;
     state.saw_foreground = false;
+}
+
+fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
+    restore_premiere_focus(state.previous_hwnd);
+    hide_palette(ui, state);
+}
+
+fn show_action_error(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    message: SharedString,
+    foreground_hwnd: isize,
+) {
+    ui.set_action_error(message);
+    if !state.is_visible && foreground_hwnd != 0 && foreground_hwnd == state.previous_hwnd {
+        show_palette(ui, state);
+    }
+}
+
+fn update_placement(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    results: Vec<PlacementResult>,
+    foreground_hwnd: isize,
+) {
+    let Some(pending) = &state.pending_placement else {
+        return;
+    };
+    if let Some(result) = results.into_iter().find(|result| {
+        result.peer_id == pending.peer_id && result.request_id == pending.request_id
+    }) {
+        let pending = state.pending_placement.take().unwrap();
+        if result.ok {
+            if Instant::now() < pending.deadline {
+                remember_item(state, pending.recent);
+                refresh_catalog_ui(ui, state, true);
+            }
+            ui.set_status_message(result.message.into());
+        } else {
+            show_action_error(ui, state, result.message.into(), foreground_hwnd);
+        }
+    } else if Instant::now() >= pending.deadline {
+        state.pending_placement = None;
+        show_action_error(
+            ui,
+            state,
+            "Placement outcome unknown. Check the timeline before retrying.".into(),
+            foreground_hwnd,
+        );
+    }
 }
 
 fn toggle_palette_from_hotkey(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
@@ -433,48 +491,53 @@ fn apply_entry_at(
         return;
     };
     if state.pending_placement.is_some() {
+        ui.set_status_message("A media placement is already in progress.".into());
         return;
     }
-    let chosen = match chosen {
-        SearchResult::Effect(entry) => entry,
-        SearchResult::ProjectItem(entry) => {
-            let Some(catalog) = &state.media_catalog else {
+    match chosen {
+        SearchResult::Effect(entry) => {
+            let Some((request_id, recipients)) = bridge.send_apply(&entry) else {
+                ui.set_action_error("Premiere effect bridge disconnected.".into());
                 return;
             };
-            match bridge.place_project_item(catalog, entry.item_id.clone()) {
-                Ok(request_id) => {
-                    state.pending_placement = Some(PendingPlacement {
-                        peer_id: catalog.peer_id,
-                        request_id,
-                        deadline: Instant::now() + ACTION_TIMEOUT,
-                        recent: RecentItem {
-                            item: SearchResult::ProjectItem(entry.clone()),
-                            project_id: catalog.project_id.clone(),
-                        },
-                    });
-                    ui.set_status_message(format!("Placing {}…", entry.name).into());
-                }
-                Err(message) => ui.set_status_message(message.into()),
-            }
-            return;
+            ui.set_status_message(format!("Applying {}…", entry.name).into());
+            state.pending_effects.insert(
+                request_id,
+                PendingEffect {
+                    entry,
+                    recipients,
+                    deadline: Instant::now() + ACTION_TIMEOUT,
+                },
+            );
         }
-    };
-    if let Some((request_id, recipients)) = bridge.send_apply(&chosen) {
-        ui.set_status_message(format!("Applying {}…", chosen.name).into());
-        state
-            .pending_effects
-            .insert(request_id, PendingEffect {
-                entry: chosen,
-                recipients,
+        SearchResult::ProjectItem(entry) => {
+            let Some(catalog) = &state.media_catalog else {
+                ui.set_action_error("Project media changed. Search again.".into());
+                return;
+            };
+            let request_id = match bridge.place_project_item(catalog, entry.item_id.clone()) {
+                Ok(request_id) => request_id,
+                Err(message) => {
+                    ui.set_action_error(message.into());
+                    return;
+                }
+            };
+            ui.set_status_message(format!("Placing {}…", entry.name).into());
+            state.pending_placement = Some(PendingPlacement {
+                peer_id: catalog.peer_id,
+                request_id,
                 deadline: Instant::now() + ACTION_TIMEOUT,
+                recent: RecentItem {
+                    item: SearchResult::ProjectItem(entry),
+                    project_id: catalog.project_id.clone(),
+                },
             });
-    } else {
-        ui.set_status_message(SharedString::from(format!(
-            "Selected: {} (Waiting for Premiere bridge)",
-            chosen.name
-        )));
+        }
     }
-    hide_and_restore_focus(ui, state);
+    // Hide before transferring focus, since Premiere may already be processing the edit.
+    ui.set_action_error(SharedString::default());
+    hide_palette(ui, state);
+    restore_premiere_focus(state.previous_hwnd);
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -567,13 +630,6 @@ fn main() -> Result<(), slint::PlatformError> {
                         BRIDGE_STATUS_QUEUE.with(|q| *q.borrow_mut() = Some(true));
                     }
                     BridgeEvent::ApplyResult(result) => {
-                        if !result.message.is_empty() {
-                            let prefix = if result.ok { "Premiere:" } else { "Error:" };
-                            ui.set_status_message(SharedString::from(format!(
-                                "{} {}",
-                                prefix, result.message
-                            )));
-                        }
                         EFFECT_RESULTS.with(|results| results.borrow_mut().push(result));
                     }
                     BridgeEvent::ProjectItemsChanged => {
@@ -846,34 +902,24 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut recent_changed = false;
                 for result in effects {
                     recent_changed |= complete_effect(&mut st, &result);
+                    if !result.ok {
+                        let message = if result.message.is_empty() {
+                            "Premiere could not apply the effect.".into()
+                        } else {
+                            format!("Error: {}", result.message).into()
+                        };
+                        show_action_error(&ui, &mut st, message, win_focus::get_foreground_hwnd());
+                    } else if !result.message.is_empty() {
+                        ui.set_status_message(format!("Premiere: {}", result.message).into());
+                    }
                 }
                 if recent_changed {
                     refresh_catalog_ui(&ui, &mut st, true);
                 }
                 st.pending_effects.retain(|_, pending| Instant::now() < pending.deadline);
                 let results = PLACEMENT_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-                if let Some(pending) = &st.pending_placement {
-                    if let Some(result) = results.into_iter().find(|result| {
-                        result.peer_id == pending.peer_id && result.request_id == pending.request_id
-                    }) {
-                        let pending = st.pending_placement.take().unwrap();
-                        if result.ok && Instant::now() < pending.deadline {
-                            remember_item(&mut st, pending.recent);
-                            refresh_catalog_ui(&ui, &mut st, true);
-                        }
-                        ui.set_status_message(result.message.into());
-                        if result.ok
-                            && st.is_visible
-                            && win_focus::get_foreground_hwnd() == extract_window_hwnd(&ui)
-                        {
-                            hide_and_restore_focus(&ui, &mut st);
-                        }
-                    } else if Instant::now() >= pending.deadline {
-                        st.pending_placement = None;
-                        ui.set_status_message(
-                            "Placement outcome unknown. Check the timeline before retrying.".into(),
-                        );
-                    }
+                if st.pending_placement.is_some() {
+                    update_placement(&ui, &mut st, results, win_focus::get_foreground_hwnd());
                 }
             }
 
@@ -958,6 +1004,100 @@ mod tests {
         fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
             Ok(self.0.clone())
         }
+    }
+
+    #[test]
+    fn accepted_actions_hide_immediately_and_errors_keep_the_palette_available() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        let bridge = BridgeClients::new();
+        let effect = SearchResult::Effect(EffectEntry {
+            name: "Gaussian Blur".into(),
+            match_name: "blur".into(),
+            effect_type: "videoEffect".into(),
+            folder: String::new(),
+        });
+        let item = catalog::ProjectItemEntry {
+            item_id: "clip".into(),
+            name: "Clip".into(),
+            bin_path: "Footage".into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+        let catalog = MediaCatalog {
+            peer_id: 7,
+            project_id: Some("project".into()),
+            sequence_id: Some("sequence".into()),
+            items: vec![item.clone()],
+        };
+        let mut state = AppState {
+            catalog: CatalogStore::new_with_defaults(),
+            matched_items: vec![effect, SearchResult::ProjectItem(item)],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: Some(catalog.clone()),
+            pending_placement: None,
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            is_visible: false,
+            shown_at: None,
+            saw_foreground: false,
+            previous_hwnd: 0,
+        };
+        show_palette(&ui, &mut state);
+        for index in [0, 1] {
+            apply_entry_at(index, &ui, &mut state, &bridge);
+            assert!(state.is_visible);
+            assert!(!ui.get_action_error().is_empty());
+        }
+
+        state.catalog.set_project_items(catalog.items.clone());
+        let requests = bridge.connect_test_peer(catalog);
+        apply_entry_at(0, &ui, &mut state, &bridge);
+        assert!(!state.is_visible);
+        assert!(ui.get_action_error().is_empty());
+        assert_eq!(state.pending_effects.len(), 1);
+        assert!(requests.try_recv().unwrap().contains("apply_effect"));
+
+        show_palette(&ui, &mut state);
+        ui.set_active_catalog("project".into());
+        ui.set_search_text("Clip".into());
+        refresh_results_ui(&ui, &mut state);
+        for success in [true, false] {
+            apply_entry_at(0, &ui, &mut state, &bridge);
+            assert!(!state.is_visible);
+            assert!(requests.try_recv().unwrap().contains("place_project_item"));
+            let request_id = state.pending_placement.as_ref().unwrap().request_id;
+            if success {
+                // A success reply must leave a manually reopened palette alone.
+                show_palette(&ui, &mut state);
+            }
+            state.previous_hwnd = 42;
+            update_placement(
+                &ui,
+                &mut state,
+                vec![PlacementResult {
+                    peer_id: 7,
+                    request_id,
+                    ok: success,
+                    message: if success { "Placed Clip" } else { "Timeline changed" }.into(),
+                }],
+                42,
+            );
+            assert!(state.is_visible);
+            assert_eq!(ui.get_search_text().as_str(), "Clip");
+            assert_eq!(state.recent_items.len(), 1);
+            state.previous_hwnd = 0;
+        }
+        assert_eq!(ui.get_action_error().as_str(), "Timeline changed");
+
+        state.previous_hwnd = 42;
+        hide_palette(&ui, &mut state);
+        show_action_error(&ui, &mut state, "Select a timeline clip.".into(), 99);
+        assert!(!state.is_visible);
+        show_palette(&ui, &mut state);
+        assert_eq!(ui.get_action_error().as_str(), "Select a timeline clip.");
     }
 
     #[test]

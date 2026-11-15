@@ -285,6 +285,18 @@ impl BridgeClients {
         Self::default()
     }
 
+    #[cfg(test)]
+    pub(crate) fn connect_test_peer(&self, catalog: MediaCatalog) -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel();
+        self.peers.lock().unwrap().push(Peer {
+            id: catalog.peer_id,
+            tx,
+            media: Some(catalog),
+            requested: 0,
+        });
+        rx
+    }
+
     pub fn media_catalog(&self) -> Result<Option<MediaCatalog>, &'static str> {
         let peers = self.peers.lock().unwrap();
         let mut catalogs = peers.iter().filter_map(|peer| peer.media.as_ref());
