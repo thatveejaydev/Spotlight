@@ -29,6 +29,11 @@ pub enum TrayAction {
 thread_local! {
     static TRAY_ACTIONS: RefCell<Vec<TrayAction>> = const { RefCell::new(Vec::new()) };
     static TRAY_CONNECTED: RefCell<bool> = const { RefCell::new(false) };
+    static HOTKEY_AVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub fn mark_hotkey_unavailable() {
+    HOTKEY_AVAILABLE.set(false);
 }
 
 pub fn poll_tray_action() -> Option<TrayAction> {
@@ -228,10 +233,19 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     } else {
         to_wide("Premiere Spotlight · Premiere Active")
     };
-    let open_label = to_wide("Open Spotlight (Ctrl+Space)");
+    let hotkey_available = HOTKEY_AVAILABLE.get();
+    let open_label = to_wide(if hotkey_available {
+        "Open Spotlight (Ctrl+Space)"
+    } else {
+        "Open Spotlight"
+    });
     let quit_label = to_wide("Quit Premiere Spotlight");
 
     AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, status_label.as_ptr());
+    if !hotkey_available {
+        let unavailable = to_wide("Ctrl+Space unavailable");
+        AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, unavailable.as_ptr());
+    }
     AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
     let open_flags = if unminimized_premiere_hwnd != 0 {

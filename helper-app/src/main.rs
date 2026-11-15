@@ -305,6 +305,7 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
 
+    ui.window().set_minimized(false);
     let our_hwnd_before = extract_window_hwnd(ui);
     win_focus::center_palette(our_hwnd_before, state.previous_hwnd);
 
@@ -339,9 +340,23 @@ fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
 fn toggle_palette_from_hotkey(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
     let fg_hwnd = win_focus::get_foreground_hwnd();
     let is_premiere_fg = win_focus::is_premiere_active_and_unminimized(fg_hwnd);
-    toggle_palette_from_hotkey_for_fg(ui, state, bridge, fg_hwnd, is_premiere_fg);
+    let our_hwnd = extract_window_hwnd(ui);
+    let palette_actively_open = if our_hwnd != 0 {
+        win_focus::is_palette_open_and_active(our_hwnd)
+    } else {
+        state.is_visible
+    };
+    toggle_palette_from_hotkey_with_focus(
+        ui,
+        state,
+        bridge,
+        fg_hwnd,
+        is_premiere_fg,
+        palette_actively_open,
+    );
 }
 
+#[cfg(test)]
 fn toggle_palette_from_hotkey_for_fg(
     ui: &SpotlightWindow,
     state: &mut AppState,
@@ -349,13 +364,35 @@ fn toggle_palette_from_hotkey_for_fg(
     fg_hwnd: isize,
     is_premiere_fg: bool,
 ) {
-    if state.is_visible {
+    toggle_palette_from_hotkey_with_focus(
+        ui,
+        state,
+        bridge,
+        fg_hwnd,
+        is_premiere_fg,
+        state.is_visible,
+    );
+}
+
+fn toggle_palette_from_hotkey_with_focus(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+    fg_hwnd: isize,
+    is_premiere_fg: bool,
+    palette_actively_open: bool,
+) {
+    if state.is_visible && palette_actively_open {
         hide_and_restore_focus(ui, state);
         return;
     }
     if is_premiere_fg {
         state.previous_hwnd = fg_hwnd;
         center_and_show(ui, state, bridge);
+        return;
+    }
+    if state.is_visible {
+        hide_and_restore_focus(ui, state);
     }
 }
 
@@ -452,6 +489,7 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(windows)]
     {
         use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+        use slint::winit_030::winit::window::WindowButtons;
 
         // Set the native style at creation so Windows never maps a captioned palette.
         slint::BackendSelector::new()
@@ -461,11 +499,14 @@ fn main() -> Result<(), slint::PlatformError> {
                     .with_decorations(false)
                     .with_undecorated_shadow(false)
                     .with_transparent(false)
+                    .with_resizable(false)
+                    .with_enabled_buttons(WindowButtons::empty())
                     .with_skip_taskbar(true)
             })
             .select()?;
     }
     let ui = SpotlightWindow::new()?;
+    win_focus::init_palette_window(extract_window_hwnd(&ui));
 
     // Create native Windows System Tray icon (no taskbar icon)
     let tray = Rc::new(RefCell::new(SystemTray::new()));
@@ -636,12 +677,28 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        ui.window().on_close_requested(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                hide_and_restore_focus(&ui, &mut st);
+            }
+            slint::CloseRequestResponse::KeepWindowShown
+        });
+    }
 
-    // Prepare global hotkey manager (Ctrl + Space is registered dynamically ONLY when Premiere Pro is focused & unminimized)
+    // Keep Ctrl+Space registered across minimize/restore. The handler checks
+    // the current foreground window before opening Spotlight.
     let hotkey_manager =
         GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
     let ctrl_space = HotKey::new(Some(Modifiers::CONTROL), Code::Space);
     let ctrl_space_id = ctrl_space.id();
+    if let Err(error) = hotkey_manager.register(ctrl_space) {
+        eprintln!("Could not register Ctrl+Space: {error}");
+        tray::mark_hotkey_unavailable();
+    }
     let hotkey_pending = Arc::new(AtomicBool::new(false));
     {
         let ui_weak = ui.as_weak();
@@ -677,9 +734,57 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }));
     }
-    let mut hotkey_registered = false;
+    let sync_palette_focus = {
+        let state_ref = state.clone();
+        Rc::new(move |ui: &SpotlightWindow| {
+            let our_hwnd = extract_window_hwnd(ui);
+            win_focus::init_palette_window(our_hwnd);
+            let is_our_window = win_focus::is_palette_open_and_active(our_hwnd);
 
-    // Poll focus state, hotkey registration, and system tray actions on a 20ms timer
+            let focus_outcome = {
+                let mut st = state_ref.borrow_mut();
+                evaluate_palette_focus(&mut st, is_our_window, Instant::now())
+            };
+            match focus_outcome {
+                FocusOutcome::KeepVisible => {}
+                FocusOutcome::RetryForeground => {
+                    win_focus::force_foreground(our_hwnd);
+                }
+                FocusOutcome::HideLostFocus => {
+                    let _ = ui.hide();
+                }
+            }
+        })
+    };
+    {
+        let ui_weak = ui.as_weak();
+        let sync_fn = sync_palette_focus.clone();
+        SYNC_FOCUS_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    sync_fn(&ui);
+                }
+            }));
+        });
+    }
+    let _foreground_hook = win_focus::ForegroundHook::install(|| {
+        let _ = slint::invoke_from_event_loop(|| {
+            SYNC_FOCUS_DISPATCH.with(|slot| {
+                if let Some(callback) = slot.borrow_mut().as_mut() {
+                    callback();
+                }
+            });
+        });
+    });
+    let _ = slint::invoke_from_event_loop(|| {
+        SYNC_FOCUS_DISPATCH.with(|slot| {
+            if let Some(callback) = slot.borrow_mut().as_mut() {
+                callback();
+            }
+        });
+    });
+
+    // Poll focus state and system tray actions on a 20ms timer.
     let timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
@@ -809,60 +914,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
 
-            // 5. Close Spotlight if the user clicked outside it (including onto Premiere Pro) or switched apps
-            let fg_hwnd = win_focus::get_foreground_hwnd();
-            let our_hwnd = extract_window_hwnd(&ui);
-            let is_our_window = our_hwnd != 0 && fg_hwnd == our_hwnd;
-            let is_premiere_fg = win_focus::is_premiere_active_and_unminimized(fg_hwnd);
-
-            let focus_outcome = {
-                let mut st = state_ref.borrow_mut();
-                evaluate_palette_focus(&mut st, is_our_window, Instant::now())
-            };
-            match focus_outcome {
-                FocusOutcome::KeepVisible => {}
-                FocusOutcome::RetryForeground => {
-                    win_focus::force_foreground(our_hwnd);
-                }
-                FocusOutcome::HideLostFocus => {
-                    let _ = ui.hide();
-                }
-            }
-
-            let should_enable_hotkey = {
-                let st = state_ref.borrow();
-                is_premiere_fg || st.is_visible
-            };
-
-            if should_enable_hotkey {
-                if !hotkey_registered {
-                    match hotkey_manager.register(ctrl_space) {
-                        Ok(()) => {
-                            hotkey_registered = true;
-                        }
-                        Err(global_hotkey::Error::AlreadyRegistered(_)) => {
-                            if hotkey_manager.unregister(ctrl_space).is_ok()
-                                && hotkey_manager.register(ctrl_space).is_ok()
-                            {
-                                hotkey_registered = true;
-                            }
-                        }
-                        Err(_) => {}
-                    }
-                }
-            } else {
-                if hotkey_registered {
-                    let _ = hotkey_manager.unregister(ctrl_space);
-                    hotkey_registered = false;
-                }
-                hotkey_pending.store(false, Ordering::Release);
-            }
-
-            // 6. Fallback dispatch if a Ctrl + Space press arrived before the wake callback ran
-            if should_enable_hotkey && hotkey_pending.swap(false, Ordering::AcqRel) {
+            // 5. Dispatch the shortcut if the wake callback hasn't handled it yet.
+            if hotkey_pending.swap(false, Ordering::AcqRel) {
                 let mut st = state_ref.borrow_mut();
                 toggle_palette_from_hotkey(&ui, &mut st, &bridge_ref);
             }
+            // 6. Dismiss Spotlight when it loses focus.
+            sync_palette_focus(&ui);
         });
     }
 
@@ -879,6 +937,7 @@ thread_local! {
     static SHOW_WINDOW_QUEUE: RefCell<bool> = const { RefCell::new(false) };
     static BRIDGE_STATUS_QUEUE: RefCell<Option<bool>> = const { RefCell::new(None) };
     static HOTKEY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    static SYNC_FOCUS_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1146,5 +1205,24 @@ mod tests {
         assert!(state.is_visible);
         assert_eq!(state.previous_hwnd, 4242);
         assert!(state.shown_at.is_some());
+
+        // If the OS minimized/hid the palette (palette_actively_open = false) while Premiere is active,
+        // one toggle must reopen and re-anchor to Premiere rather than silently hiding.
+        state.previous_hwnd = 1111;
+        state.shown_at = None;
+        toggle_palette_from_hotkey_with_focus(&ui, &mut state, &bridge, 4242, true, false);
+        assert!(state.is_visible);
+        assert_eq!(state.previous_hwnd, 4242);
+        assert!(state.shown_at.is_some());
+
+        // Pressing toggle while the palette is actually visible and active closes it cleanly.
+        toggle_palette_from_hotkey_with_focus(&ui, &mut state, &bridge, 9999, false, true);
+        assert!(!state.is_visible);
+        assert!(state.shown_at.is_none());
+
+        // Stale is_visible while Premiere is inactive clears state cleanly.
+        state.is_visible = true;
+        toggle_palette_from_hotkey_with_focus(&ui, &mut state, &bridge, 9999, false, false);
+        assert!(!state.is_visible);
     }
 }

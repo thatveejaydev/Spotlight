@@ -14,6 +14,7 @@ use windows_sys::Win32::{
         QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     },
     UI::{
+        Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
         HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{
             keybd_event, GetAsyncKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
@@ -21,12 +22,15 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             AllowSetForegroundWindow, BringWindowToTop, CallWindowProcW, DefWindowProcW,
             EnumWindows, GetAncestor, GetForegroundWindow, GetWindowLongW, GetWindowRect,
-            GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+            GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
             SetForegroundWindow, SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
-            GA_ROOTOWNER, GWLP_WNDPROC, GWL_STYLE, HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCACTIVATE,
-            WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WNDPROC, WS_CAPTION,
-            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+            GA_ROOTOWNER, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SC_MAXIMIZE,
+            SC_MINIMIZE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_NCACTIVATE,
+            WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND, WNDPROC,
+            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -228,24 +232,68 @@ pub fn restore_foreground(hwnd: isize) {
 pub fn restore_foreground(_hwnd: isize) {}
 
 #[cfg(windows)]
+unsafe fn ensure_unminimized_and_unmaximized(target: HWND) {
+    if IsIconic(target) != 0 || IsZoomed(target) != 0 {
+        ShowWindow(target, SW_RESTORE);
+    }
+}
+
+#[cfg(windows)]
+pub fn is_window_visible_and_unminimized(hwnd: isize) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe {
+        let target = hwnd as HWND;
+        IsWindowVisible(target) != 0 && IsIconic(target) == 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_window_visible_and_unminimized(_hwnd: isize) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub fn is_palette_open_and_active(hwnd: isize) -> bool {
+    if !is_window_visible_and_unminimized(hwnd) {
+        return false;
+    }
+    unsafe { GetForegroundWindow() == hwnd as HWND }
+}
+
+#[cfg(not(windows))]
+pub fn is_palette_open_and_active(_hwnd: isize) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub fn init_palette_window(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        configure_palette_frame(hwnd as HWND);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn init_palette_window(_hwnd: isize) {}
+
+#[cfg(windows)]
 pub fn ensure_palette_topmost(hwnd: isize) {
     if hwnd == 0 {
         return;
     }
     unsafe {
         let target = hwnd as HWND;
-        if IsIconic(target) != 0 {
-            ShowWindow(target, SW_RESTORE);
+        ensure_unminimized_and_unmaximized(target);
+        // Include SWP_SHOWWINDOW if the OS window was hidden behind Slint's visibility cache.
+        let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        if IsWindowVisible(target) == 0 {
+            flags |= SWP_SHOWWINDOW;
         }
-        SetWindowPos(
-            target,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, flags);
     }
 }
 
@@ -264,6 +312,84 @@ const FRAMELESS_STRIP_MASK: u32 =
 thread_local! {
     static PALETTE_FRAME: std::cell::Cell<(HWND, WNDPROC, bool)> =
         const { std::cell::Cell::new((std::ptr::null_mut(), None, false)) };
+    static HOOK_CALLBACK: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(windows)]
+pub struct ForegroundHook {
+    hooks: Vec<HWINEVENTHOOK>,
+}
+
+#[cfg(windows)]
+impl ForegroundHook {
+    /// Installs out-of-context WinEvent hooks for foreground and minimize/restore transitions.
+    pub fn install<F: Fn() + 'static>(on_change: F) -> Self {
+        HOOK_CALLBACK.with(|slot| {
+            *slot.borrow_mut() = Some(std::rc::Rc::new(on_change));
+        });
+        let mut hooks = Vec::with_capacity(2);
+        unsafe {
+            for (min_ev, max_ev) in [
+                (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+                (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+            ] {
+                let hook = SetWinEventHook(
+                    min_ev,
+                    max_ev,
+                    std::ptr::null_mut(),
+                    Some(winevent_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+                if !hook.is_null() {
+                    hooks.push(hook);
+                }
+            }
+        }
+        Self { hooks }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ForegroundHook {
+    fn drop(&mut self) {
+        unsafe {
+            for hook in self.hooks.drain(..) {
+                UnhookWinEvent(hook);
+            }
+        }
+        HOOK_CALLBACK.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(not(windows))]
+pub struct ForegroundHook;
+
+#[cfg(not(windows))]
+impl ForegroundHook {
+    pub fn install<F: Fn() + 'static>(_on_change: F) -> Self {
+        Self
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn winevent_proc(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _id_event_thread: u32,
+    _event_time: u32,
+) {
+    let cb = HOOK_CALLBACK.with(|slot| slot.borrow().clone());
+    if let Some(cb) = cb {
+        cb();
+    }
 }
 
 #[cfg(windows)]
@@ -282,6 +408,20 @@ unsafe extern "system" fn palette_frame(
         WM_STYLECHANGING if wparam as i32 == GWL_STYLE => {
             let styles = &mut *(lparam as *mut STYLESTRUCT);
             styles.styleNew &= !FRAMELESS_STRIP_MASK;
+            0
+        }
+        // Keep the palette as a tool window so it stays out of Alt+Tab and app minimize/maximize.
+        WM_STYLECHANGING if wparam as i32 == GWL_EXSTYLE => {
+            let styles = &mut *(lparam as *mut STYLESTRUCT);
+            styles.styleNew = (styles.styleNew | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+            0
+        }
+        WM_SYSCOMMAND
+            if matches!(
+                (wparam & 0xFFF0) as u32,
+                SC_MINIMIZE | SC_MAXIMIZE
+            ) =>
+        {
             0
         }
         // Use the entire window for Slint and suppress classic Windows non-client caption painting.
@@ -312,6 +452,11 @@ unsafe fn configure_palette_frame(hwnd: HWND) -> bool {
     if stripped != style {
         SetWindowLongW(hwnd, GWL_STYLE, stripped as i32);
     }
+    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    let tool_ex_style = (ex_style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+    if tool_ex_style != ex_style {
+        SetWindowLongW(hwnd, GWL_EXSTYLE, tool_ex_style as i32);
+    }
     let set_attribute = |attribute: i32, value: u32| {
         DwmSetWindowAttribute(hwnd, attribute as u32, (&value as *const u32).cast(), 4)
     };
@@ -339,9 +484,7 @@ pub fn center_palette(hwnd: isize, premiere_hwnd: isize) {
     }
     unsafe {
         let hwnd = hwnd as HWND;
-        if IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_RESTORE);
-        }
+        ensure_unminimized_and_unmaximized(hwnd);
         let native_rounding = configure_palette_frame(hwnd);
         let monitor = MonitorFromWindow(premiere_hwnd as HWND, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFO = std::mem::zeroed();
