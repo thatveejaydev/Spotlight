@@ -2935,28 +2935,21 @@ mod tests {
             }
         });
 
-        // Click the lower-right gear icon (around x=594, y=389 inside 620x407 footer).
-        let gear_pos = LogicalPosition::new(594., 389.);
-        window.dispatch_event(WindowEvent::PointerPressed {
-            position: gear_pos,
-            button: PointerEventButton::Left,
-        });
-        window.dispatch_event(WindowEvent::PointerReleased {
-            position: gear_pos,
-            button: PointerEventButton::Left,
-        });
+        let click = |x, y| {
+            let position = LogicalPosition::new(x, y);
+            window.dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            window.dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+        };
+        click(594., 389.);
         assert!(ui.get_settings_open());
 
-        // Clicking Launch Hotkey shortcut box enters recording mode and Esc cancels recording without leaving Settings.
-        let recorder_pos = LogicalPosition::new(490., 104.);
-        window.dispatch_event(WindowEvent::PointerPressed {
-            position: recorder_pos,
-            button: PointerEventButton::Left,
-        });
-        window.dispatch_event(WindowEvent::PointerReleased {
-            position: recorder_pos,
-            button: PointerEventButton::Left,
-        });
+        click(490., 142.);
         assert!(ui.get_recording_hotkey());
         assert_eq!(ui.get_recording_target().as_str(), "launch");
 
@@ -2976,6 +2969,22 @@ mod tests {
             &*captured.borrow(),
             &[("launch".to_string(), "Alt+Space".to_string())]
         );
+
+        // About cancels recording and hides the shortcut controls.
+        click(155., 72.);
+        assert!(!ui.get_recording_hotkey());
+        click(490., 142.);
+        assert!(!ui.get_recording_hotkey());
+        assert!(ui.get_settings_open());
+
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::LeftArrow.into(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: Key::LeftArrow.into(),
+        });
+        click(490., 142.);
+        assert!(ui.get_recording_hotkey());
 
         // Esc exits recording first, keeping Settings open; second Esc exits Settings without closing Spotlight.
         window.dispatch_event(WindowEvent::KeyPressed {

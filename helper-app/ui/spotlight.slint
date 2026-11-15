@@ -435,6 +435,7 @@ export component SpotlightWindow inherits Window {
     in-out property <string> hotkey-label: "Ctrl+Space";
     in-out property <string> status-message: "Ready · " + root.hotkey-label;
     in-out property <bool> settings-open: false;
+    private property <int> settings-tab-index: 0;
     in-out property <bool> recording-hotkey: false;
     in-out property <string> recording-target: "";
     in-out property <bool> open-effect-controls-default: false;
@@ -506,8 +507,18 @@ export component SpotlightWindow inherits Window {
     }
 
     changed settings-open => {
-        if (root.settings-open && !root.recording-hotkey) {
-            settings-focus.focus();
+        if (root.settings-open) {
+            root.settings-tab-index = 0;
+            if (!root.recording-hotkey) {
+                settings-focus.focus();
+            }
+        }
+    }
+
+    function select-settings-tab(index: int) {
+        if (root.settings-tab-index != index) {
+            root.set-recording(false);
+            root.settings-tab-index = index;
         }
     }
 
@@ -551,6 +562,12 @@ export component SpotlightWindow inherits Window {
                 }
                 if (event.text == Key.F12 && !root.recording-hotkey) {
                     root.toggle-debug-log();
+                    return accept;
+                }
+                if (!root.recording-hotkey && !event.modifiers.control && !event.modifiers.alt
+                    && !event.modifiers.shift && !event.modifiers.meta
+                    && (event.text == Key.LeftArrow || event.text == Key.RightArrow)) {
+                    root.select-settings-tab(event.text == Key.LeftArrow ? 0 : 1);
                     return accept;
                 }
                 return reject;
@@ -632,6 +649,7 @@ export component SpotlightWindow inherits Window {
                             color: #f3f4f8;
                         }
                         Text {
+                            visible: root.settings-tab-index == 0;
                             text: "Hotkeys and preferences apply immediately";
                             font-size: 11px;
                             color: #8b90aa;
@@ -844,7 +862,7 @@ export component SpotlightWindow inherits Window {
                 background: #12131a;
                 clip: true;
 
-                // Scrollable Settings Panel
+                // Settings tabs and their content
                 Rectangle {
                     visible: root.settings-open;
                     width: 100%;
@@ -886,7 +904,49 @@ export component SpotlightWindow inherits Window {
                         padding: 0px;
                         spacing: 0px;
 
-                        if root.settings-feedback != "" : Rectangle {
+                        Rectangle {
+                            height: 38px;
+                            background: #171822;
+                            accessible-role: tab-list;
+                            accessible-label: "Settings sections";
+                            accessible-item-count: 2;
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-top: 5px;
+                                padding-bottom: 6px;
+                                spacing: 6px;
+                                alignment: start;
+
+                                for title[index] in ["Shortcuts", "About"] : Rectangle {
+                                    width: 88px;
+                                    border-radius: 6px;
+                                    background: index == root.settings-tab-index ? #292d49
+                                        : (tab-touch.has-hover ? #222538 : transparent);
+                                    border-width: index == root.settings-tab-index ? 1px : 0px;
+                                    border-color: #656bba;
+                                    accessible-role: tab;
+                                    accessible-label: title;
+                                    accessible-item-index: index;
+                                    accessible-item-selectable: true;
+                                    accessible-item-selected: index == root.settings-tab-index;
+                                    accessible-action-default => { root.select-settings-tab(index); }
+                                    Text {
+                                        text: title;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        color: index == root.settings-tab-index ? #e0e2ff : #a9adc3;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    tab-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.select-settings-tab(index); }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.settings-tab-index == 0 && root.settings-feedback != "" : Rectangle {
                             background: root.settings-feedback-error ? #3b1d24 : #163028;
                             HorizontalLayout {
                                 padding-left: 14px;
@@ -902,7 +962,7 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        Flickable {
+                        if root.settings-tab-index == 0 : Flickable {
                             vertical-stretch: 1;
                             content-height: settings-list.preferred-height;
                             interactive: true;
