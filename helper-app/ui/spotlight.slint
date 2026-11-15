@@ -6,6 +6,47 @@ export struct EffectItemUI {
     badge-fg: color,
 }
 
+export component ErrorToastWindow inherits Window {
+    title: "Premiere Spotlight error";
+    no-frame: true;
+    always-on-top: true;
+    width: 304px;
+    height: toast-height;
+    background: #242427;
+
+    out property <length> toast-height: 54px;
+    in property <string> message;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-width: 1px;
+        border-color: #604249;
+
+        Rectangle {
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: #ca7c85;
+        }
+
+        Text {
+            x: 26px;
+            y: 4px;
+            width: parent.width - 38px;
+            height: parent.height - 8px;
+            text: root.message;
+            font-size: 13px;
+            color: #e2e2e5;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+}
+
 export component SpotlightWindow inherits Window {
     title: "";
     no-frame: true;
@@ -25,7 +66,6 @@ export component SpotlightWindow inherits Window {
     in-out property <bool> bridge-connected: false;
     in-out property <int> total-matches: 0;
     in-out property <string> status-message: "Ready · Ctrl+Space";
-    in property <string> action-error: "";
     in property <[EffectItemUI]> results: [];
 
     callback search-edited(string);
@@ -312,7 +352,7 @@ export component SpotlightWindow inherits Window {
                             horizontal-stretch: 1;
                             alignment: center;
                             Text {
-                                text: root.action-error == "" ? root.status-message : root.action-error;
+                                text: root.status-message;
                                 font-size: 11px;
                                 color: #8b90aa;
                                 wrap: word-wrap;

@@ -2,12 +2,14 @@
 
 mod bridge;
 mod catalog;
+mod error_toast;
 mod installer;
 mod tray;
 mod win_focus;
 
 use bridge::{ApplyResult, BridgeClients, BridgeEvent, MediaCatalog, PlacementResult};
 use catalog::{CatalogStore, EffectEntry, ProjectItemKind, SearchResult};
+use error_toast::ErrorToast;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -282,17 +284,7 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
 }
 
 fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
-    #[cfg(windows)]
-    {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let win_handle = ui.window().window_handle();
-        if let Ok(handle) = win_handle.window_handle() {
-            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                return win32.hwnd.get();
-            }
-        }
-    }
-    0
+    win_focus::window_hwnd(ui.window())
 }
 
 fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
@@ -350,27 +342,12 @@ fn hide_and_restore_focus(ui: &SpotlightWindow, state: &mut AppState) {
     hide_palette(ui, state);
 }
 
-fn show_action_error(
-    ui: &SpotlightWindow,
-    state: &mut AppState,
-    message: SharedString,
-    foreground_hwnd: isize,
-) {
-    ui.set_action_error(message);
-    if !state.is_visible && foreground_hwnd != 0 && foreground_hwnd == state.previous_hwnd {
-        show_palette(ui, state);
-    }
-}
-
 fn update_placement(
     ui: &SpotlightWindow,
     state: &mut AppState,
     results: Vec<PlacementResult>,
-    foreground_hwnd: isize,
-) {
-    let Some(pending) = &state.pending_placement else {
-        return;
-    };
+) -> Option<SharedString> {
+    let pending = state.pending_placement.as_ref()?;
     if let Some(result) = results.into_iter().find(|result| {
         result.peer_id == pending.peer_id && result.request_id == pending.request_id
     }) {
@@ -382,17 +359,17 @@ fn update_placement(
             }
             ui.set_status_message(result.message.into());
         } else {
-            show_action_error(ui, state, result.message.into(), foreground_hwnd);
+            return Some(if result.message.is_empty() {
+                "Premiere could not place the media.".into()
+            } else {
+                result.message.into()
+            });
         }
     } else if Instant::now() >= pending.deadline {
         state.pending_placement = None;
-        show_action_error(
-            ui,
-            state,
-            "Placement outcome unknown. Check the timeline before retrying.".into(),
-            foreground_hwnd,
-        );
+        return Some("Placement outcome unknown. Check the timeline before retrying.".into());
     }
+    None
 }
 
 fn toggle_palette_from_hotkey(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
@@ -486,19 +463,18 @@ fn apply_entry_at(
     ui: &SpotlightWindow,
     state: &mut AppState,
     bridge: &BridgeClients,
-) {
+) -> Result<(), SharedString> {
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
-        return;
+        return Ok(());
     };
     if state.pending_placement.is_some() {
         ui.set_status_message("A media placement is already in progress.".into());
-        return;
+        return Ok(());
     }
     match chosen {
         SearchResult::Effect(entry) => {
             let Some((request_id, recipients)) = bridge.send_apply(&entry) else {
-                ui.set_action_error("Premiere effect bridge disconnected.".into());
-                return;
+                return Err("Premiere effect bridge disconnected.".into());
             };
             ui.set_status_message(format!("Applying {}…", entry.name).into());
             state.pending_effects.insert(
@@ -512,16 +488,11 @@ fn apply_entry_at(
         }
         SearchResult::ProjectItem(entry) => {
             let Some(catalog) = &state.media_catalog else {
-                ui.set_action_error("Project media changed. Search again.".into());
-                return;
+                return Err("Project media changed. Search again.".into());
             };
-            let request_id = match bridge.place_project_item(catalog, entry.item_id.clone()) {
-                Ok(request_id) => request_id,
-                Err(message) => {
-                    ui.set_action_error(message.into());
-                    return;
-                }
-            };
+            let request_id = bridge
+                .place_project_item(catalog, entry.item_id.clone())
+                .map_err(SharedString::from)?;
             ui.set_status_message(format!("Placing {}…", entry.name).into());
             state.pending_placement = Some(PendingPlacement {
                 peer_id: catalog.peer_id,
@@ -535,9 +506,9 @@ fn apply_entry_at(
         }
     }
     // Hide before transferring focus, since Premiere may already be processing the edit.
-    ui.set_action_error(SharedString::default());
     hide_palette(ui, state);
     restore_premiere_focus(state.previous_hwnd);
+    Ok(())
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -558,6 +529,11 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::BackendSelector::new()
             .backend_name("winit".into())
             .with_winit_window_attributes_hook(|attributes| {
+                let attributes = if error_toast::CREATING_TOAST.with(|flag| flag.get()) {
+                    attributes.with_active(false)
+                } else {
+                    attributes
+                };
                 attributes
                     .with_decorations(false)
                     .with_undecorated_shadow(false)
@@ -569,6 +545,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .select()?;
     }
     let ui = SpotlightWindow::new()?;
+    let error_toast = Rc::new(ErrorToast::default());
     win_focus::init_palette_window(extract_window_hwnd(&ui));
 
     // Create native Windows System Tray icon (no taskbar icon)
@@ -698,11 +675,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let bridge_ref = bridge.clone();
+        let error_toast = error_toast.clone();
         ui.on_activate_selected(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.selected_abs_index;
-                apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref);
+                if let Err(message) = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref) {
+                    error_toast.show(message, st.previous_hwnd);
+                }
             }
         });
     }
@@ -712,12 +692,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let bridge_ref = bridge.clone();
+        let error_toast = error_toast.clone();
         ui.on_activate_index(move |rel_idx| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
-                apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref);
+                if let Err(message) = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref) {
+                    error_toast.show(message, st.previous_hwnd);
+                }
             }
         });
     }
@@ -871,14 +854,16 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             });
             if MEDIA_DIRTY.with(|dirty| dirty.replace(false)) {
+                let mut st = state_ref.borrow_mut();
                 let catalog = match bridge_ref.media_catalog() {
                     Ok(catalog) => catalog,
                     Err(message) => {
-                        ui.set_status_message(message.into());
+                        if st.is_visible {
+                            error_toast.show(message.into(), st.previous_hwnd);
+                        }
                         None
                     }
                 };
-                let mut st = state_ref.borrow_mut();
                 let preserve_media =
                     st.media_catalog
                         .as_ref()
@@ -906,9 +891,9 @@ fn main() -> Result<(), slint::PlatformError> {
                         let message = if result.message.is_empty() {
                             "Premiere could not apply the effect.".into()
                         } else {
-                            format!("Error: {}", result.message).into()
+                            result.message.into()
                         };
-                        show_action_error(&ui, &mut st, message, win_focus::get_foreground_hwnd());
+                        error_toast.show(message, st.previous_hwnd);
                     } else if !result.message.is_empty() {
                         ui.set_status_message(format!("Premiere: {}", result.message).into());
                     }
@@ -918,8 +903,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 st.pending_effects.retain(|_, pending| Instant::now() < pending.deadline);
                 let results = PLACEMENT_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-                if st.pending_placement.is_some() {
-                    update_placement(&ui, &mut st, results, win_focus::get_foreground_hwnd());
+                if let Some(message) = update_placement(&ui, &mut st, results) {
+                    error_toast.show(message, st.previous_hwnd);
                 }
             }
 
@@ -1007,7 +992,26 @@ mod tests {
     }
 
     #[test]
-    fn accepted_actions_hide_immediately_and_errors_keep_the_palette_available() {
+    fn error_toast_renders_a_separate_notification() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let (width, height) = (304, 54);
+        adapter.set_size(PhysicalSize::new(width as u32, height as u32));
+        let toast = Rc::new(ErrorToast::default());
+        toast.show("Select at least one timeline clip first.".into(), 0);
+
+        let mut pixels = vec![Rgb8Pixel::default(); width * height];
+        assert!(adapter.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        }));
+        assert_eq!(pixels[width * (height / 2) + 15].r, 0xca);
+        assert!(pixels.chunks_exact(width).any(|row| {
+            row[26..width - 12].iter().any(|pixel| pixel.g > 160)
+        }));
+    }
+
+    #[test]
+    fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
         let ui = SpotlightWindow::new().unwrap();
@@ -1047,16 +1051,15 @@ mod tests {
         };
         show_palette(&ui, &mut state);
         for index in [0, 1] {
-            apply_entry_at(index, &ui, &mut state, &bridge);
+            let message = apply_entry_at(index, &ui, &mut state, &bridge).unwrap_err();
             assert!(state.is_visible);
-            assert!(!ui.get_action_error().is_empty());
+            assert!(message.contains("bridge disconnected"));
         }
 
         state.catalog.set_project_items(catalog.items.clone());
         let requests = bridge.connect_test_peer(catalog);
-        apply_entry_at(0, &ui, &mut state, &bridge);
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
         assert!(!state.is_visible);
-        assert!(ui.get_action_error().is_empty());
         assert_eq!(state.pending_effects.len(), 1);
         assert!(requests.try_recv().unwrap().contains("apply_effect"));
 
@@ -1065,7 +1068,7 @@ mod tests {
         ui.set_search_text("Clip".into());
         refresh_results_ui(&ui, &mut state);
         for success in [true, false] {
-            apply_entry_at(0, &ui, &mut state, &bridge);
+            apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
             assert!(!state.is_visible);
             assert!(requests.try_recv().unwrap().contains("place_project_item"));
             let request_id = state.pending_placement.as_ref().unwrap().request_id;
@@ -1073,8 +1076,7 @@ mod tests {
                 // A success reply must leave a manually reopened palette alone.
                 show_palette(&ui, &mut state);
             }
-            state.previous_hwnd = 42;
-            update_placement(
+            let error = update_placement(
                 &ui,
                 &mut state,
                 vec![PlacementResult {
@@ -1083,21 +1085,15 @@ mod tests {
                     ok: success,
                     message: if success { "Placed Clip" } else { "Timeline changed" }.into(),
                 }],
-                42,
             );
-            assert!(state.is_visible);
+            assert_eq!(state.is_visible, success);
+            assert_eq!(
+                error.as_deref(),
+                if success { None } else { Some("Timeline changed") },
+            );
             assert_eq!(ui.get_search_text().as_str(), "Clip");
             assert_eq!(state.recent_items.len(), 1);
-            state.previous_hwnd = 0;
         }
-        assert_eq!(ui.get_action_error().as_str(), "Timeline changed");
-
-        state.previous_hwnd = 42;
-        hide_palette(&ui, &mut state);
-        show_action_error(&ui, &mut state, "Select a timeline clip.".into(), 99);
-        assert!(!state.is_visible);
-        show_palette(&ui, &mut state);
-        assert_eq!(ui.get_action_error().as_str(), "Select a timeline clip.");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use windows_sys::Win32::{
     },
     UI::{
         Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
-        HiDpi::GetDpiForWindow,
+        HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
         Input::KeyboardAndMouse::{
             keybd_event, GetAsyncKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
         },
@@ -29,8 +29,8 @@ use windows_sys::Win32::{
             SC_MINIMIZE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
             SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_NCACTIVATE,
             WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND, WNDPROC,
-            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-            WS_SYSMENU, WS_THICKFRAME,
+            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+            WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -528,3 +528,70 @@ pub fn center_palette(hwnd: isize, premiere_hwnd: isize) {
 
 #[cfg(not(windows))]
 pub fn center_palette(_hwnd: isize, _premiere_hwnd: isize) {}
+
+#[cfg(windows)]
+pub fn error_toast_position(
+    premiere_hwnd: isize,
+    logical_height: f32,
+) -> Option<slint::PhysicalPosition> {
+    unsafe {
+        let anchor = if premiere_hwnd == 0 {
+            GetForegroundWindow()
+        } else {
+            premiere_hwnd as HWND
+        };
+        let monitor = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return None;
+        }
+        let (mut dpi_x, mut dpi_y) = (96, 96);
+        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) < 0 {
+            (dpi_x, dpi_y) = (96, 96);
+        }
+        let margin_x = (20.0 * dpi_x as f32 / 96.0).round() as i32;
+        let bottom_offset = ((logical_height + 20.0) * dpi_y as f32 / 96.0).round() as i32;
+        Some(slint::PhysicalPosition::new(
+            info.rcWork.left + margin_x,
+            (info.rcWork.bottom - bottom_offset).max(info.rcWork.top),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn error_toast_position(
+    _premiere_hwnd: isize,
+    _logical_height: f32,
+) -> Option<slint::PhysicalPosition> {
+    None
+}
+
+#[cfg(windows)]
+pub fn keep_toast_inactive(window: &slint::Window) {
+    let hwnd = window_hwnd(window) as HWND;
+    if !hwnd.is_null() {
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let style = (style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, style as i32);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn keep_toast_inactive(_window: &slint::Window) {}
+
+pub fn window_hwnd(_window: &slint::Window) -> isize {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let win_handle = _window.window_handle();
+        if let Ok(handle) = win_handle.window_handle() {
+            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                return win32.hwnd.get();
+            }
+        }
+    }
+    0
+}
