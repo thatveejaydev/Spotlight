@@ -43,6 +43,13 @@ pub enum IncomingPluginMessage {
         ok: bool,
         message: String,
     },
+    #[serde(rename = "source_monitor_ack", rename_all = "camelCase")]
+    SourceMonitorAck {
+        request_id: u64,
+        ok: bool,
+        #[serde(default)]
+        message: String,
+    },
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "show_window")]
@@ -66,6 +73,12 @@ pub enum OutgoingHelperMessage {
         request_id: u64,
         project_id: String,
         sequence_id: String,
+        item_id: String,
+    },
+    #[serde(rename = "open_in_source_monitor", rename_all = "camelCase")]
+    OpenInSourceMonitor {
+        request_id: u64,
+        project_id: String,
         item_id: String,
     },
     #[serde(rename = "apply_effect")]
@@ -219,6 +232,7 @@ pub enum BridgeEvent {
     ApplyResult(ApplyResult),
     ProjectItemsChanged,
     PlacementResult(PlacementResult),
+    SourceMonitorResult(PlacementResult),
     ShowWindowRequested,
 }
 
@@ -366,6 +380,44 @@ impl BridgeClients {
         Ok(request_id)
     }
 
+    pub fn open_in_source_monitor(
+        &self,
+        catalog: &MediaCatalog,
+        item_id: String,
+    ) -> Result<u64, &'static str> {
+        let peers = self.peers.lock().unwrap();
+        let mut media_peers = peers.iter().filter(|peer| peer.media.is_some());
+        let Some(peer) = media_peers.next() else {
+            return Err("Premiere media bridge disconnected.");
+        };
+        if media_peers.next().is_some() {
+            return Err("Close the other Premiere session before opening media.");
+        }
+        let current = peer.media.as_ref().unwrap();
+        if peer.id != catalog.peer_id || current.project_id != catalog.project_id {
+            return Err("Project media changed. Search again.");
+        }
+        let entry = current.items.iter().find(|entry| entry.item_id == item_id)
+            .ok_or("Project media changed. Search again.")?;
+        if let Some(message) = entry.source_monitor_error() {
+            return Err(message);
+        }
+        let project_id = current
+            .project_id
+            .clone()
+            .ok_or("Open a Premiere project first.")?;
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let msg = OutgoingHelperMessage::OpenInSourceMonitor {
+            request_id,
+            project_id,
+            item_id,
+        };
+        peer.tx
+            .send(serde_json::to_string(&msg).unwrap())
+            .map_err(|_| "Premiere media bridge disconnected.")?;
+        Ok(request_id)
+    }
+
     pub fn send_apply(&self, entry: &EffectEntry) -> Option<(u64, Vec<usize>)> {
         let (video_transition_duration, audio_transition_duration) =
             read_premiere_transition_prefs();
@@ -473,6 +525,7 @@ where
                             IncomingPluginMessage::ShowWindow
                                 | IncomingPluginMessage::Ack { .. }
                                 | IncomingPluginMessage::PlacementAck { .. }
+                                | IncomingPluginMessage::SourceMonitorAck { .. }
                         )
                     {
                         is_plugin_client = true;
@@ -514,6 +567,20 @@ where
                         } => {
                             if is_plugin_client {
                                 cb(BridgeEvent::PlacementResult(PlacementResult {
+                                    peer_id,
+                                    request_id,
+                                    ok,
+                                    message,
+                                }));
+                            }
+                        }
+                        IncomingPluginMessage::SourceMonitorAck {
+                            request_id,
+                            ok,
+                            message,
+                        } => {
+                            if is_plugin_client {
+                                cb(BridgeEvent::SourceMonitorResult(PlacementResult {
                                     peer_id,
                                     request_id,
                                     ok,
@@ -686,5 +753,62 @@ mod tests {
         assert_eq!(message["type"], "request_project_items");
         assert!(bridge.place_project_item(&catalog, "i".into()).is_err());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn source_monitor_requests_need_a_project_but_not_a_timeline() {
+        use crate::catalog::ProjectItemKind;
+        let item = |id: &str, kind| ProjectItemEntry {
+            item_id: id.into(),
+            name: id.into(),
+            bin_path: "Project root".into(),
+            kind,
+            offline: id == "f",
+        };
+        let catalog = MediaCatalog {
+            peer_id: 9,
+            project_id: Some("p".into()),
+            sequence_id: None,
+            items: vec![
+                item("i", ProjectItemKind::Media),
+                item("s", ProjectItemKind::Sequence),
+                item("a", ProjectItemKind::ActiveSequence),
+                item("f", ProjectItemKind::Media),
+                item("b", ProjectItemKind::Bin),
+                item("o", ProjectItemKind::Other),
+            ],
+        };
+        let bridge = BridgeClients::new();
+        let rx = bridge.connect_test_peer(catalog.clone());
+        for (item_id, message) in [
+            ("b", "Bins can't open in the Source Monitor."),
+            ("o", "This project item can't open in the Source Monitor."),
+            ("missing", "Project media changed. Search again."),
+        ] {
+            assert_eq!(bridge.open_in_source_monitor(&catalog, item_id.into()), Err(message));
+        }
+        assert!(rx.try_recv().is_err());
+        for item_id in ["i", "s", "a", "f"] {
+            let id = bridge.open_in_source_monitor(&catalog, item_id.into()).unwrap();
+            let message: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(
+                message,
+                serde_json::json!({
+                    "type": "open_in_source_monitor",
+                    "requestId": id,
+                    "projectId": "p",
+                    "itemId": item_id,
+                })
+            );
+        }
+        let mut other_project = catalog.clone();
+        other_project.project_id = Some("q".into());
+        assert!(bridge.open_in_source_monitor(&other_project, "i".into()).is_err());
+        assert!(matches!(
+            serde_json::from_str::<IncomingPluginMessage>(
+                r#"{"type":"source_monitor_ack","requestId":4,"ok":false,"message":"nope"}"#
+            ).unwrap(),
+            IncomingPluginMessage::SourceMonitorAck { request_id: 4, ok: false, .. }
+        ));
     }
 }

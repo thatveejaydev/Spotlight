@@ -43,6 +43,7 @@ struct AppState {
     pending_effects: HashMap<u64, PendingEffect>,
     media_catalog: Option<MediaCatalog>,
     pending_placement: Option<PendingPlacement>,
+    pending_source_open: Option<PendingSourceOpen>,
     selected_abs_index: usize,
     scroll_offset: usize,
     is_visible: bool,
@@ -68,6 +69,14 @@ struct RecentItem {
     item: SearchResult,
     project_id: Option<String>,
 }
+
+struct PendingSourceOpen {
+    peer_id: usize,
+    request_id: u64,
+    deadline: Instant,
+}
+
+const SOURCE_MONITOR_HINT: &str = "Shift+Enter opens project items in the Source Monitor.";
 fn badge_colors(effect_type: &str) -> (Color, Color) {
     match effect_type {
         "videoEffect" => (
@@ -372,6 +381,32 @@ fn update_placement(
     None
 }
 
+fn update_source_open(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    results: Vec<PlacementResult>,
+) -> Option<SharedString> {
+    let pending = state.pending_source_open.as_ref()?;
+    if let Some(result) = results.into_iter().find(|result| {
+        result.peer_id == pending.peer_id && result.request_id == pending.request_id
+    }) {
+        state.pending_source_open = None;
+        if result.ok {
+            ui.set_status_message(result.message.into());
+        } else {
+            return Some(if result.message.is_empty() {
+                "Premiere could not open the item in the Source Monitor.".into()
+            } else {
+                result.message.into()
+            });
+        }
+    } else if Instant::now() >= pending.deadline {
+        state.pending_source_open = None;
+        return Some("Source Monitor didn't respond. Check Premiere.".into());
+    }
+    None
+}
+
 fn toggle_palette_from_hotkey(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
     let fg_hwnd = win_focus::get_foreground_hwnd();
     let is_premiere_fg = win_focus::is_premiere_active_and_unminimized(fg_hwnd);
@@ -511,6 +546,36 @@ fn apply_entry_at(
     Ok(())
 }
 
+fn open_in_source_at(
+    abs_index: usize,
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+) -> Result<(), SharedString> {
+    let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
+        return Ok(());
+    };
+    let SearchResult::ProjectItem(entry) = chosen else {
+        ui.set_status_message(SOURCE_MONITOR_HINT.into());
+        return Ok(());
+    };
+    let Some(catalog) = &state.media_catalog else {
+        return Err("Project media changed. Search again.".into());
+    };
+    let request_id = bridge
+        .open_in_source_monitor(catalog, entry.item_id.clone())
+        .map_err(SharedString::from)?;
+    ui.set_status_message(format!("Opening {}…", entry.name).into());
+    state.pending_source_open = Some(PendingSourceOpen {
+        peer_id: catalog.peer_id,
+        request_id,
+        deadline: Instant::now() + ACTION_TIMEOUT,
+    });
+    hide_palette(ui, state);
+    restore_premiere_focus(state.previous_hwnd);
+    Ok(())
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     // 1. Auto-install / enable the UXP bridge plugin in Premiere Pro & register Windows Startup (--watch)
     installer::ensure_installed();
@@ -558,6 +623,7 @@ fn main() -> Result<(), slint::PlatformError> {
         pending_effects: HashMap::new(),
         media_catalog: None,
         pending_placement: None,
+        pending_source_open: None,
         selected_abs_index: 0,
         scroll_offset: 0,
         is_visible: false,
@@ -614,6 +680,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                     BridgeEvent::PlacementResult(result) => {
                         PLACEMENT_QUEUE.with(|q| q.borrow_mut().push(result));
+                    }
+                    BridgeEvent::SourceMonitorResult(result) => {
+                        SOURCE_MONITOR_QUEUE.with(|q| q.borrow_mut().push(result));
                     }
                     BridgeEvent::ShowWindowRequested => {
                         SHOW_WINDOW_QUEUE.with(|flag| *flag.borrow_mut() = true);
@@ -699,6 +768,40 @@ fn main() -> Result<(), slint::PlatformError> {
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
                 if let Err(message) = apply_entry_at(abs_idx, &ui, &mut st, &bridge_ref) {
+                    error_toast.show(message, st.previous_hwnd);
+                }
+            }
+        });
+    }
+
+    // Escape key closes popup
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge_ref = bridge.clone();
+        let error_toast = error_toast.clone();
+        ui.on_open_selected_in_source(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                let abs_idx = st.selected_abs_index;
+                if let Err(message) = open_in_source_at(abs_idx, &ui, &mut st, &bridge_ref) {
+                    error_toast.show(message, st.previous_hwnd);
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge_ref = bridge.clone();
+        let error_toast = error_toast.clone();
+        ui.on_open_index_in_source(move |rel_idx| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
+                st.selected_abs_index = abs_idx;
+                sync_viewport_slice(&ui, &mut st);
+                if let Err(message) = open_in_source_at(abs_idx, &ui, &mut st, &bridge_ref) {
                     error_toast.show(message, st.previous_hwnd);
                 }
             }
@@ -906,6 +1009,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(message) = update_placement(&ui, &mut st, results) {
                     error_toast.show(message, st.previous_hwnd);
                 }
+                let results = SOURCE_MONITOR_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+                if let Some(message) = update_source_open(&ui, &mut st, results) {
+                    error_toast.show(message, st.previous_hwnd);
+                }
             }
 
             // 3. Handle System Tray menu / click actions
@@ -964,6 +1071,7 @@ thread_local! {
     static CATALOG_QUEUE: RefCell<Vec<Vec<EffectEntry>>> = const { RefCell::new(Vec::new()) };
     static MEDIA_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PLACEMENT_QUEUE: RefCell<Vec<PlacementResult>> = const { RefCell::new(Vec::new()) };
+    static SOURCE_MONITOR_QUEUE: RefCell<Vec<PlacementResult>> = const { RefCell::new(Vec::new()) };
     static EFFECT_RESULTS: RefCell<Vec<ApplyResult>> = const { RefCell::new(Vec::new()) };
     static SHOW_WINDOW_QUEUE: RefCell<bool> = const { RefCell::new(false) };
     static BRIDGE_STATUS_QUEUE: RefCell<Option<bool>> = const { RefCell::new(None) };
@@ -1042,6 +1150,7 @@ mod tests {
             pending_effects: HashMap::new(),
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
+            pending_source_open: None,
             selected_abs_index: 0,
             scroll_offset: 0,
             is_visible: false,
@@ -1094,6 +1203,113 @@ mod tests {
             assert_eq!(ui.get_search_text().as_str(), "Clip");
             assert_eq!(state.recent_items.len(), 1);
         }
+    }
+
+    #[test]
+    fn shift_enter_opens_project_items_in_the_source_monitor() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        let ui = SpotlightWindow::new().unwrap();
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+        ui.invoke_focus_search();
+
+        let opened = Rc::new(std::cell::Cell::new(0u32));
+        let activated = Rc::new(std::cell::Cell::new(0u32));
+        {
+            let opened = opened.clone();
+            ui.on_open_selected_in_source(move || opened.set(opened.get() + 1));
+            let activated = activated.clone();
+            ui.on_activate_selected(move || activated.set(activated.get() + 1));
+        }
+        let press = |key: Key| {
+            window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        };
+        press(Key::Return);
+        assert_eq!((opened.get(), activated.get()), (0, 1));
+        window.dispatch_event(WindowEvent::KeyPressed { text: Key::Shift.into() });
+        press(Key::Return);
+        window.dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
+        assert_eq!((opened.get(), activated.get()), (1, 1));
+
+        let effect = SearchResult::Effect(EffectEntry {
+            name: "Gaussian Blur".into(),
+            match_name: "blur".into(),
+            effect_type: "videoEffect".into(),
+            folder: String::new(),
+        });
+        let item = |id: &str, kind| catalog::ProjectItemEntry {
+            item_id: id.into(),
+            name: id.into(),
+            bin_path: "Footage".into(),
+            kind,
+            offline: false,
+        };
+        let catalog = MediaCatalog {
+            peer_id: 7,
+            project_id: Some("project".into()),
+            sequence_id: None,
+            items: vec![item("clip", ProjectItemKind::Media), item("bin", ProjectItemKind::Bin)],
+        };
+        let mut state = AppState {
+            catalog: CatalogStore::new_with_defaults(),
+            matched_items: vec![
+                effect,
+                SearchResult::ProjectItem(catalog.items[0].clone()),
+                SearchResult::ProjectItem(catalog.items[1].clone()),
+            ],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: Some(catalog.clone()),
+            pending_placement: None,
+            pending_source_open: None,
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            is_visible: false,
+            shown_at: None,
+            saw_foreground: false,
+            previous_hwnd: 0,
+        };
+        let bridge = BridgeClients::new();
+        let requests = bridge.connect_test_peer(catalog);
+        show_palette(&ui, &mut state);
+
+        // Effects keep the palette open and explain the shortcut.
+        open_in_source_at(0, &ui, &mut state, &bridge).unwrap();
+        assert!(state.is_visible);
+        assert_eq!(ui.get_status_message().as_str(), SOURCE_MONITOR_HINT);
+        assert!(requests.try_recv().is_err());
+
+        // Bins are rejected without hiding.
+        let error = open_in_source_at(2, &ui, &mut state, &bridge).unwrap_err();
+        assert!(error.contains("Bins"));
+        assert!(state.is_visible);
+        assert!(requests.try_recv().is_err());
+
+        for success in [true, false] {
+            show_palette(&ui, &mut state);
+            open_in_source_at(1, &ui, &mut state, &bridge).unwrap();
+            assert!(!state.is_visible);
+            assert!(requests.try_recv().unwrap().contains("open_in_source_monitor"));
+            let request_id = state.pending_source_open.as_ref().unwrap().request_id;
+            let error = update_source_open(&ui, &mut state, vec![PlacementResult {
+                peer_id: 7,
+                request_id,
+                ok: success,
+                message: if success { "Opened clip" } else { "Too old" }.into(),
+            }]);
+            assert_eq!(error.as_deref(), if success { None } else { Some("Too old") });
+            assert!(state.pending_source_open.is_none());
+            assert!(state.recent_items.is_empty());
+            assert!(state.pending_placement.is_none());
+        }
+
+        open_in_source_at(1, &ui, &mut state, &bridge).unwrap();
+        state.pending_source_open.as_mut().unwrap().deadline = Instant::now();
+        assert!(update_source_open(&ui, &mut state, vec![]).unwrap().contains("didn't respond"));
     }
 
     #[test]
@@ -1150,6 +1366,7 @@ mod tests {
             pending_effects: HashMap::new(),
             media_catalog: None,
             pending_placement: None,
+            pending_source_open: None,
             selected_abs_index: 0,
             scroll_offset: 0,
             is_visible: true,

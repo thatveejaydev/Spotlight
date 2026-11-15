@@ -88,13 +88,16 @@ function fixture() {
     document: { readyState: "loading", addEventListener() {}, getElementById: () => null },
     WebSocket: { OPEN: 1 }, console, socket
   });
-  const { placeProjectItem, syncProjectItems, applyEffectToSelection } = vm.runInContext(
-    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection });", context
+  const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = vm.runInContext(
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor });", context
   );
   return {
     clip, seq, bin, project, commits, messages, ppro, applyEffectToSelection,
     place(itemId = "take") {
       return placeProjectItem({ itemId, projectId: "project", sequenceId: "timeline" }, socket);
+    },
+    openSource(itemId = "take") {
+      return openInSourceMonitor({ itemId, projectId: "project" });
     },
     scan(id) { return syncProjectItems(socket, id); }
   };
@@ -353,4 +356,33 @@ test("reports host rejection when placement needs fresh tracks", async () => {
   f.project.executeTransaction = () => false;
   await assert.rejects(f.place(), /could not place media on new tracks/);
   assert.equal(f.commits.length, 0);
+});
+
+test("opens media and sequences in the Source Monitor without touching the timeline", async () => {
+  const f = fixture();
+  const opened = [];
+  f.ppro.SourceMonitor = { openProjectItem: async (item) => { opened.push(item.getId()); return true; } };
+  f.project.getActiveSequence = () => null;
+  assert.match(await f.openSource(), /Opened "Take\.mov" in the Source Monitor/);
+  await f.openSource("draft");
+  await f.openSource("self");
+  f.clip.isOffline = () => true;
+  await f.openSource();
+  assert.deepEqual(opened, ["take", "draft", "self", "take"]);
+  assert.deepEqual(f.commits, []);
+});
+
+test("Source Monitor rejects bins, unsupported items, stale context and host failures", async () => {
+  const f = fixture();
+  await assert.rejects(f.openSource(), /requires Premiere Pro 25\.6/);
+  const opened = [];
+  f.ppro.SourceMonitor = { openProjectItem: async (item) => { opened.push(item.getId()); return true; } };
+  await assert.rejects(f.openSource("bin"), /Bins can't open/);
+  await assert.rejects(f.openSource("other"), /can't open in the Source Monitor/);
+  await assert.rejects(f.openSource("missing"), /removed/);
+  f.ppro.SourceMonitor.openProjectItem = async () => false;
+  await assert.rejects(f.openSource(), /could not open "Take\.mov"/);
+  f.ppro.Project.getActiveProject = () => ({ ...f.project, guid: "other project" });
+  await assert.rejects(f.openSource(), /Active project changed/);
+  assert.deepEqual(opened, []);
 });

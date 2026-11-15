@@ -37,6 +37,14 @@ impl ProjectItemEntry {
             _ => None,
         }
     }
+
+    pub fn source_monitor_error(&self) -> Option<&'static str> {
+        match self.kind {
+            ProjectItemKind::Bin => Some("Bins can't open in the Source Monitor."),
+            ProjectItemKind::Other => Some("This project item can't open in the Source Monitor."),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

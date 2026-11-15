@@ -533,6 +533,31 @@ async function placeProjectItem(payload, connection) {
   return `${message}${location}${routing}.${skippedA1}`;
 }
 
+async function openInSourceMonitor(payload) {
+  const monitor = ppro.SourceMonitor ?? ppro.sourceMonitor;
+  if (typeof monitor?.openProjectItem !== "function") {
+    throw new Error("Opening in the Source Monitor requires Premiere Pro 25.6 or later.");
+  }
+  const project = await ppro.Project.getActiveProject();
+  if (!project || guid(project) !== payload.projectId) {
+    throw new Error("Active project changed. Search again.");
+  }
+  let source;
+  for await (const candidate of projectEntries(project)) {
+    if (candidate.itemId === payload.itemId) {
+      source = candidate;
+      break;
+    }
+  }
+  if (!source) throw new Error("Project item was removed. Search again.");
+  if (source.bin) throw new Error("Bins can't open in the Source Monitor.");
+  if (!source.clip) throw new Error("This project item can't open in the Source Monitor.");
+  if (!(await monitor.openProjectItem(source.item))) {
+    throw new Error(`Premiere could not open "${source.item.name}" in the Source Monitor.`);
+  }
+  return `Opened "${source.item.name}" in the Source Monitor.`;
+}
+
 function resolveEffectEntry(payload) {
   const reqName = String(payload.name || "").trim();
   const reqMatch = String(payload.matchName || "").trim();
@@ -1058,6 +1083,19 @@ function connectBridge() {
         if (ws === connection) {
           setLog(message);
           sendJson({ type: "placement_ack", requestId: msg.requestId, ok, message });
+        }
+      } else if (msg.type === "open_in_source_monitor" && Number.isSafeInteger(msg.requestId)) {
+        let ok = false;
+        let message;
+        try {
+          message = await openInSourceMonitor(msg);
+          ok = true;
+        } catch (error) {
+          message = error.message || String(error);
+        }
+        if (ws === connection) {
+          setLog(message);
+          sendJson({ type: "source_monitor_ack", requestId: msg.requestId, ok, message });
         }
       } else if (msg.type === "apply_effect") {
         setLog(`Applying ${msg.name}...`);
