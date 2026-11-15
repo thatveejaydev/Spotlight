@@ -1996,6 +1996,30 @@ mod tests {
     }
 
     #[test]
+    fn palette_outline_reaches_all_four_window_edges() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        let (width, height) = (WINDOW_WIDTH as usize, WINDOW_HEIGHT as usize);
+        adapter.set_size(PhysicalSize::new(width as u32, height as u32));
+        ui.show().unwrap();
+
+        let mut pixels = vec![Rgb8Pixel::default(); width * height];
+        assert!(adapter.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        }));
+        let border = Rgb8Pixel { r: 0x36, g: 0x39, b: 0x52 };
+        for (x, y) in [
+            (0, height / 2),
+            (width - 1, height / 2),
+            (width / 2, 0),
+            (width / 2, height - 1),
+        ] {
+            assert_eq!(pixels[y * width + x], border, "outline at ({x}, {y})");
+        }
+    }
+
+    #[test]
     fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies() {
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();

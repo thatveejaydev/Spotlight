@@ -1800,14 +1800,14 @@ export component SpotlightWindow inherits Window {
         }
     }
 
-    // Draw over the content and inset from the native window's clipping edge.
+    // Draw the outline over the content at the native window edge.
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: root.width - 2px;
-        height: root.height - 2px;
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
         border-width: 1.5px;
         border-color: #363952;
-        border-radius: 9px;
+        border-radius: 10px;
     }
 }
