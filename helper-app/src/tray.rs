@@ -1,22 +1,30 @@
 use std::cell::RefCell;
 
 #[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::{ HWND, LPARAM, LRESULT, POINT, WPARAM},
-    Graphics::Gdi::{CreateBitmap, DeleteObject},
-    System::LibraryLoader::GetModuleHandleW,
-    UI::{
-        Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-            NOTIFYICONDATAW,
+use windows_sys::{
+    core::w,
+    Wdk::System::SystemServices::RtlGetVersion,
+    Win32::{
+        Foundation::{FreeLibrary, HWND, LPARAM, LRESULT, POINT, WPARAM},
+        System::{
+            LibraryLoader::{
+                GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+            },
+            SystemInformation::OSVERSIONINFOW,
         },
-        WindowsAndMessaging::{
-            AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-            DestroyIcon, DestroyMenu, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW,
-            SetForegroundWindow, TrackPopupMenu, CW_USEDEFAULT, HICON, ICONINFO, MF_CHECKED,
-            MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-            TPM_NONOTIFY, TPM_RETURNCMD, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-            WM_USER, WNDCLASSW,
+        UI::{
+            Shell::{
+                Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+                NOTIFYICONDATAW,
+            },
+            WindowsAndMessaging::{
+                AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
+                DestroyMenu, DestroyWindow, GetCursorPos, GetSystemMetrics, LoadImageW,
+                PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenu, CW_USEDEFAULT,
+                HICON, IMAGE_ICON, MF_GRAYED, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SM_CYSMICON,
+                TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, WM_CONTEXTMENU,
+                WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_USER, WNDCLASSW,
+            },
         },
     },
 };
@@ -25,28 +33,12 @@ use windows_sys::Win32::{
 pub enum TrayAction {
     OpenSpotlight,
     OpenSettings,
-    ToggleDefaultEffectControls,
-    OpenConfigFile,
-    ReloadConfig,
     Quit,
 }
 
 thread_local! {
     static TRAY_ACTIONS: RefCell<Vec<TrayAction>> = const { RefCell::new(Vec::new()) };
-    static TRAY_CONNECTED: RefCell<bool> = const { RefCell::new(false) };
-    static HOTKEY_LABEL: RefCell<String> = RefCell::new(String::from("Ctrl+Space"));
-    static HOTKEY_AVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    static DEFAULT_EFFECT_CONTROLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TRAY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
-}
-
-pub fn set_hotkey_status(label: &str, available: bool) {
-    HOTKEY_LABEL.with(|slot| *slot.borrow_mut() = label.to_string());
-    HOTKEY_AVAILABLE.set(available);
-}
-
-pub fn set_default_effect_controls(enabled: bool) {
-    DEFAULT_EFFECT_CONTROLS.set(enabled);
 }
 
 pub fn set_action_handler<F: FnMut() + 'static>(handler: F) {
@@ -81,6 +73,8 @@ pub fn poll_tray_action() -> Option<TrayAction> {
 #[cfg(windows)]
 const WM_TRAYICON: u32 = WM_USER + 42;
 #[cfg(windows)]
+const APP_ICON_RESOURCE_ID: u16 = 101;
+#[cfg(windows)]
 const TRAY_ICON_UID: u32 = 1;
 #[cfg(windows)]
 const ID_TRAY_OPEN: usize = 1001;
@@ -88,12 +82,6 @@ const ID_TRAY_OPEN: usize = 1001;
 const ID_TRAY_QUIT: usize = 1002;
 #[cfg(windows)]
 const ID_TRAY_SETTINGS: usize = 1003;
-#[cfg(windows)]
-const ID_TRAY_TOGGLE_EC: usize = 1004;
-#[cfg(windows)]
-const ID_TRAY_OPEN_CONFIG: usize = 1005;
-#[cfg(windows)]
-const ID_TRAY_RELOAD_CONFIG: usize = 1006;
 
 pub struct SystemTray {
     #[cfg(windows)]
@@ -143,7 +131,18 @@ impl SystemTray {
                 return None;
             }
 
-            let hicon = create_spotlight_hicon();
+            let hicon = LoadImageW(
+                hinstance,
+                APP_ICON_RESOURCE_ID as usize as *const u16,
+                IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON),
+                GetSystemMetrics(SM_CYSMICON),
+                0,
+            );
+            if hicon.is_null() {
+                DestroyWindow(hwnd);
+                return None;
+            }
 
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -152,8 +151,7 @@ impl SystemTray {
             nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             nid.uCallbackMessage = WM_TRAYICON;
             nid.hIcon = hicon;
-            let hotkey = HOTKEY_LABEL.with(|s| s.borrow().clone());
-            write_tip(&mut nid.szTip, &format!("Premiere Spotlight · {hotkey} in Premiere Pro"));
+            write_tip(&mut nid.szTip, "Premiere Spotlight");
 
             Shell_NotifyIconW(NIM_ADD, &nid);
 
@@ -168,31 +166,6 @@ impl SystemTray {
     #[cfg(not(windows))]
     pub fn new() -> Option<Self> {
         Some(Self {})
-    }
-
-    pub fn refresh_tooltip(&self) {
-        let connected = TRAY_CONNECTED.with(|c| *c.borrow());
-        self.set_connected(connected);
-    }
-
-    pub fn set_connected(&self, connected: bool) {
-        TRAY_CONNECTED.with(|c| *c.borrow_mut() = connected);
-        #[cfg(windows)]
-        unsafe {
-            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-            nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-            nid.hWnd = self.hwnd;
-            nid.uID = TRAY_ICON_UID;
-            nid.uFlags = NIF_TIP;
-            let hotkey = HOTKEY_LABEL.with(|s| s.borrow().clone());
-            let tip = if connected {
-                format!("Premiere Spotlight — Connected ({hotkey})")
-            } else {
-                format!("Premiere Spotlight — Waiting for Premiere Pro ({hotkey})...")
-            };
-            write_tip(&mut nid.szTip, &tip);
-            Shell_NotifyIconW(NIM_MODIFY, &nid);
-        }
     }
 
     pub fn remove(&mut self) {
@@ -260,61 +233,66 @@ unsafe extern "system" fn tray_wnd_proc(
 }
 
 #[cfg(windows)]
+unsafe fn apply_native_menu_theme(hwnd: HWND) {
+    let mut version: OSVERSIONINFOW = std::mem::zeroed();
+    version.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+    if RtlGetVersion(&mut version) != 0 || version.dwBuildNumber < 18362 {
+        return;
+    }
+
+    let theme = LoadLibraryExW(
+        w!("uxtheme.dll"),
+        std::ptr::null_mut(),
+        LOAD_LIBRARY_SEARCH_SYSTEM32,
+    );
+    if theme.is_null() {
+        return;
+    }
+
+    // These theme exports are ordinal-only. The signature of 135 changed in Windows 10 1903.
+    if let (Some(app_mode), Some(window_mode), Some(flush_menus)) = (
+        GetProcAddress(theme, 135usize as *const u8),
+        GetProcAddress(theme, 133usize as *const u8),
+        GetProcAddress(theme, 136usize as *const u8),
+    ) {
+        let set_preferred_app_mode: unsafe extern "system" fn(i32) -> i32 =
+            std::mem::transmute(app_mode);
+        let allow_dark_mode_for_window: unsafe extern "system" fn(HWND, bool) -> bool =
+            std::mem::transmute(window_mode);
+        let flush_menu_themes: unsafe extern "system" fn() = std::mem::transmute(flush_menus);
+
+        const ALLOW_DARK: i32 = 1;
+        set_preferred_app_mode(ALLOW_DARK);
+        allow_dark_mode_for_window(hwnd, true);
+        flush_menu_themes();
+    }
+
+    FreeLibrary(theme);
+}
+
+#[cfg(windows)]
 unsafe fn show_tray_context_menu(hwnd: HWND) {
+    apply_native_menu_theme(hwnd);
     let hmenu = CreatePopupMenu();
     if hmenu.is_null() {
         return;
     }
 
-    let connected = TRAY_CONNECTED.with(|c| *c.borrow());
-    let (premiere_running, unminimized_premiere_hwnd) =
-        crate::win_focus::query_premiere_window_state();
-
-    let status_label = if !premiere_running {
-        to_wide("Premiere Spotlight · Waiting for Premiere Pro")
-    } else if unminimized_premiere_hwnd == 0 {
-        to_wide("Premiere Spotlight · Premiere Minimized")
-    } else if connected {
-        to_wide("Premiere Spotlight · Connected")
+    let (_, premiere_hwnd) = crate::win_focus::query_premiere_window_state();
+    let open_flags = if premiere_hwnd == 0 {
+        MF_GRAYED
     } else {
-        to_wide("Premiere Spotlight · Premiere Active")
-    };
-    let hotkey_label = HOTKEY_LABEL.with(|s| s.borrow().clone());
-    let hotkey_available = HOTKEY_AVAILABLE.get();
-    let default_ec = DEFAULT_EFFECT_CONTROLS.get();
-    let open_label = to_wide(&if hotkey_available {
-        format!("Open Spotlight ({hotkey_label})")
-    } else {
-        "Open Spotlight".to_string()
-    });
-    let settings_label = to_wide("Settings…");
-    let ec_toggle_label = to_wide("Always Open Effect Controls on Enter");
-    let open_config_label = to_wide("Open config.json");
-    let reload_config_label = to_wide("Reload Config");
-    let quit_label = to_wide("Quit Premiere Spotlight");
-
-    AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, status_label.as_ptr());
-    if !hotkey_available {
-        let unavailable = to_wide(&format!("{hotkey_label} unavailable"));
-        AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, unavailable.as_ptr());
-    }
-    AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
-
-    let open_flags = if unminimized_premiere_hwnd != 0 {
         MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
     };
-    AppendMenuW(hmenu, open_flags, ID_TRAY_OPEN, open_label.as_ptr());
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, settings_label.as_ptr());
+    AppendMenuW(hmenu, open_flags, ID_TRAY_OPEN, w!("Open Spotlight"));
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, w!("Settings"));
     AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
-    let ec_flags = MF_STRING | if default_ec { MF_CHECKED } else { MF_UNCHECKED };
-    AppendMenuW(hmenu, ec_flags, ID_TRAY_TOGGLE_EC, ec_toggle_label.as_ptr());
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN_CONFIG, open_config_label.as_ptr());
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_RELOAD_CONFIG, reload_config_label.as_ptr());
-    AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_QUIT, quit_label.as_ptr());
-
+    AppendMenuW(
+        hmenu,
+        MF_STRING,
+        ID_TRAY_QUIT,
+        w!("Quit Premiere Spotlight"),
+    );
     let mut pt = POINT { x: 0, y: 0 };
     GetCursorPos(&mut pt);
     SetForegroundWindow(hwnd);
@@ -335,122 +313,7 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     match cmd {
         ID_TRAY_OPEN => push_tray_action(TrayAction::OpenSpotlight),
         ID_TRAY_SETTINGS => push_tray_action(TrayAction::OpenSettings),
-        ID_TRAY_TOGGLE_EC => push_tray_action(TrayAction::ToggleDefaultEffectControls),
-        ID_TRAY_OPEN_CONFIG => push_tray_action(TrayAction::OpenConfigFile),
-        ID_TRAY_RELOAD_CONFIG => push_tray_action(TrayAction::ReloadConfig),
         ID_TRAY_QUIT => push_tray_action(TrayAction::Quit),
         _ => {}
     }
-}
-
-/// Generates a 32x32 rounded indigo ("FX") system tray icon in memory.
-#[cfg(windows)]
-unsafe fn create_spotlight_hicon() -> HICON {
-    const W: usize = 32;
-    const H: usize = 32;
-    let mut pixels = [0u32; W * H];
-
-    // 1. Draw rounded square background (#6366F1 indigo with #818CF8 border)
-    for y in 0..H {
-        for x in 0..W {
-            let dx = if x < 6 {
-                6 - x
-            } else if x > 25 {
-                x - 25
-            } else {
-                0
-            };
-            let dy = if y < 6 {
-                6 - y
-            } else if y > 25 {
-                y - 25
-            } else {
-                0
-            };
-            let dist_sq = dx * dx + dy * dy;
-            if dist_sq <= 25 {
-                let is_border = dist_sq >= 16 || x == 1 || x == 30 || y == 1 || y == 30;
-                // BGRA in little-endian u32 = 0xAARRGGBB
-                pixels[y * W + x] = if is_border {
-                    0xFF818CF8
-                } else {
-                    0xFF4F46E5
-                };
-            }
-        }
-    }
-
-    // 2. Draw crisp white "FX" glyph (11 rows high, centered around y=10..21)
-    const GLYPH_F: [u8; 11] = [
-        0b1111111,
-        0b1111111,
-        0b1100000,
-        0b1100000,
-        0b1111110,
-        0b1111110,
-        0b1100000,
-        0b1100000,
-        0b1100000,
-        0b1100000,
-        0b1100000,
-    ];
-    const GLYPH_X: [u8; 11] = [
-        0b1100011,
-        0b1100011,
-        0b0110110,
-        0b0110110,
-        0b0011100,
-        0b0011100,
-        0b0011100,
-        0b0110110,
-        0b0110110,
-        0b1100011,
-        0b1100011,
-    ];
-
-    for (row_idx, &bits) in GLYPH_F.iter().enumerate() {
-        let y = 10 + row_idx;
-        for col in 0..7 {
-            if (bits >> (6 - col)) & 1 == 1 {
-                pixels[y * W + (7 + col)] = 0xFFFFFFFF;
-            }
-        }
-    }
-    for (row_idx, &bits) in GLYPH_X.iter().enumerate() {
-        let y = 10 + row_idx;
-        for col in 0..7 {
-            if (bits >> (6 - col)) & 1 == 1 {
-                pixels[y * W + (17 + col)] = 0xFFFFFFFF;
-            }
-        }
-    }
-
-    let color_bmp = CreateBitmap(
-        W as i32,
-        H as i32,
-        1,
-        32,
-        pixels.as_ptr() as *const std::ffi::c_void,
-    );
-    let mask_bytes = [0u8; (W * H) / 8];
-    let mask_bmp = CreateBitmap(
-        W as i32,
-        H as i32,
-        1,
-        1,
-        mask_bytes.as_ptr() as *const std::ffi::c_void,
-    );
-
-    let icon_info = ICONINFO {
-        fIcon: 1,
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask_bmp,
-        hbmColor: color_bmp,
-    };
-
-    let hicon = CreateIconIndirect(&icon_info);
-    DeleteObject(color_bmp as _);
-    DeleteObject(mask_bmp as _);
-    hicon
 }

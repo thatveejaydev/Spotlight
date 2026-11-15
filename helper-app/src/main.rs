@@ -786,6 +786,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .select()?;
     }
     let ui = SpotlightWindow::new()?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let error_toast = Rc::new(ErrorToast::default());
     let debug_log_ctrl = Rc::new(DebugLogController::default());
     win_focus::init_palette_window(extract_window_hwnd(&ui));
@@ -851,7 +852,6 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
-        let tray_ref = tray.clone();
         let bridge_ref = bridge.clone();
         let error_toast = error_toast.clone();
         BRIDGE_DISPATCH.with(|slot| {
@@ -866,18 +866,12 @@ fn main() -> Result<(), slint::PlatformError> {
                         ui.set_status_message(SharedString::from(format!(
                             "Connected to Premiere Pro · {hotkey}"
                         )));
-                        if let Some(ref t) = *tray_ref.borrow() {
-                            t.set_connected(true);
-                        }
                     }
                     BridgeEvent::ClientDisconnected => {
                         ui.set_bridge_connected(false);
                         ui.set_status_message(SharedString::from(
                             "Premiere disconnected · Standalone catalog active",
                         ));
-                        if let Some(ref t) = *tray_ref.borrow() {
-                            t.set_connected(false);
-                        }
                     }
                     BridgeEvent::CatalogReceived(items) => {
                         let hotkey = state_ref.borrow().settings.hotkey.clone();
@@ -886,9 +880,6 @@ fn main() -> Result<(), slint::PlatformError> {
                             "Premiere synced ({} effects) · {hotkey}",
                             items.len()
                         )));
-                        if let Some(ref t) = *tray_ref.borrow() {
-                            t.set_connected(true);
-                        }
                         let mut st = state_ref.borrow_mut();
                         st.catalog.set_catalog(items);
                         refresh_catalog_ui(&ui, &mut st, true);
@@ -1285,12 +1276,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
-    fn sync_settings_ui(
-        ui: &SpotlightWindow,
-        settings: &AppSettings,
-        hotkey_available: bool,
-        tray: &Rc<RefCell<Option<SystemTray>>>,
-    ) {
+    fn sync_settings_ui(ui: &SpotlightWindow, settings: &AppSettings) {
         ui.set_hotkey_label(settings.hotkey.clone().into());
         ui.set_open_effect_controls_default(settings.open_effect_controls_by_default);
         ui.set_alternate_modifier(settings.alternate_modifier.as_str().into());
@@ -1302,21 +1288,13 @@ fn main() -> Result<(), slint::PlatformError> {
         if !ui.get_bridge_connected() {
             ui.set_status_message(format!("Ready · {}", settings.hotkey).into());
         }
-        tray::set_hotkey_status(&settings.hotkey, hotkey_available);
-        tray::set_default_effect_controls(settings.open_effect_controls_by_default);
-        if let Some(ref t) = *tray.borrow() {
-            t.refresh_tooltip();
-        }
     }
 
     fn save_and_sync_settings(
         ui: &SpotlightWindow,
         settings: &AppSettings,
-        hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
-        tray: &Rc<RefCell<Option<SystemTray>>>,
         success_msg: String,
     ) -> Result<(), String> {
-        let available = hotkey_ctrl.borrow().available;
         let result = match settings::save_settings(settings) {
             Ok(()) => {
                 ui.set_settings_feedback_error(false);
@@ -1329,7 +1307,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 Err(err)
             }
         };
-        sync_settings_ui(ui, settings, available, tray);
+        sync_settings_ui(ui, settings);
         result
     }
 
@@ -1337,34 +1315,29 @@ fn main() -> Result<(), slint::PlatformError> {
         ui: &SpotlightWindow,
         state: &mut AppState,
         hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
-        tray: &Rc<RefCell<Option<SystemTray>>>,
         hotkey: HotKey,
         label: String,
     ) -> Result<(), String> {
         if let Some(conflict) = settings::shortcut_conflict("launch", &label, &state.settings) {
-            let available = hotkey_ctrl.borrow().available;
             ui.set_settings_feedback_error(true);
             ui.set_settings_feedback(conflict.clone().into());
-            sync_settings_ui(ui, &state.settings, available, tray);
+            sync_settings_ui(ui, &state.settings);
             return Err(conflict);
         }
         let result = hotkey_ctrl.borrow_mut().apply(hotkey, label.clone());
-        let available = hotkey_ctrl.borrow().available;
         match result {
             Ok(()) => {
                 state.settings.hotkey = label.clone();
                 save_and_sync_settings(
                     ui,
                     &state.settings,
-                    hotkey_ctrl,
-                    tray,
                     format!("Saved shortcut: {label}"),
                 )
             }
             Err(err) => {
                 ui.set_settings_feedback_error(true);
                 ui.set_settings_feedback(err.clone().into());
-                sync_settings_ui(ui, &state.settings, available, tray);
+                sync_settings_ui(ui, &state.settings);
                 Err(err)
             }
         }
@@ -1373,8 +1346,6 @@ fn main() -> Result<(), slint::PlatformError> {
     fn toggle_default_effect_controls_setting(
         ui: &SpotlightWindow,
         state: &mut AppState,
-        hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
-        tray: &Rc<RefCell<Option<SystemTray>>>,
     ) {
         state.settings.open_effect_controls_by_default =
             !state.settings.open_effect_controls_by_default;
@@ -1386,14 +1357,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 modifier_label(state.settings.alternate_modifier)
             )
         };
-        let _ = save_and_sync_settings(ui, &state.settings, hotkey_ctrl, tray, msg);
+        let _ = save_and_sync_settings(ui, &state.settings, msg);
     }
 
     fn reload_settings_live(
         ui: &SpotlightWindow,
         state: &mut AppState,
         hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
-        tray: &Rc<RefCell<Option<SystemTray>>>,
     ) {
         let loaded = settings::load_settings();
         state.settings.open_effect_controls_by_default = loaded.open_effect_controls_by_default;
@@ -1420,8 +1390,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_settings_feedback_error(false);
             ui.set_settings_feedback("Reloaded settings from config.json".into());
         }
-        let available = hotkey_ctrl.borrow().available;
-        sync_settings_ui(ui, &state.settings, available, tray);
+        sync_settings_ui(ui, &state.settings);
     }
 
     fn toggle_settings_view(ui: &SpotlightWindow, rec_flag: &AtomicBool) {
@@ -1465,12 +1434,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let (hotkey_ctrl_raw, initial_hotkey_err) = HotkeyController::new(&initial_settings.hotkey);
     let hotkey_id_ref = hotkey_ctrl_raw.active_id.clone();
-    let initial_hotkey_available = hotkey_ctrl_raw.available;
     let hotkey_ctrl = Rc::new(RefCell::new(hotkey_ctrl_raw));
     let recording_hotkey_flag = Arc::new(AtomicBool::new(false));
     {
         let st = state.borrow();
-        sync_settings_ui(&ui, &st.settings, initial_hotkey_available, &tray);
+        sync_settings_ui(&ui, &st.settings);
         if let Some(err) = initial_hotkey_err {
             ui.set_settings_feedback_error(true);
             ui.set_settings_feedback(err.into());
@@ -1496,7 +1464,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let hk_ctrl = hotkey_ctrl.clone();
-        let tray_ref = tray.clone();
         let rec_flag = recording_hotkey_flag.clone();
         ui.on_capture_shortcut(move |target, text, ctrl, alt, shift, meta| {
             let Some(ui) = ui_weak.upgrade() else {
@@ -1509,7 +1476,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     Ok(Some((hotkey, label))) => {
                         stop_shortcut_recording(&ui, Some(&rec_flag));
                         let mut st = state_ref.borrow_mut();
-                        let _ = apply_hotkey_update(&ui, &mut st, &hk_ctrl, &tray_ref, hotkey, label);
+                        let _ = apply_hotkey_update(&ui, &mut st, &hk_ctrl, hotkey, label);
                     }
                     Err(msg) => {
                         ui.set_settings_feedback_error(true);
@@ -1536,8 +1503,6 @@ fn main() -> Result<(), slint::PlatformError> {
                         let _ = save_and_sync_settings(
                             &ui,
                             &st.settings,
-                            &hk_ctrl,
-                            &tray_ref,
                             format!("Saved shortcut: {label}"),
                         );
                     }
@@ -1552,8 +1517,6 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
-        let hk_ctrl = hotkey_ctrl.clone();
-        let tray_ref = tray.clone();
         let rec_flag = recording_hotkey_flag.clone();
         ui.on_clear_shortcut(move |target| {
             let Some(ui) = ui_weak.upgrade() else {
@@ -1568,8 +1531,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 let _ = save_and_sync_settings(
                     &ui,
                     &st.settings,
-                    &hk_ctrl,
-                    &tray_ref,
                     format!("Cleared {slot_name}."),
                 );
             }
@@ -1579,7 +1540,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let hk_ctrl = hotkey_ctrl.clone();
-        let tray_ref = tray.clone();
         let rec_flag = recording_hotkey_flag.clone();
         ui.on_reset_default_hotkey(move || {
             let Some(ui) = ui_weak.upgrade() else {
@@ -1588,15 +1548,13 @@ fn main() -> Result<(), slint::PlatformError> {
             stop_shortcut_recording(&ui, Some(&rec_flag));
             if let Ok((hotkey, label)) = settings::parse_hotkey_spec(settings::DEFAULT_HOTKEY) {
                 let mut st = state_ref.borrow_mut();
-                let _ = apply_hotkey_update(&ui, &mut st, &hk_ctrl, &tray_ref, hotkey, label);
+                let _ = apply_hotkey_update(&ui, &mut st, &hk_ctrl, hotkey, label);
             }
         });
     }
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
-        let hk_ctrl = hotkey_ctrl.clone();
-        let tray_ref = tray.clone();
         ui.on_set_alternate_modifier(move |value| {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -1610,8 +1568,6 @@ fn main() -> Result<(), slint::PlatformError> {
             let _ = save_and_sync_settings(
                 &ui,
                 &st.settings,
-                &hk_ctrl,
-                &tray_ref,
                 format!("Alternate action modifier set to {}.", modifier_label(next)),
             );
         });
@@ -1660,12 +1616,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
-        let hk_ctrl = hotkey_ctrl.clone();
-        let tray_ref = tray.clone();
         ui.on_toggle_default_effect_controls(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
-                toggle_default_effect_controls_setting(&ui, &mut st, &hk_ctrl, &tray_ref);
+                toggle_default_effect_controls_setting(&ui, &mut st);
             }
         });
     }
@@ -1680,11 +1634,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let hk_ctrl = hotkey_ctrl.clone();
-        let tray_ref = tray.clone();
         ui.on_reload_settings(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
-                reload_settings_live(&ui, &mut st, &hk_ctrl, &tray_ref);
+                reload_settings_live(&ui, &mut st, &hk_ctrl);
             }
         });
     }
@@ -1795,7 +1748,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let state_ref = state.clone();
         let tray_ref = tray.clone();
         let bridge_ref = bridge.clone();
-        let hk_ctrl = hotkey_ctrl.clone();
         let rec_flag = recording_hotkey_flag.clone();
         tray::set_action_handler(move || {
             let Some(ui) = ui_weak.upgrade() else {
@@ -1821,23 +1773,6 @@ fn main() -> Result<(), slint::PlatformError> {
                         ui.set_settings_feedback("".into());
                         ui.set_settings_open(true);
                         show_palette(&ui, &mut st);
-                    }
-                    TrayAction::ToggleDefaultEffectControls => {
-                        let mut st = state_ref.borrow_mut();
-                        toggle_default_effect_controls_setting(
-                            &ui,
-                            &mut st,
-                            &hk_ctrl,
-                            &tray_ref,
-                        );
-                    }
-                    TrayAction::OpenConfigFile => {
-                        let st = state_ref.borrow();
-                        open_config_file_in_editor(&st);
-                    }
-                    TrayAction::ReloadConfig => {
-                        let mut st = state_ref.borrow_mut();
-                        reload_settings_live(&ui, &mut st, &hk_ctrl, &tray_ref);
                     }
                     TrayAction::Quit => {
                         if let Some(ref mut t) = *tray_ref.borrow_mut() {

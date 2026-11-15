@@ -39,9 +39,9 @@ cargo run --release
 - **`Esc`:** Close popup and return focus to Premiere (or exit Settings back to Search if Settings is open)
 
 ## Settings & Configuration
-- Click the **⚙** icon in the lower-right corner of the Spotlight popup, press **`Ctrl+,`** inside Spotlight (configurable), or right-click the **Premiere Spotlight** tray icon → **Settings…** to:
+- Click the **⚙** icon in the lower-right corner of the Spotlight popup, press **`Ctrl+,`** inside Spotlight (configurable), or right-click the **Premiere Spotlight** tray icon → **Settings** to:
   - Customize the global **Launch Hotkey** (default `Ctrl+Space`).
-  - Toggle **Always open Effect Controls on Enter** (swaps primary and alternate actions for effects; also toggleable directly from the System Tray menu).
+  - Toggle **Always open Effect Controls on Enter** (swaps primary and alternate actions for effects).
   - Choose the **Alternate Action Modifier** (`Shift`, `Ctrl`, or `Alt`, default `Shift`) used with `Enter` / Click.
   - Customize the **Open Settings Shortcut** (default `Ctrl+,`) and optional **Direct Catalog Shortcuts** for **All**, **Effects**, and **Project** (all empty by default).
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.

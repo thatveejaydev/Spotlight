@@ -1,3 +1,5 @@
+import { AboutSlint, Palette } from "std-widgets.slint";
+
 export struct EffectItemUI {
     name: string,
     category: string,
@@ -419,6 +421,9 @@ export component SpotlightWindow inherits Window {
     height: 407px;
     background: #12131a;
 
+    init => { Palette.color-scheme = ColorScheme.dark; }
+
+    in property <string> app-version;
     in-out property <string> search-text: "";
     in-out property <int> selected-index: 0;
     in-out property <string> active-catalog: "all";
@@ -942,6 +947,36 @@ export component SpotlightWindow inherits Window {
                                         mouse-cursor: pointer;
                                         clicked => { root.select-settings-tab(index); }
                                     }
+                                }
+                            }
+                        }
+
+                        if root.settings-tab-index == 1 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
+                            spacing: 6px;
+
+                            Text {
+                                text: "Version: " + root.app-version;
+                                font-size: 15px;
+                                font-weight: 600;
+                                color: #e0e2ff;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Developed by Vee Jay";
+                                font-size: 13px;
+                                color: #a9adc3;
+                                horizontal-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+
+                                AboutSlint {
+                                    width: 172px;
+                                    height: 110px;
                                 }
                             }
                         }
