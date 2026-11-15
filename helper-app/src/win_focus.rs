@@ -17,7 +17,10 @@ use windows_sys::Win32::{
         Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
         HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
         Input::KeyboardAndMouse::{
-            keybd_event, GetAsyncKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
+            keybd_event, GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0,
+            INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+            MAPVK_VK_TO_VSC, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL,
+            VK_RMENU, VK_RSHIFT, VK_SHIFT,
         },
         WindowsAndMessaging::{
             AllowSetForegroundWindow, BringWindowToTop, CallWindowProcW, DefWindowProcW,
@@ -230,6 +233,117 @@ pub fn restore_foreground(hwnd: isize) {
 
 #[cfg(not(windows))]
 pub fn restore_foreground(_hwnd: isize) {}
+
+#[cfg(windows)]
+fn is_vk_down(vk: u16) -> bool {
+    unsafe { GetAsyncKeyState(vk as i32) < 0 }
+}
+
+#[cfg(windows)]
+fn keyboard_input(vk: u16, up: bool) -> INPUT {
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 };
+    let extended = matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0xA1 | 0xA3 | 0xA5);
+    let mut flags: KEYBD_EVENT_FLAGS = 0;
+    if up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Sends Premiere Pro's Effect Controls shortcut once Premiere is the active foreground window.
+#[cfg(windows)]
+pub fn open_effect_controls(premiere_hwnd: isize, shortcut: crate::bridge::ShortcutSpec) -> bool {
+    let mut fg = get_foreground_hwnd();
+    if !is_premiere_active_and_unminimized(fg) {
+        if premiere_hwnd != 0 && is_premiere_active_and_unminimized(premiere_hwnd) {
+            restore_foreground(premiere_hwnd);
+            fg = get_foreground_hwnd();
+        }
+        if !is_premiere_active_and_unminimized(fg) {
+            return false;
+        }
+    }
+
+    let mut inputs = Vec::with_capacity(10);
+
+    // Clear held modifier keys that conflict with the target shortcut (e.g. Shift from Shift+Enter).
+    if !shortcut.shift {
+        for vk in [VK_LSHIFT, VK_RSHIFT] {
+            if is_vk_down(vk) {
+                inputs.push(keyboard_input(vk, true));
+            }
+        }
+    }
+    if !shortcut.ctrl {
+        for vk in [VK_LCONTROL, VK_RCONTROL] {
+            if is_vk_down(vk) {
+                inputs.push(keyboard_input(vk, true));
+            }
+        }
+    }
+    if !shortcut.alt {
+        for vk in [VK_LMENU, VK_RMENU] {
+            if is_vk_down(vk) {
+                inputs.push(keyboard_input(vk, true));
+            }
+        }
+    }
+
+    let press_ctrl = shortcut.ctrl && !is_vk_down(VK_LCONTROL) && !is_vk_down(VK_RCONTROL);
+    let press_alt = shortcut.alt && !is_vk_down(VK_LMENU) && !is_vk_down(VK_RMENU);
+    let press_shift = shortcut.shift && !is_vk_down(VK_LSHIFT) && !is_vk_down(VK_RSHIFT);
+
+    if press_ctrl {
+        inputs.push(keyboard_input(VK_CONTROL, false));
+    }
+    if press_alt {
+        inputs.push(keyboard_input(VK_MENU, false));
+    }
+    if press_shift {
+        inputs.push(keyboard_input(VK_SHIFT, false));
+    }
+
+    inputs.push(keyboard_input(shortcut.vk, false));
+    inputs.push(keyboard_input(shortcut.vk, true));
+
+    if press_shift {
+        inputs.push(keyboard_input(VK_SHIFT, true));
+    }
+    if press_alt {
+        inputs.push(keyboard_input(VK_MENU, true));
+    }
+    if press_ctrl {
+        inputs.push(keyboard_input(VK_CONTROL, true));
+    }
+
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    sent == inputs.len() as u32
+}
+
+#[cfg(not(windows))]
+pub fn open_effect_controls(_premiere_hwnd: isize, _shortcut: crate::bridge::ShortcutSpec) -> bool {
+    false
+}
 
 #[cfg(windows)]
 unsafe fn ensure_unminimized_and_unmaximized(target: HWND) {

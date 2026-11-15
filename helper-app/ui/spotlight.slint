@@ -339,8 +339,8 @@ export component SpotlightWindow inherits Window {
     callback move-selection(int);
     callback activate-selected();
     callback activate-index(int);
-    callback open-selected-in-source();
-    callback open-index-in-source(int);
+    callback shift-activate-selected();
+    callback shift-activate-index(int);
     callback close-requested();
     callback toggle-debug-log();
 
@@ -364,7 +364,7 @@ export component SpotlightWindow inherits Window {
 
         key-pressed(event) => {
             if (event.text == Key.Return && event.modifiers.shift) {
-                root.open-selected-in-source();
+                root.shift-activate-selected();
                 return accept;
             }
             if (event.text == Key.Escape) {
@@ -485,7 +485,7 @@ export component SpotlightWindow inherits Window {
 
                             key-pressed(event) => {
                                 if (event.text == Key.Return && event.modifiers.shift) {
-                                    root.open-selected-in-source();
+                                    root.shift-activate-selected();
                                     return accept;
                                 }
                                 if (event.text == Key.UpArrow) {
@@ -599,7 +599,7 @@ export component SpotlightWindow inherits Window {
                             }
                             clicked => {
                                 if (self.shift-click) {
-                                    root.open-index-in-source(idx);
+                                    root.shift-activate-index(idx);
                                 } else {
                                     root.activate-index(idx);
                                 }

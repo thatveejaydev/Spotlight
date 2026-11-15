@@ -33,4 +33,5 @@ cargo run --release
 - **`↑` / `↓` Arrows:** Navigate results
 - **`Tab` (or click the search-bar badge):** Switch catalogs (`All` → `Effects` → `Project`). Spotlight opens in `All` and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
+- **`Shift + Enter` (or `Shift` + Click):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, or open a project item in the Source Monitor.
 - **`Esc`:** Close popup and return focus to Premiere

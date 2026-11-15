@@ -8,7 +8,9 @@ mod installer;
 mod tray;
 mod win_focus;
 
-use bridge::{ApplyResult, BridgeClients, BridgeEvent, MediaCatalog, PlacementResult};
+use bridge::{
+    ApplyResult, BridgeClients, BridgeEvent, EffectControlsShortcut, MediaCatalog, PlacementResult,
+};
 use catalog::{CatalogStore, EffectEntry, ProjectItemKind, SearchResult};
 use debug_log::{DebugLogController, LogKind};
 use error_toast::ErrorToast;
@@ -60,6 +62,7 @@ struct PendingEffect {
     entry: Arc<EffectEntry>,
     recipients: Vec<usize>,
     deadline: Instant,
+    open_effect_controls: bool,
 }
 
 struct PendingPlacement {
@@ -80,7 +83,6 @@ struct PendingSourceOpen {
     deadline: Instant,
 }
 
-const SOURCE_MONITOR_HINT: &str = "Shift+Enter opens project items in the Source Monitor.";
 fn badge_colors(effect_type: &str) -> (Color, Color) {
     match effect_type {
         "videoEffect" => (
@@ -149,7 +151,8 @@ fn recent_results(state: &AppState) -> Vec<SearchResult> {
         .collect()
 }
 
-fn complete_effect(state: &mut AppState, result: &ApplyResult) -> bool {
+/// Returns `Some(open_effect_controls)` if an effect apply just completed successfully.
+fn complete_effect(state: &mut AppState, result: &ApplyResult) -> Option<bool> {
     let request_id = match result.request_id {
         Some(id) => id,
         // Already loaded plugins can still acknowledge an apply without a request ID.
@@ -165,28 +168,25 @@ fn complete_effect(state: &mut AppState, result: &ApplyResult) -> bool {
             });
             match (matches.next(), matches.next()) {
                 (Some((&id, _)), None) => id,
-                _ => return false,
+                _ => return None,
             }
         }
-        None => return false,
+        None => return None,
     };
-    let Some(pending) = state.pending_effects.get_mut(&request_id) else {
-        return false;
-    };
-    let Some(index) = pending.recipients.iter().position(|peer| *peer == result.peer_id) else {
-        return false;
-    };
+    let pending = state.pending_effects.get_mut(&request_id)?;
+    let index = pending.recipients.iter().position(|peer| *peer == result.peer_id)?;
     if Instant::now() >= pending.deadline {
-        return false;
+        return None;
     }
     if !result.ok {
         pending.recipients.swap_remove(index);
         if pending.recipients.is_empty() {
             state.pending_effects.remove(&request_id);
         }
-        return false;
+        return None;
     }
-    let entry = state.pending_effects.remove(&request_id).unwrap().entry;
+    let completed = state.pending_effects.remove(&request_id).unwrap();
+    let entry = completed.entry;
     state.catalog.record_usage(&entry.match_name);
     remember_item(
         state,
@@ -195,7 +195,7 @@ fn complete_effect(state: &mut AppState, result: &ApplyResult) -> bool {
             project_id: None,
         },
     );
-    true
+    Some(completed.open_effect_controls)
 }
 
 fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
@@ -535,6 +535,16 @@ fn apply_entry_at(
     state: &mut AppState,
     bridge: &BridgeClients,
 ) -> Result<(), SharedString> {
+    apply_entry_with_options(abs_index, ui, state, bridge, false)
+}
+
+fn apply_entry_with_options(
+    abs_index: usize,
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+    open_effect_controls: bool,
+) -> Result<(), SharedString> {
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
         return Ok(());
     };
@@ -554,6 +564,7 @@ fn apply_entry_at(
                     entry,
                     recipients,
                     deadline: Instant::now() + ACTION_TIMEOUT,
+                    open_effect_controls,
                 },
             );
             schedule_action_deadlines(state);
@@ -584,7 +595,7 @@ fn apply_entry_at(
     Ok(())
 }
 
-fn open_in_source_at(
+fn shift_activate_at(
     abs_index: usize,
     ui: &SpotlightWindow,
     state: &mut AppState,
@@ -593,26 +604,27 @@ fn open_in_source_at(
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
         return Ok(());
     };
-    let SearchResult::ProjectItem(entry) = chosen else {
-        ui.set_status_message(SOURCE_MONITOR_HINT.into());
-        return Ok(());
-    };
-    let Some(catalog) = &state.media_catalog else {
-        return Err("Project media changed. Search again.".into());
-    };
-    let request_id = bridge
-        .open_in_source_monitor(catalog, entry.item_id.clone())
-        .map_err(SharedString::from)?;
-    ui.set_status_message(format!("Opening {}…", entry.name).into());
-    state.pending_source_open = Some(PendingSourceOpen {
-        peer_id: catalog.peer_id,
-        request_id,
-        deadline: Instant::now() + ACTION_TIMEOUT,
-    });
-    schedule_action_deadlines(state);
-    hide_palette(ui, state);
-    restore_premiere_focus(state.previous_hwnd);
-    Ok(())
+    match chosen {
+        SearchResult::Effect(_) => apply_entry_with_options(abs_index, ui, state, bridge, true),
+        SearchResult::ProjectItem(entry) => {
+            let Some(catalog) = &state.media_catalog else {
+                return Err("Project media changed. Search again.".into());
+            };
+            let request_id = bridge
+                .open_in_source_monitor(catalog, entry.item_id.clone())
+                .map_err(SharedString::from)?;
+            ui.set_status_message(format!("Opening {}…", entry.name).into());
+            state.pending_source_open = Some(PendingSourceOpen {
+                peer_id: catalog.peer_id,
+                request_id,
+                deadline: Instant::now() + ACTION_TIMEOUT,
+            });
+            schedule_action_deadlines(state);
+            hide_palette(ui, state);
+            restore_premiere_focus(state.previous_hwnd);
+            Ok(())
+        }
+    }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -730,7 +742,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                     BridgeEvent::ApplyResult(result) => {
                         let mut st = state_ref.borrow_mut();
-                        let recent_changed = complete_effect(&mut st, &result);
+                        let completed = complete_effect(&mut st, &result);
                         if !result.ok {
                             let message: SharedString = if result.message.is_empty() {
                                 "Premiere could not apply the effect.".into()
@@ -743,8 +755,41 @@ fn main() -> Result<(), slint::PlatformError> {
                             debug_log::log_event(LogKind::Success, "APPLY", result.message.as_str());
                             ui.set_status_message(format!("Premiere: {}", result.message).into());
                         }
-                        if recent_changed {
+                        if let Some(open_effect_controls) = completed {
                             refresh_catalog_ui(&ui, &mut st, true);
+                            if open_effect_controls {
+                                match bridge::read_effect_controls_shortcut() {
+                                    EffectControlsShortcut::Bound(shortcut) => {
+                                        if win_focus::open_effect_controls(
+                                            st.previous_hwnd,
+                                            shortcut,
+                                        ) {
+                                            debug_log::log_event(
+                                                LogKind::Focus,
+                                                "EFFECT_CONTROLS",
+                                                "Opened Effect Controls panel",
+                                            );
+                                        } else {
+                                            debug_log::log_event(
+                                                LogKind::Error,
+                                                "EFFECT_CONTROLS",
+                                                "Skipped opening Effect Controls (Premiere not active)",
+                                            );
+                                        }
+                                    }
+                                    EffectControlsShortcut::Unbound => {
+                                        let message: SharedString =
+                                            "Effect applied, but no shortcut is bound to Effect Controls in Premiere Pro."
+                                                .into();
+                                        debug_log::log_event(
+                                            LogKind::Error,
+                                            "EFFECT_CONTROLS",
+                                            message.as_str(),
+                                        );
+                                        error_toast.show(message, st.previous_hwnd);
+                                    }
+                                }
+                            }
                         }
                         st.pending_effects
                             .retain(|_, pending| Instant::now() < pending.deadline);
@@ -898,17 +943,17 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Escape key closes popup
+    // Shift+Enter / Shift+Click applies effects & opens Effect Controls, or opens project items in Source Monitor
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let bridge_ref = bridge.clone();
         let error_toast = error_toast.clone();
-        ui.on_open_selected_in_source(move || {
+        ui.on_shift_activate_selected(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.selected_abs_index;
-                if let Err(message) = open_in_source_at(abs_idx, &ui, &mut st, &bridge_ref) {
+                if let Err(message) = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref) {
                     error_toast.show(message, st.previous_hwnd);
                 }
             }
@@ -919,13 +964,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let state_ref = state.clone();
         let bridge_ref = bridge.clone();
         let error_toast = error_toast.clone();
-        ui.on_open_index_in_source(move |rel_idx| {
+        ui.on_shift_activate_index(move |rel_idx| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
                 sync_viewport_slice(&ui, &mut st);
-                if let Err(message) = open_in_source_at(abs_idx, &ui, &mut st, &bridge_ref) {
+                if let Err(message) = shift_activate_at(abs_idx, &ui, &mut st, &bridge_ref) {
                     error_toast.show(message, st.previous_hwnd);
                 }
             }
@@ -1318,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_opens_project_items_in_the_source_monitor() {
+    fn shift_activate_handles_effects_and_project_items() {
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
         adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
@@ -1328,24 +1373,30 @@ mod tests {
         window.dispatch_event(WindowEvent::WindowActiveChanged(true));
         ui.invoke_focus_search();
 
-        let opened = Rc::new(std::cell::Cell::new(0u32));
+        let shift_selected = Rc::new(std::cell::Cell::new(0u32));
+        let shift_clicked = Rc::new(std::cell::RefCell::new(Vec::new()));
         let activated = Rc::new(std::cell::Cell::new(0u32));
+        let clicked = Rc::new(std::cell::Cell::new(0u32));
         {
-            let opened = opened.clone();
-            ui.on_open_selected_in_source(move || opened.set(opened.get() + 1));
+            let shift_selected = shift_selected.clone();
+            ui.on_shift_activate_selected(move || shift_selected.set(shift_selected.get() + 1));
+            let shift_clicked = shift_clicked.clone();
+            ui.on_shift_activate_index(move |idx| shift_clicked.borrow_mut().push(idx));
             let activated = activated.clone();
             ui.on_activate_selected(move || activated.set(activated.get() + 1));
+            let clicked = clicked.clone();
+            ui.on_activate_index(move |_| clicked.set(clicked.get() + 1));
         }
         let press = |key: Key| {
             window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
             window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
         };
         press(Key::Return);
-        assert_eq!((opened.get(), activated.get()), (0, 1));
+        assert_eq!((shift_selected.get(), activated.get()), (0, 1));
         window.dispatch_event(WindowEvent::KeyPressed { text: Key::Shift.into() });
         press(Key::Return);
         window.dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
-        assert_eq!((opened.get(), activated.get()), (1, 1));
+        assert_eq!((shift_selected.get(), activated.get()), (1, 1));
 
         let effect = SearchResult::Effect(Arc::new(EffectEntry {
             name: "Gaussian Blur".into(),
@@ -1387,25 +1438,87 @@ mod tests {
             saw_foreground: false,
             previous_hwnd: 0,
         };
+        sync_viewport_slice(&ui, &mut state);
+
+        // Shift+Click on a result row invokes shift_activate_index with that row index.
+        let row_pos = LogicalPosition::new(120., 78.);
+        let button = PointerEventButton::Left;
+        window.dispatch_event(WindowEvent::KeyPressed { text: Key::Shift.into() });
+        window.dispatch_event(WindowEvent::PointerPressed { position: row_pos, button });
+        window.dispatch_event(WindowEvent::PointerReleased { position: row_pos, button });
+        window.dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
+        assert_eq!(&*shift_clicked.borrow(), &[0]);
+        assert_eq!(clicked.get(), 0);
+
         let bridge = BridgeClients::new();
         let requests = bridge.connect_test_peer(catalog);
-        show_palette(&ui, &mut state);
 
-        // Effects keep the palette open and explain the shortcut.
-        open_in_source_at(0, &ui, &mut state, &bridge).unwrap();
-        assert!(state.is_visible);
-        assert_eq!(ui.get_status_message().as_str(), SOURCE_MONITOR_HINT);
-        assert!(requests.try_recv().is_err());
+        // Shift+Enter/Click on an effect applies it and requests opening Effect Controls on ok=true.
+        show_palette(&ui, &mut state);
+        shift_activate_at(0, &ui, &mut state, &bridge).unwrap();
+        assert!(!state.is_visible);
+        let msg: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(msg["type"], "apply_effect");
+        let req_id = msg["requestId"].as_u64().unwrap();
+        assert!(state.pending_effects.get(&req_id).unwrap().open_effect_controls);
+        assert_eq!(
+            complete_effect(
+                &mut state,
+                &ApplyResult {
+                    peer_id: 7,
+                    request_id: Some(req_id),
+                    ok: false,
+                    message: "Select a clip first.".into(),
+                }
+            ),
+            None
+        );
+
+        show_palette(&ui, &mut state);
+        shift_activate_at(0, &ui, &mut state, &bridge).unwrap();
+        let msg: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        let req_id = msg["requestId"].as_u64().unwrap();
+        assert_eq!(
+            complete_effect(
+                &mut state,
+                &ApplyResult {
+                    peer_id: 7,
+                    request_id: Some(req_id),
+                    ok: true,
+                    message: r#"Applied "Gaussian Blur" to 1 video clip."#.into(),
+                }
+            ),
+            Some(true)
+        );
+
+        // Regular Enter/Click applies without requesting Effect Controls.
+        show_palette(&ui, &mut state);
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+        let msg: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        let req_id = msg["requestId"].as_u64().unwrap();
+        assert_eq!(
+            complete_effect(
+                &mut state,
+                &ApplyResult {
+                    peer_id: 7,
+                    request_id: Some(req_id),
+                    ok: true,
+                    message: r#"Applied "Gaussian Blur" to 1 video clip."#.into(),
+                }
+            ),
+            Some(false)
+        );
 
         // Bins are rejected without hiding.
-        let error = open_in_source_at(2, &ui, &mut state, &bridge).unwrap_err();
+        show_palette(&ui, &mut state);
+        let error = shift_activate_at(2, &ui, &mut state, &bridge).unwrap_err();
         assert!(error.contains("Bins"));
         assert!(state.is_visible);
         assert!(requests.try_recv().is_err());
 
         for success in [true, false] {
             show_palette(&ui, &mut state);
-            open_in_source_at(1, &ui, &mut state, &bridge).unwrap();
+            shift_activate_at(1, &ui, &mut state, &bridge).unwrap();
             assert!(!state.is_visible);
             assert!(requests.try_recv().unwrap().contains("open_in_source_monitor"));
             let request_id = state.pending_source_open.as_ref().unwrap().request_id;
@@ -1417,11 +1530,10 @@ mod tests {
             }]);
             assert_eq!(error.as_deref(), if success { None } else { Some("Too old") });
             assert!(state.pending_source_open.is_none());
-            assert!(state.recent_items.is_empty());
             assert!(state.pending_placement.is_none());
         }
 
-        open_in_source_at(1, &ui, &mut state, &bridge).unwrap();
+        shift_activate_at(1, &ui, &mut state, &bridge).unwrap();
         state.pending_source_open.as_mut().unwrap().deadline = Instant::now();
         assert!(update_source_open(&ui, &mut state, vec![]).unwrap().contains("didn't respond"));
     }
@@ -1500,6 +1612,7 @@ mod tests {
             entry: effect.clone(),
             recipients: vec![7],
             deadline: Instant::now() + ACTION_TIMEOUT,
+            open_effect_controls: false,
         };
         let ack = |request_id, ok| ApplyResult {
             peer_id: 7,
@@ -1508,25 +1621,25 @@ mod tests {
             message: r#"Applied "Gaussian Blur" to 1 video clip."#.into(),
         };
         state.pending_effects.insert(1, pending());
-        assert!(!complete_effect(&mut state, &ack(Some(2), true)));
-        assert!(!complete_effect(&mut state, &ack(Some(1), false)));
+        assert_eq!(complete_effect(&mut state, &ack(Some(2), true)), None);
+        assert_eq!(complete_effect(&mut state, &ack(Some(1), false)), None);
         assert!(state.recent_items.is_empty());
         state.pending_effects.insert(3, pending());
         state.pending_effects.insert(4, pending());
-        assert!(!complete_effect(&mut state, &ack(None, true)));
-        assert!(complete_effect(&mut state, &ack(Some(3), true)));
+        assert_eq!(complete_effect(&mut state, &ack(None, true)), None);
+        assert_eq!(complete_effect(&mut state, &ack(Some(3), true)), Some(false));
         let mut other_peer = ack(None, true);
         other_peer.peer_id = 8;
-        assert!(!complete_effect(&mut state, &other_peer));
-        assert!(complete_effect(&mut state, &ack(None, true)));
-        assert!(!complete_effect(&mut state, &ack(None, true)));
+        assert_eq!(complete_effect(&mut state, &other_peer), None);
+        assert_eq!(complete_effect(&mut state, &ack(None, true)), Some(false));
+        assert_eq!(complete_effect(&mut state, &ack(None, true)), None);
         let mut both_peers = pending();
         both_peers.recipients.push(8);
         state.pending_effects.insert(5, both_peers);
-        assert!(!complete_effect(&mut state, &ack(Some(5), false)));
+        assert_eq!(complete_effect(&mut state, &ack(Some(5), false)), None);
         let mut success = ack(Some(5), true);
         success.peer_id = 8;
-        assert!(complete_effect(&mut state, &success));
+        assert_eq!(complete_effect(&mut state, &success), Some(false));
         ui.set_search_text(" take ".into());
         hide_and_restore_focus(&ui, &mut state);
         let bridge = BridgeClients::new();

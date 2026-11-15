@@ -284,6 +284,35 @@ fn extract_xml_tag_value(xml: &str, tag: &str) -> Option<String> {
     Some(xml[start..end].trim().to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortcutSpec {
+    pub vk: u16,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectControlsShortcut {
+    Bound(ShortcutSpec),
+    Unbound,
+}
+
+impl Default for EffectControlsShortcut {
+    fn default() -> Self {
+        Self::Bound(default_effect_controls_shortcut())
+    }
+}
+
+pub fn default_effect_controls_shortcut() -> ShortcutSpec {
+    ShortcutSpec {
+        vk: b'5' as u16,
+        ctrl: false,
+        alt: false,
+        shift: true,
+    }
+}
+
 fn find_latest_premiere_prefs_file() -> Option<PathBuf> {
     let user_profile = env::var("USERPROFILE").ok()?;
     let candidates = [
@@ -457,6 +486,186 @@ pub fn read_premiere_transition_prefs() -> (TransitionDurationPref, TransitionDu
         });
     }
     prefs
+}
+
+fn decode_premiere_virtual_key(raw: u32) -> Option<u16> {
+    if raw >= 0x8000_0000 {
+        let vk = (raw & 0xFFFF) as u16;
+        return (vk != 0).then_some(vk);
+    }
+    // Common Premiere internal DVA keycodes observed in .kys files.
+    match raw {
+        2 => Some(0x08),  // VK_BACK
+        36 => Some(0x23), // VK_END
+        37 => Some(0x24), // VK_HOME
+        38 => Some(0x21), // VK_PRIOR (Page Up)
+        39 => Some(0x22), // VK_NEXT (Page Down)
+        42 => Some(0x25), // VK_LEFT
+        43 => Some(0x27), // VK_RIGHT
+        44 => Some(0x26), // VK_UP
+        45 => Some(0x28), // VK_DOWN
+        _ => None,
+    }
+}
+
+fn parse_effect_controls_shortcut_kys(xml: &str) -> Option<EffectControlsShortcut> {
+    let scope = match xml.find("<context.global") {
+        Some(start) => match xml[start..].find("</context.global>") {
+            Some(len) => &xml[start..start + len],
+            None => &xml[start..],
+        },
+        None => xml,
+    };
+
+    let mut saw_command = false;
+    let mut bindings = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(rel_start) = scope[cursor..].find("<item.") {
+        let item_start = cursor + rel_start;
+        let Some(tag_end) = scope[item_start..].find('>') else {
+            break;
+        };
+        let suffix_start = item_start + "<item.".len();
+        let id_part = scope[suffix_start..item_start + tag_end]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if id_part.is_empty() {
+            cursor = item_start + tag_end + 1;
+            continue;
+        }
+        let close_tag = format!("</item.{}>", id_part);
+        let Some(rel_close) = scope[item_start + tag_end + 1..].find(&close_tag) else {
+            break;
+        };
+        let body_start = item_start + tag_end + 1;
+        let body_end = body_start + rel_close;
+        let item_body = &scope[body_start..body_end];
+        cursor = body_end + close_tag.len();
+
+        if extract_xml_tag_value(item_body, "commandname").as_deref()
+            != Some("uif.window.Effect Controls")
+        {
+            continue;
+        }
+        saw_command = true;
+        let Some(raw_vk) = extract_xml_tag_value(item_body, "virtualkey")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Some(vk) = decode_premiere_virtual_key(raw_vk) else {
+            continue;
+        };
+        let ctrl = extract_xml_tag_value(item_body, "modifier.ctrl").as_deref() == Some("true");
+        let alt = extract_xml_tag_value(item_body, "modifier.alt").as_deref() == Some("true");
+        let shift = extract_xml_tag_value(item_body, "modifier.shift").as_deref() == Some("true");
+        bindings.push(ShortcutSpec {
+            vk,
+            ctrl,
+            alt,
+            shift,
+        });
+    }
+
+    if let Some(preferred) = bindings
+        .iter()
+        .copied()
+        .find(|b| b.shift && !b.ctrl && !b.alt)
+        .or_else(|| bindings.first().copied())
+    {
+        return Some(EffectControlsShortcut::Bound(preferred));
+    }
+
+    saw_command.then_some(EffectControlsShortcut::Unbound)
+}
+
+struct CachedEffectControlsShortcut {
+    prefs_path: PathBuf,
+    prefs_mtime: SystemTime,
+    kys_path: Option<PathBuf>,
+    kys_mtime: SystemTime,
+    scanned_at: Instant,
+    shortcut: EffectControlsShortcut,
+}
+
+pub fn read_effect_controls_shortcut() -> EffectControlsShortcut {
+    const DIR_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+    static CACHE: OnceLock<Mutex<Option<CachedEffectControlsShortcut>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+
+    let file_mtime = |path: &Path| {
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    };
+
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.scanned_at.elapsed() < DIR_RESCAN_INTERVAL
+                && cached.prefs_path.exists()
+                && file_mtime(&cached.prefs_path) == cached.prefs_mtime
+            {
+                let kys_unchanged = match &cached.kys_path {
+                    Some(kys) => kys.exists() && file_mtime(kys) == cached.kys_mtime,
+                    None => true,
+                };
+                if kys_unchanged {
+                    return cached.shortcut;
+                }
+            }
+        }
+    }
+
+    let Some(prefs_path) = find_latest_premiere_prefs_file() else {
+        return EffectControlsShortcut::default();
+    };
+    let prefs_mtime = file_mtime(&prefs_path);
+    let Ok(prefs_xml) = fs::read_to_string(&prefs_path) else {
+        return EffectControlsShortcut::default();
+    };
+
+    let kys_path = extract_xml_tag_value(&prefs_xml, "FE.Prefs.Shortcuts.Filename")
+        .filter(|name| !name.is_empty())
+        .and_then(|name| prefs_path.parent().map(|dir| dir.join("Win").join(name)))
+        .filter(|path| path.is_file());
+
+    let kys_mtime = kys_path
+        .as_deref()
+        .map(file_mtime)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    if let Ok(mut guard) = cache.lock() {
+        if let Some(cached) = guard.as_mut() {
+            if cached.prefs_path == prefs_path
+                && cached.prefs_mtime == prefs_mtime
+                && cached.kys_path == kys_path
+                && cached.kys_mtime == kys_mtime
+            {
+                cached.scanned_at = Instant::now();
+                return cached.shortcut;
+            }
+        }
+    }
+
+    let shortcut = kys_path
+        .as_deref()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|xml| parse_effect_controls_shortcut_kys(&xml))
+        .unwrap_or_default();
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(CachedEffectControlsShortcut {
+            prefs_path,
+            prefs_mtime,
+            kys_path,
+            kys_mtime,
+            scanned_at: Instant::now(),
+            shortcut,
+        });
+    }
+    shortcut
 }
 
 pub enum BridgeEvent {
@@ -1199,5 +1408,75 @@ mod tests {
 
         let _ = ws.close(None);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn parses_effect_controls_shortcut_from_kys() {
+        // Prefers Shift-only binding when multiple bindings exist (like [Custom].kys).
+        let multi = r#"
+        <PremiereData Version="3"><shortcuts Version="5">
+          <context.global Version="1">
+            <item.881 Version="1">
+              <virtualkey>2147483698</virtualkey>
+              <modifier.ctrl>false</modifier.ctrl>
+              <modifier.alt>false</modifier.alt>
+              <modifier.shift>false</modifier.shift>
+              <commandname>uif.window.Effect Controls</commandname>
+            </item.881>
+            <item.880 Version="1">
+              <virtualkey>2147483701</virtualkey>
+              <modifier.ctrl>false</modifier.ctrl>
+              <modifier.alt>false</modifier.alt>
+              <modifier.shift>true</modifier.shift>
+              <commandname>uif.window.Effect Controls</commandname>
+            </item.880>
+          </context.global>
+        </shortcuts></PremiereData>"#;
+        assert_eq!(
+            parse_effect_controls_shortcut_kys(multi),
+            Some(EffectControlsShortcut::Bound(ShortcutSpec {
+                vk: b'5' as u16,
+                ctrl: false,
+                alt: false,
+                shift: true,
+            }))
+        );
+
+        // Uses single custom binding when Shift+5 is remapped.
+        let custom = r#"
+        <context.global Version="1">
+          <item.10 Version="1">
+            <virtualkey>2147483717</virtualkey>
+            <modifier.ctrl>true</modifier.ctrl>
+            <modifier.alt>false</modifier.alt>
+            <modifier.shift>false</modifier.shift>
+            <commandname>uif.window.Effect Controls</commandname>
+          </item.10>
+        </context.global>"#;
+        assert_eq!(
+            parse_effect_controls_shortcut_kys(custom),
+            Some(EffectControlsShortcut::Bound(ShortcutSpec {
+                vk: b'E' as u16,
+                ctrl: true,
+                alt: false,
+                shift: false,
+            }))
+        );
+
+        // Recognizes explicitly unbound command.
+        let unbound = r#"
+        <context.global Version="1">
+          <item.880 Version="1">
+            <commandname>uif.window.Effect Controls</commandname>
+          </item.880>
+        </context.global>"#;
+        assert_eq!(
+            parse_effect_controls_shortcut_kys(unbound),
+            Some(EffectControlsShortcut::Unbound)
+        );
+
+        // Missing entry falls back via None -> Default.
+        let missing = r#"<context.global Version="1"></context.global>"#;
+        assert_eq!(parse_effect_controls_shortcut_kys(missing), None);
     }
 }
