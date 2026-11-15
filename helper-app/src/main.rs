@@ -11,7 +11,7 @@ mod win_focus;
 use bridge::{
     ApplyResult, BridgeClients, BridgeEvent, EffectControlsShortcut, MediaCatalog, PlacementResult,
 };
-use catalog::{CatalogStore, EffectEntry, ProjectItemKind, SearchResult};
+use catalog::{CatalogStore, EffectEntry, ProjectItemEntry, ProjectItemKind, SearchResult};
 use debug_log::{DebugLogController, LogKind};
 use error_toast::ErrorToast;
 use global_hotkey::{
@@ -48,6 +48,7 @@ struct AppState {
     media_catalog: Option<MediaCatalog>,
     pending_placement: Option<PendingPlacement>,
     pending_source_open: Option<PendingSourceOpen>,
+    active_bin_path: Option<String>,
     selected_abs_index: usize,
     scroll_offset: usize,
     rendered_scroll_offset: Option<usize>,
@@ -198,16 +199,65 @@ fn complete_effect(state: &mut AppState, result: &ApplyResult) -> Option<bool> {
     Some(completed.open_effect_controls)
 }
 
+fn sync_bin_ui(ui: &SpotlightWindow, state: &AppState) {
+    ui.set_active_bin(state.active_bin_path.as_deref().unwrap_or("").into());
+}
+
+fn clear_bin_scope(ui: &SpotlightWindow, state: &mut AppState) {
+    state.active_bin_path = None;
+    sync_bin_ui(ui, state);
+}
+
+fn enter_bin(entry: &ProjectItemEntry, ui: &SpotlightWindow, state: &mut AppState) {
+    let Some(bin_path) = entry.child_bin_path() else {
+        return;
+    };
+    state.active_bin_path = Some(bin_path.clone());
+    sync_bin_ui(ui, state);
+    ui.set_active_catalog("project".into());
+    ui.set_search_text(SharedString::from(""));
+    state.selected_abs_index = 0;
+    state.scroll_offset = 0;
+    refresh_results_ui(ui, state);
+    ui.set_status_message(format!("Browsing {} · Backspace to go up", bin_path).into());
+    ui.invoke_focus_search();
+}
+
+fn step_out_bin(ui: &SpotlightWindow, state: &mut AppState) {
+    let Some(current) = state.active_bin_path.take() else {
+        return;
+    };
+    state.active_bin_path = current
+        .rsplit_once(" / ")
+        .map(|(parent, _)| parent.to_string());
+    sync_bin_ui(ui, state);
+    ui.set_search_text(SharedString::from(""));
+    state.selected_abs_index = 0;
+    state.scroll_offset = 0;
+    refresh_results_ui(ui, state);
+    if let Some(parent) = &state.active_bin_path {
+        ui.set_status_message(format!("Browsing {} · Backspace to go up", parent).into());
+    } else {
+        ui.set_status_message("Showing all project items".into());
+    }
+    ui.invoke_focus_search();
+}
+
 fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     let query = ui.get_search_text();
     let catalog = ui.get_active_catalog();
-    let show_history = catalog.as_str() == "all" && query.trim().is_empty();
+    let show_history =
+        state.active_bin_path.is_none() && catalog.as_str() == "all" && query.trim().is_empty();
     ui.set_show_recent_items(show_history);
     let started = Instant::now();
     state.matched_items = if show_history {
         recent_results(state)
     } else {
-        state.catalog.search(query.as_str(), catalog.as_str())
+        state.catalog.search_in_bin(
+            query.as_str(),
+            catalog.as_str(),
+            state.active_bin_path.as_deref(),
+        )
     };
     let elapsed = started.elapsed();
     let total = state.matched_items.len();
@@ -328,6 +378,7 @@ fn extract_window_hwnd(ui: &SpotlightWindow) -> isize {
 fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients) {
     ui.set_active_catalog("all".into());
     ui.set_search_text(SharedString::from(""));
+    clear_bin_scope(ui, state);
     state.media_catalog = None;
     state.catalog.set_project_items(Vec::new());
     bridge.request_project_items();
@@ -570,6 +621,10 @@ fn apply_entry_with_options(
             schedule_action_deadlines(state);
         }
         SearchResult::ProjectItem(entry) => {
+            if entry.kind == ProjectItemKind::Bin {
+                enter_bin(&entry, ui, state);
+                return Ok(());
+            }
             let Some(catalog) = &state.media_catalog else {
                 return Err("Project media changed. Search again.".into());
             };
@@ -679,6 +734,7 @@ fn main() -> Result<(), slint::PlatformError> {
         media_catalog: None,
         pending_placement: None,
         pending_source_open: None,
+        active_bin_path: None,
         selected_abs_index: 0,
         scroll_offset: 0,
         rendered_scroll_offset: None,
@@ -821,6 +877,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             .unwrap_or_default();
                         st.catalog.set_project_items(items);
                         st.media_catalog = catalog;
+                        if !preserve_media
+                            || st
+                                .active_bin_path
+                                .as_deref()
+                                .is_some_and(|path| !st.catalog.contains_bin_path(path))
+                        {
+                            clear_bin_scope(&ui, &mut st);
+                        }
                         refresh_catalog_ui(&ui, &mut st, preserve_media);
                     }
                     BridgeEvent::PlacementResult(result) => {
@@ -882,9 +946,24 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_catalog_changed(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
+                if ui.get_active_catalog().as_str() != "project" {
+                    clear_bin_scope(&ui, &mut st);
+                }
                 st.selected_abs_index = 0;
                 st.scroll_offset = 0;
                 refresh_results_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    // Step up one folder level from an active bin drill-down.
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        ui.on_step_out_bin(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                step_out_bin(&ui, &mut st);
             }
         });
     }
@@ -1306,6 +1385,7 @@ mod tests {
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
             pending_source_open: None,
+            active_bin_path: None,
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1429,6 +1509,7 @@ mod tests {
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
             pending_source_open: None,
+            active_bin_path: None,
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1593,6 +1674,7 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            active_bin_path: None,
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1880,6 +1962,7 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            active_bin_path: None,
             selected_abs_index: 0,
             scroll_offset: 0,
             rendered_scroll_offset: None,
@@ -1910,5 +1993,211 @@ mod tests {
         assert_ne!(model_ptr(&ui), initial_ptr);
         assert_eq!(state.scroll_offset, 1);
         assert_eq!(ui.get_selected_index(), (VISIBLE_ROWS - 1) as i32);
+    }
+
+    #[test]
+    fn bin_drill_down_enters_and_steps_out_without_hiding() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        let bridge = BridgeClients::new();
+        let item = |id: &str, name: &str, bin_path: &str, kind: ProjectItemKind| ProjectItemEntry {
+            item_id: id.into(),
+            name: name.into(),
+            bin_path: bin_path.into(),
+            kind,
+            offline: false,
+        };
+        let items = vec![
+            item("b1", "Footage", "Project root", ProjectItemKind::Bin),
+            item("b2", "B-Roll", "Footage", ProjectItemKind::Bin),
+            item("c1", "Drone.mp4", "Footage / B-Roll", ProjectItemKind::Media),
+            item("c2", "Music.wav", "Audio", ProjectItemKind::Media),
+        ];
+        let catalog = MediaCatalog {
+            peer_id: 7,
+            project_id: Some("proj".into()),
+            sequence_id: Some("seq".into()),
+            items: items.clone(),
+        };
+        let requests = bridge.connect_test_peer(catalog.clone());
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_project_items(items);
+        let mut state = AppState {
+            catalog: store,
+            matched_items: vec![],
+            recent_items: vec![],
+            pending_effects: HashMap::new(),
+            media_catalog: Some(catalog),
+            pending_placement: None,
+            pending_source_open: None,
+            active_bin_path: None,
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
+            is_visible: false,
+            shown_at: None,
+            saw_foreground: false,
+            previous_hwnd: 0,
+        };
+
+        show_palette(&ui, &mut state);
+        ui.set_search_text("Footage".into());
+        refresh_results_ui(&ui, &mut state);
+        let footage_idx = state
+            .matched_items
+            .iter()
+            .position(|result| matches!(result, SearchResult::ProjectItem(e) if e.item_id == "b1"))
+            .unwrap();
+
+        apply_entry_at(footage_idx, &ui, &mut state, &bridge).unwrap();
+        assert!(state.is_visible);
+        assert!(requests.try_recv().is_err());
+        assert!(state.pending_placement.is_none());
+        assert_eq!(state.active_bin_path.as_deref(), Some("Footage"));
+        assert_eq!(ui.get_active_bin().as_str(), "Footage");
+        assert_eq!(ui.get_active_catalog().as_str(), "project");
+        assert!(ui.get_search_text().is_empty());
+        assert_eq!(state.matched_items.len(), 2);
+
+        let broll_idx = state
+            .matched_items
+            .iter()
+            .position(|result| matches!(result, SearchResult::ProjectItem(e) if e.item_id == "b2"))
+            .unwrap();
+        apply_entry_at(broll_idx, &ui, &mut state, &bridge).unwrap();
+        assert_eq!(state.active_bin_path.as_deref(), Some("Footage / B-Roll"));
+        assert_eq!(ui.get_active_bin().as_str(), "Footage / B-Roll");
+        assert_eq!(state.matched_items.len(), 1);
+
+        step_out_bin(&ui, &mut state);
+        assert_eq!(state.active_bin_path.as_deref(), Some("Footage"));
+        assert_eq!(ui.get_active_bin().as_str(), "Footage");
+        assert_eq!(state.matched_items.len(), 2);
+
+        step_out_bin(&ui, &mut state);
+        assert!(state.active_bin_path.is_none());
+        assert!(ui.get_active_bin().is_empty());
+        assert_eq!(state.matched_items.len(), 4);
+
+        let footage_idx = state
+            .matched_items
+            .iter()
+            .position(|result| matches!(result, SearchResult::ProjectItem(e) if e.item_id == "b1"))
+            .unwrap();
+        apply_entry_at(footage_idx, &ui, &mut state, &bridge).unwrap();
+        assert_eq!(state.active_bin_path.as_deref(), Some("Footage"));
+        center_and_show(&ui, &mut state, &bridge);
+        assert!(state.active_bin_path.is_none());
+        assert!(ui.get_active_bin().is_empty());
+    }
+
+    #[test]
+    fn backspace_on_empty_search_triggers_step_out_bin_in_slint() {
+        use std::cell::Cell;
+
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+
+        let step_outs = Rc::new(Cell::new(0usize));
+        let step_outs_cb = step_outs.clone();
+        ui.on_step_out_bin(move || {
+            step_outs_cb.set(step_outs_cb.get() + 1);
+        });
+
+        let press_backspace = || {
+            window.dispatch_event(WindowEvent::KeyPressed {
+                text: Key::Backspace.into(),
+            });
+            window.dispatch_event(WindowEvent::KeyReleased {
+                text: Key::Backspace.into(),
+            });
+        };
+
+        ui.set_active_bin("Footage".into());
+        ui.set_search_text("".into());
+        ui.invoke_focus_search();
+        for ch in ["a", "b"] {
+            window.dispatch_event(WindowEvent::KeyPressed { text: ch.into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: ch.into() });
+        }
+        assert_eq!(ui.get_search_text().as_str(), "ab");
+
+        press_backspace();
+        assert_eq!(step_outs.get(), 0);
+        assert_eq!(ui.get_search_text().as_str(), "a");
+
+        press_backspace();
+        assert_eq!(step_outs.get(), 0);
+        assert_eq!(ui.get_search_text().as_str(), "");
+
+        press_backspace();
+        assert_eq!(step_outs.get(), 1);
+    }
+
+    #[test]
+    fn selected_project_folder_renders_beside_name_and_separated() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
+        let ui = SpotlightWindow::new().unwrap();
+        adapter.set_size(PhysicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        ui.show().unwrap();
+        let window = ui.window();
+        window.dispatch_event(WindowEvent::WindowActiveChanged(true));
+
+        let render = |name: &str, folder: &str| -> Vec<Rgb8Pixel> {
+            let item = EffectItemUI {
+                name: name.into(),
+                category: "Sequence".into(),
+                folder: folder.into(),
+                badge_bg: Color::from_rgb_u8(0x36, 0x26, 0x5c),
+                badge_fg: Color::from_rgb_u8(0xdd, 0xd6, 0xfe),
+            };
+            ui.set_results(ModelRc::new(VecModel::from(vec![item])));
+            ui.set_selected_index(0);
+            let width = WINDOW_WIDTH as usize;
+            let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
+            window.request_redraw();
+            assert!(adapter.draw_if_needed(|renderer| {
+                renderer.render(&mut pixels, width);
+            }));
+            pixels
+        };
+
+        let width = WINDOW_WIDTH as usize;
+        let without_folder = render("00_BACK UP", "");
+        let with_folder = render("00_BACK UP", "04_Nests / 041_Main");
+
+        let diff_xs: Vec<usize> = (62..96)
+            .flat_map(|y| {
+                (18..500).filter_map({
+                    let without_folder = &without_folder;
+                    let with_folder = &with_folder;
+                    move |x| (without_folder[y * width + x] != with_folder[y * width + x]).then_some(x)
+                })
+            })
+            .collect();
+        assert!(!diff_xs.is_empty());
+        // Name itself shouldn't shift vertically; divider and folder pill sit strictly to its right.
+        let min_diff_x = *diff_xs.iter().min().unwrap();
+        assert!(min_diff_x > 80, "expected divider/folder beside name, got min x={min_diff_x}");
+
+        // Even with long name + folder, neither overlaps the right-side category pill (x >= 504).
+        let long_base = render("Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider", "");
+        let long_with_folder = render(
+            "Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider",
+            "01_Project / 04_Nests / 041_Main / Exports / Final_Master",
+        );
+        let leaked_into_badge = (62..96).any(|y| {
+            (504..WINDOW_WIDTH as usize - 10)
+                .any(|x| long_base[y * width + x] != long_with_folder[y * width + x])
+        });
+        assert!(!leaked_into_badge);
     }
 }

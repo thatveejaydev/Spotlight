@@ -47,6 +47,25 @@ impl ProjectItemEntry {
             _ => None,
         }
     }
+
+    /// Returns the `bin_path` shared by direct children inside this bin, if it is a bin.
+    pub fn child_bin_path(&self) -> Option<String> {
+        if self.kind != ProjectItemKind::Bin {
+            return None;
+        }
+        Some(if self.bin_path == "Project root" {
+            self.name.clone()
+        } else {
+            format!("{} / {}", self.bin_path, self.name)
+        })
+    }
+}
+
+fn in_bin_scope(item_bin_path: &str, scope: &str) -> bool {
+    item_bin_path == scope
+        || item_bin_path
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.starts_with(" / "))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -242,17 +261,38 @@ impl CatalogStore {
         (self.items.len(), self.project_items.len())
     }
 
+    pub fn contains_bin_path(&self, bin_path: &str) -> bool {
+        self.project_items
+            .iter()
+            .any(|item| item.entry.child_bin_path().as_deref() == Some(bin_path))
+    }
+
+    #[cfg(test)]
     pub fn search(&mut self, query: &str, catalog: &str) -> Vec<SearchResult> {
+        self.search_in_bin(query, catalog, None)
+    }
+
+    pub fn search_in_bin(
+        &mut self,
+        query: &str,
+        catalog: &str,
+        bin_scope: Option<&str>,
+    ) -> Vec<SearchResult> {
         let trimmed = query.trim();
+        let include_effects = catalog != "project" && bin_scope.is_none();
         let effects = self
             .items
             .iter()
-            .filter(|item| catalog != "project" && item.supported)
+            .filter(move |item| include_effects && item.supported)
             .map(CatalogEntry::Effect);
+        let include_project = catalog != "effects";
         let project_items = self
             .project_items
             .iter()
-            .filter(|_| catalog != "effects")
+            .filter(move |item| {
+                include_project
+                    && bin_scope.is_none_or(|scope| in_bin_scope(&item.entry.bin_path, scope))
+            })
             .map(CatalogEntry::ProjectItem);
         let entries = effects.chain(project_items);
         let usage = |item: &CatalogEntry| match item {
@@ -268,8 +308,16 @@ impl CatalogStore {
             let mut filtered: Vec<_> = entries.collect();
 
             filtered.sort_by(|a, b| {
-                usage(b)
-                    .cmp(&usage(a))
+                let scope_order = |entry: &CatalogEntry| match (bin_scope, entry) {
+                    (Some(scope), CatalogEntry::ProjectItem(item)) => (
+                        item.entry.bin_path != scope,
+                        item.entry.kind != ProjectItemKind::Bin,
+                    ),
+                    _ => (false, false),
+                };
+                scope_order(a)
+                    .cmp(&scope_order(b))
+                    .then_with(|| usage(b).cmp(&usage(a)))
                     .then_with(|| a.name_lower().cmp(b.name_lower()))
                     .then_with(|| a.folder().cmp(b.folder()))
             });
@@ -432,5 +480,65 @@ mod tests {
         }
         store.set_project_items(Vec::new());
         assert!(store.search("", "project").is_empty());
+    }
+
+    #[test]
+    fn bin_drill_down_scopes_by_exact_bin_path_subtree() {
+        let bin = |id: &str, name: &str, bin_path: &str| ProjectItemEntry {
+            item_id: id.into(),
+            name: name.into(),
+            bin_path: bin_path.into(),
+            kind: ProjectItemKind::Bin,
+            offline: false,
+        };
+        let clip = |id: &str, name: &str, bin_path: &str| ProjectItemEntry {
+            item_id: id.into(),
+            name: name.into(),
+            bin_path: bin_path.into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+
+        let root_bin = bin("b1", "Footage", "Project root");
+        let sub_bin = bin("b2", "B-Roll", "Footage");
+        let sibling_bin = bin("b3", "Footage Extra", "Project root");
+        assert_eq!(root_bin.child_bin_path().as_deref(), Some("Footage"));
+        assert_eq!(sub_bin.child_bin_path().as_deref(), Some("Footage / B-Roll"));
+        assert_eq!(
+            clip("c0", "Clip", "Footage").child_bin_path(),
+            None
+        );
+
+        assert!(in_bin_scope("Footage", "Footage"));
+        assert!(in_bin_scope("Footage / B-Roll", "Footage"));
+        assert!(!in_bin_scope("Footage Extra", "Footage"));
+
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_project_items(vec![
+            root_bin,
+            sub_bin,
+            sibling_bin,
+            clip("c1", "A-Cam.mov", "Footage"),
+            clip("c2", "Street.mov", "Footage / B-Roll"),
+            clip("c3", "Other.mov", "Footage Extra"),
+        ]);
+        assert!(store.contains_bin_path("Footage / B-Roll"));
+        assert!(!store.contains_bin_path("Missing"));
+
+        let in_footage = store.search_in_bin("", "project", Some("Footage"));
+        let names: Vec<_> = in_footage
+            .iter()
+            .map(|r| match r {
+                SearchResult::ProjectItem(item) => item.name.as_str(),
+                SearchResult::Effect(e) => e.name.as_str(),
+            })
+            .collect();
+        assert_eq!(names, ["B-Roll", "A-Cam.mov", "Street.mov"]);
+
+        let filtered = store.search_in_bin("street", "project", Some("Footage"));
+        assert!(matches!(
+            filtered.as_slice(),
+            [SearchResult::ProjectItem(item)] if item.item_id == "c2"
+        ));
     }
 }

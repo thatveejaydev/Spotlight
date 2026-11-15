@@ -324,6 +324,7 @@ export component SpotlightWindow inherits Window {
     in-out property <string> search-text: "";
     in-out property <int> selected-index: 0;
     in-out property <string> active-catalog: "all";
+    in-out property <string> active-bin: "";
     private property <string> catalog-name: active-catalog == "effects" ? "Effects"
         : active-catalog == "project" ? "Project" : "All";
     private property <color> catalog-accent: active-catalog == "effects" ? #c4b5fd
@@ -336,6 +337,7 @@ export component SpotlightWindow inherits Window {
 
     callback search-edited(string);
     callback catalog-changed();
+    callback step-out-bin();
     callback move-selection(int);
     callback activate-selected();
     callback activate-index(int);
@@ -365,6 +367,10 @@ export component SpotlightWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.Return && event.modifiers.shift) {
                 root.shift-activate-selected();
+                return accept;
+            }
+            if (event.text == Key.Backspace && root.search-text == "" && root.active-bin != "") {
+                root.step-out-bin();
                 return accept;
             }
             if (event.text == Key.Escape) {
@@ -444,6 +450,49 @@ export component SpotlightWindow inherits Window {
                         }
                     }
 
+                    if root.active-bin != "" : VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 24px;
+                            max-width: 210px;
+                            border-radius: 6px;
+                            background: bin-touch.has-hover ? #6ee7b730 : #6ee7b71a;
+                            border-width: 1px;
+                            border-color: #6ee7b766;
+                            accessible-role: button;
+                            accessible-label: "Inside bin " + root.active-bin + ". Step up one level";
+                            accessible-action-default => { root.step-out-bin(); }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 7px;
+                                spacing: 5px;
+                                alignment: center;
+                                Text {
+                                    text: root.active-bin;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #a7f3d0;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "×";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #6ee7b7;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            bin-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.step-out-bin(); }
+                            }
+                            Tooltip {
+                                text: @markdown("\{root.active-bin} (Backspace or click to go up)");
+                            }
+                        }
+                    }
+
                     // Input box container
                     Rectangle {
                         horizontal-stretch: 1;
@@ -454,7 +503,8 @@ export component SpotlightWindow inherits Window {
                             x: 0px;
                             width: 100%;
                             height: 100%;
-                            text: root.active-catalog == "effects" ? "Search effects and transitions…"
+                            text: root.active-bin != "" ? "Search in \{root.active-bin}…"
+                                : root.active-catalog == "effects" ? "Search effects and transitions…"
                                 : root.active-catalog == "project" ? "Search project items…"
                                 : "Search effects and project items…";
                             color: #5e627c;
@@ -486,6 +536,10 @@ export component SpotlightWindow inherits Window {
                             key-pressed(event) => {
                                 if (event.text == Key.Return && event.modifiers.shift) {
                                     root.shift-activate-selected();
+                                    return accept;
+                                }
+                                if (event.text == Key.Backspace && root.search-text == "" && root.active-bin != "") {
+                                    root.step-out-bin();
                                     return accept;
                                 }
                                 if (event.text == Key.UpArrow) {
@@ -526,7 +580,9 @@ export component SpotlightWindow inherits Window {
                 if root.results.length == 0 : VerticalLayout {
                     alignment: center;
                     Text {
-                        text: root.show-recent-items ? "No recently added items" : "No matching results";
+                        text: root.active-bin != "" && root.search-text == "" ? "This bin is empty"
+                            : root.show-recent-items ? "No recently added items"
+                            : "No matching results";
                         font-size: 13px;
                         color: #6b708b;
                         horizontal-alignment: center;
@@ -550,22 +606,49 @@ export component SpotlightWindow inherits Window {
                             padding-right: 12px;
                             spacing: 10px;
 
-                            // Result name and selected project item's bin path
-                            VerticalLayout {
+                            // Result name and selected project item's bin path side-by-side
+                            HorizontalLayout {
                                 horizontal-stretch: 1;
-                                alignment: center;
-                                Text {
-                                    text: item.name;
-                                    font-size: 13px;
-                                    font-weight: idx == root.selected-index ? 600 : 400;
-                                    color: idx == root.selected-index ? #ffffff : #dcdfe8;
-                                    overflow: elide;
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: (idx == root.selected-index && item.folder != "") ? 0 : 1;
+                                    max-width: (idx == root.selected-index && item.folder != "") ? 260px : 1000px;
+                                    alignment: center;
+                                    Text {
+                                        text: item.name;
+                                        font-size: 13px;
+                                        font-weight: idx == root.selected-index ? 600 : 400;
+                                        color: idx == root.selected-index ? #ffffff : #dcdfe8;
+                                        overflow: elide;
+                                    }
                                 }
-                                if idx == root.selected-index && item.folder != "" : Text {
-                                    text: item.folder;
-                                    font-size: 10px;
-                                    color: #a5a8c0;
-                                    overflow: elide;
+
+                                if idx == root.selected-index && item.folder != "" : Rectangle {
+                                    horizontal-stretch: 1;
+                                    background: transparent;
+
+                                    Rectangle {
+                                        x: 0px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: min(parent.width, folder-text.preferred-width + 14px);
+                                        height: 20px;
+                                        border-radius: 4px;
+                                        background: #1f2233;
+                                        border-width: 1px;
+                                        border-color: #3a3f5c;
+
+                                        folder-text := Text {
+                                            x: 7px;
+                                            width: parent.width - 14px;
+                                            height: 100%;
+                                            text: item.folder;
+                                            font-size: 10.5px;
+                                            color: #b4b9d4;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
                                 }
                             }
 
