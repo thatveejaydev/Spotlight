@@ -8,6 +8,30 @@ use slint::{LogicalPosition, PhysicalSize, Rgb8Pixel};
 const WINDOW_WIDTH: i32 = 620;
 const WINDOW_HEIGHT: i32 = 440;
 
+/// Click targets in the 620×440 palette, in logical pixels. Update these when
+/// the layout moves.
+mod at {
+    pub type Point = (f32, f32);
+
+    /// Settings → Appearance theme dropdown, and the Light entry of its open list.
+    pub const THEME_DROPDOWN: Point = (505., 136.);
+    pub const THEME_POPUP_LIGHT: Point = (505., 138.);
+    /// Results list: first row's name, first and second rows' play/pause buttons, and
+    /// the middle of the first row's progress line.
+    pub const FIRST_ROW_NAME: Point = (48., 111.);
+    pub const FIRST_ROW_PREVIEW_BUTTON: Point = (586., 111.);
+    pub const SECOND_ROW_PREVIEW_BUTTON: Point = (586., 149.);
+    pub const PREVIEW_TRACK_MIDDLE: Point = (310., 127.);
+    /// Footer gear that opens Settings.
+    pub const SETTINGS_GEAR: Point = (594., 422.);
+    /// Settings tabs and controls.
+    pub const HOTKEYS_TAB: Point = (193., 72.);
+    pub const ABOUT_TAB: Point = (375., 72.);
+    pub const LAUNCH_HOTKEY_BUTTON: Point = (490., 142.);
+    pub const FIRST_ACTION_RECORD: Point = (530., 128.);
+    pub const FIRST_ACTION_CLEAR: Point = (580., 128.);
+}
+
 struct TestPlatform(Rc<MinimalSoftwareWindow>);
 
 impl Platform for TestPlatform {
@@ -86,7 +110,7 @@ fn appearance_dropdown_saves_theme_and_recovers_from_save_failure() {
     });
 
     let window = ui.window();
-    let click = |x, y| {
+    let click = |(x, y): (f32, f32)| {
         let position = LogicalPosition::new(x, y);
         for event in [
             WindowEvent::PointerPressed {
@@ -116,12 +140,12 @@ fn appearance_dropdown_saves_theme_and_recovers_from_save_failure() {
     key(Key::Escape);
     assert!(ui.get_settings_open());
 
-    click(505., 136.);
-    click(505., 138.);
+    click(at::THEME_DROPDOWN);
+    click(at::THEME_POPUP_LIGHT);
     assert_eq!(ui.get_theme_name(), "Light");
 
     *target.borrow_mut() = dir.clone();
-    click(505., 136.);
+    click(at::THEME_DROPDOWN);
     key(Key::DownArrow);
     assert_eq!(ui.get_theme_name(), "Light");
     assert_eq!(saved.borrow().theme, PaletteTheme::Light);
@@ -152,7 +176,7 @@ fn appearance_dropdown_saves_theme_and_recovers_from_save_failure() {
     ui.set_settings_open(true);
     key(Key::RightArrow);
     key(Key::RightArrow);
-    click(505., 136.);
+    click(at::THEME_DROPDOWN);
     key(Key::UpArrow);
     assert_eq!(
         ui.get_theme_name(),
@@ -333,16 +357,16 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
     ui.on_activate_selected(|| panic!("preview control activated the search result"));
     ui.on_activate_index(move |index| activated_cb.set(Some(index)));
 
-    let click = |x, y| {
+    let click = |(x, y): (f32, f32)| {
         let position = LogicalPosition::new(x, y);
         let button = PointerEventButton::Left;
         ui.window().dispatch_event(WindowEvent::PointerMoved { position });
         ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
         ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
     };
-    click(586., 111.);
+    click(at::FIRST_ROW_PREVIEW_BUTTON);
     assert!(played.get());
-    click(310., 127.);
+    click(at::PREVIEW_TRACK_MIDDLE);
     assert!(
         position.get().is_some_and(|value| (0.35..0.55).contains(&value)),
         "click produced seek position {:?}",
@@ -351,12 +375,12 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
     assert_eq!(activated.get(), None);
     ui.set_preview_can_toggle(false);
     played.set(false);
-    click(586., 111.);
+    click(at::FIRST_ROW_PREVIEW_BUTTON);
     assert!(!played.get());
     assert_eq!(activated.get(), None);
-    click(586., 149.);
+    click(at::SECOND_ROW_PREVIEW_BUTTON);
     assert_eq!(activated.get(), Some(1));
-    click(48., 111.);
+    click(at::FIRST_ROW_NAME);
     assert_eq!(activated.get(), Some(0));
 }
 
@@ -1444,7 +1468,7 @@ fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
         }
     });
 
-    let click = |x, y| {
+    let click = |(x, y): (f32, f32)| {
         let position = LogicalPosition::new(x, y);
         window.dispatch_event(WindowEvent::PointerPressed {
             position,
@@ -1455,10 +1479,10 @@ fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
             button: PointerEventButton::Left,
         });
     };
-    click(594., 422.);
+    click(at::SETTINGS_GEAR);
     assert!(ui.get_settings_open());
 
-    click(490., 142.);
+    click(at::LAUNCH_HOTKEY_BUTTON);
     assert!(ui.get_recording_hotkey());
     assert_eq!(ui.get_recording_target().as_str(), "launch");
 
@@ -1480,9 +1504,9 @@ fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
     );
 
     // About cancels recording and hides the shortcut controls.
-    click(375., 72.);
+    click(at::ABOUT_TAB);
     assert!(!ui.get_recording_hotkey());
-    click(490., 142.);
+    click(at::LAUNCH_HOTKEY_BUTTON);
     assert!(!ui.get_recording_hotkey());
     assert!(ui.get_settings_open());
 
@@ -1494,7 +1518,7 @@ fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
             text: Key::LeftArrow.into(),
         });
     }
-    click(490., 142.);
+    click(at::LAUNCH_HOTKEY_BUTTON);
     assert!(ui.get_recording_hotkey());
 
     // Esc exits recording first, keeping Settings open; second Esc exits Settings without closing Spotlight.
@@ -1526,14 +1550,14 @@ fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
     let cleared = Rc::new(RefCell::new(SharedString::default()));
     let cleared_cb = cleared.clone();
     ui.on_clear_shortcut(move |id| *cleared_cb.borrow_mut() = id);
-    click(594., 422.);
-    click(193., 72.);
-    click(530., 128.);
+    click(at::SETTINGS_GEAR);
+    click(at::HOTKEYS_TAB);
+    click(at::FIRST_ACTION_RECORD);
     assert_eq!(ui.get_recording_target(), Action::AddAdjustmentLayer.id());
     window.dispatch_event(WindowEvent::KeyPressed { text: Key::F7.into() });
     window.dispatch_event(WindowEvent::KeyReleased { text: Key::F7.into() });
     assert_eq!(captured.borrow().last().unwrap().1, "F7");
-    click(580., 128.);
+    click(at::FIRST_ACTION_CLEAR);
     assert_eq!(cleared.borrow().as_str(), Action::AddAdjustmentLayer.id());
 }
 
@@ -1708,4 +1732,22 @@ fn configurable_modifier_settings_hotkey_and_catalog_shortcuts_work() {
     assert_eq!(ui.get_active_catalog().as_str(), "effects");
     assert!(state.borrow().active_bin_path.is_none());
     assert_eq!(ui.get_search_text().as_str(), "");
+}
+
+/// Toggles the palette as the launch hotkey would, treating `fg_hwnd` as the foreground window.
+fn toggle_palette_from_hotkey_for_fg(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+    fg_hwnd: isize,
+    is_premiere_fg: bool,
+) {
+    toggle_palette_from_hotkey_with_focus(
+        ui,
+        state,
+        bridge,
+        fg_hwnd,
+        is_premiere_fg,
+        state.is_visible,
+    );
 }

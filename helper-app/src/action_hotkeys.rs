@@ -508,8 +508,10 @@ mod tests {
 
         #[cfg(windows)]
         {
-            let mut settings = crate::settings::AppSettings::default();
-            settings.hotkey = "Ctrl+Space".into();
+            let settings = crate::settings::AppSettings {
+                hotkey: "Ctrl+Space".into(),
+                ..Default::default()
+            };
             update_bindings(&settings);
             let stored = windows::LAUNCH_HOTKEY.read().unwrap().unwrap();
             assert_eq!(stored.key, 0x20);

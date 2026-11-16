@@ -148,9 +148,18 @@ impl PresetLibrary {
 
 pub(crate) fn watch_library(mut on_change: impl FnMut(Vec<EffectEntry>) -> bool + Send + 'static) {
     thread::spawn(move || {
+        // The library file is checked every poll, but finding the newest profile
+        // walks every Premiere version folder, so that only happens every 30 seconds.
+        const PROFILE_RESCAN: Duration = Duration::from_secs(30);
         let mut library = PresetLibrary::default();
+        let mut profile: Option<(Instant, Option<PathBuf>)> = None;
         loop {
-            let path = find_latest_premiere_prefs_file()
+            if profile.as_ref().is_none_or(|(scanned, _)| scanned.elapsed() >= PROFILE_RESCAN) {
+                profile = Some((Instant::now(), find_latest_premiere_prefs_file()));
+            }
+            let path = profile
+                .as_ref()
+                .and_then(|(_, prefs)| prefs.as_ref())
                 .map(|prefs| prefs.with_file_name(LIBRARY_FILENAME));
             if let Some(presets) = library.refresh(path) {
                 if !on_change(presets) {

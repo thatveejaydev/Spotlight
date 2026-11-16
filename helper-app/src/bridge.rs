@@ -1295,7 +1295,7 @@ mod tests {
         for (mode, pending) in [("scanning", true), ("rescanned", false)] {
             ws.send(Message::Text(format!(
                 r#"{{"type":"project_items","requestId":{request_id},"projectId":null,"sequenceId":null,"items":[],"scanMode":"{mode}","scanMs":0}}"#
-            ).into())).unwrap();
+            ))).unwrap();
             ws.flush().unwrap();
             wait_for(pending);
         }

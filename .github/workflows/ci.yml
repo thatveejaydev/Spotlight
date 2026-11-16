@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The helper uses Win32 APIs and embeds a Windows icon, so it builds on Windows only.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Plugin tests
+        working-directory: uxp-plugin
+        run: npm test
+
+      - name: Helper tests
+        working-directory: helper-app
+        run: cargo test --profile quick
+
+      - name: Clippy
+        working-directory: helper-app
+        run: cargo clippy --all-targets --profile quick -- -D warnings

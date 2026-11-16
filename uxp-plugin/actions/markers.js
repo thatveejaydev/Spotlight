@@ -1,5 +1,7 @@
 "use strict";
 
+const { requireActiveSequence } = require("../lib/active-sequence.js");
+
 function sequenceRef(project, sequence) {
   const projectId = project.guid?.toString();
   const sequenceId = sequence.guid?.toString();
@@ -18,9 +20,7 @@ function ticks(time) {
 }
 
 async function activeSequence(ppro, expected) {
-  const project = await ppro.Project.getActiveProject();
-  const sequence = await project?.getActiveSequence();
-  if (!sequence) throw new Error("Open a sequence in the Timeline first.");
+  const { project, sequence } = await requireActiveSequence(ppro);
   const ref = sequenceRef(project, sequence);
   if (expected && !sameSequence(ref, expected)) {
     throw new Error("The active sequence changed. Open the action again.");

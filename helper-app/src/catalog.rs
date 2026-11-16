@@ -307,7 +307,7 @@ impl EffectEntry {
             EffectType::VideoEffect => "Video FX",
             EffectType::AudioEffect => "Audio FX",
             EffectType::VideoTransition => "Video Trans",
-            EffectType::AudioTransition => "Audio Transition",
+            EffectType::AudioTransition => "Audio Trans",
             EffectType::Preset => "Preset",
             EffectType::Unknown => "Effect",
         }
@@ -325,7 +325,8 @@ pub struct CatalogStore {
     items: Vec<IndexedEffect>,
     presets: Vec<IndexedEffect>,
     project_items: Vec<IndexedProjectItem>,
-    usage_counts: HashMap<String, u32>,
+    /// How often each effect was applied this session, by type and match name.
+    usage_counts: HashMap<EffectType, HashMap<String, u32>>,
     matcher: Matcher,
     utf32_buf: Vec<char>,
 }
@@ -368,8 +369,13 @@ impl CatalogStore {
         self.presets = presets.into_iter().map(IndexedEffect::new).collect();
     }
 
-    pub fn record_usage(&mut self, match_name: &str) {
-        let count = self.usage_counts.entry(match_name.to_string()).or_insert(0);
+    pub fn record_usage(&mut self, entry: &EffectEntry) {
+        let count = self
+            .usage_counts
+            .entry(entry.effect_type)
+            .or_default()
+            .entry(entry.match_name.clone())
+            .or_insert(0);
         *count = count.saturating_add(1);
     }
 
@@ -443,7 +449,8 @@ impl CatalogStore {
         let usage = |item: &CatalogEntry| match item {
             CatalogEntry::Effect(indexed) => self
                 .usage_counts
-                .get(&indexed.entry.match_name)
+                .get(&indexed.entry.effect_type)
+                .and_then(|counts| counts.get(&indexed.entry.match_name))
                 .copied()
                 .unwrap_or(0),
             CatalogEntry::ProjectItem(_) | CatalogEntry::Action(_) => 0,
@@ -742,5 +749,27 @@ mod tests {
             filtered.as_slice(),
             [SearchResult::ProjectItem(item)] if item.item_id == "c2"
         ));
+    }
+
+    #[test]
+    fn usage_boosts_only_the_applied_effect_type() {
+        let entry = |name: &str, effect_type: &str| EffectEntry {
+            name: name.into(),
+            match_name: "shared".into(),
+            effect_type: effect_type.into(),
+            folder: String::new(),
+        };
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_catalog(vec![entry("Alpha", "videoEffect"), entry("Zeta", "audioEffect")]);
+        store.record_usage(&entry("Zeta", "audioEffect"));
+        let names: Vec<_> = store
+            .search("", "effects")
+            .into_iter()
+            .map(|result| match result {
+                SearchResult::Effect(effect) => effect.name.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(names, ["Zeta", "Alpha"]);
     }
 }

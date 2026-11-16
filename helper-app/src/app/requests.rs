@@ -38,7 +38,7 @@ pub(super) fn complete_effect(state: &mut AppState, result: &ApplyResult) -> Opt
     }
     let completed = state.pending_effects.remove(&request_id).unwrap();
     let entry = completed.entry;
-    state.catalog.record_usage(&entry.match_name);
+    state.catalog.record_usage(&entry);
     remember_item(
         state,
         RecentItem {

@@ -1,5 +1,7 @@
 "use strict";
 
+const { requireActiveSequence } = require("../lib/active-sequence.js");
+
 // Match names are independent of the language used in Effect Controls.
 const BUILT_IN_COMPONENTS = new Set([
   "ADBE Motion",
@@ -39,10 +41,7 @@ async function prepareRemovals(clip) {
 }
 
 async function removeAttributes(ppro, isCurrent) {
-  const project = await ppro.Project.getActiveProject();
-  if (!project) throw new Error("Open a Premiere Pro project first.");
-  const sequence = await project.getActiveSequence();
-  if (!sequence) throw new Error("Open a sequence in the Timeline first.");
+  const { project, sequence } = await requireActiveSequence(ppro, { requireProject: true });
 
   const selection = await sequence.getSelection();
   const items = await selection?.getTrackItems() || [];

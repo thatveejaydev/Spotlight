@@ -14,7 +14,6 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const STARTUP_REG_NAME: &str = "PremiereSpotlight";
 const NO_AUTO_STARTUP_MARKER: &str = ".no_auto_startup";
-const UPIA_EXE_PATH: &str = r"C:\Program Files\Common Files\Adobe\Adobe Desktop Common\RemoteComponents\UPI\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe";
 
 /// Replaced with the helper's path so the plugin can launch Spotlight.
 const HELPER_EXE_PLACEHOLDER: &str = "__SPOTLIGHT_HELPER_EXE_PATH__";
@@ -60,22 +59,6 @@ fn plugin() -> &'static PluginIdentity {
         // build.rs requires manifest.json and a test checks these fields, so this cannot fail.
         PluginIdentity::parse(manifest).expect("uxp-plugin/manifest.json names the plugin")
     })
-}
-
-fn resolve_canonical_exe_path() -> Option<PathBuf> {
-    let cur = env::current_exe().ok()?;
-    // If running from cargo's target/release or target/debug directory, prefer the root premiere-spotlight.exe if present
-    if let Some(parent) = cur.parent() {
-        if parent.ends_with("target\\release") || parent.ends_with("target\\debug") {
-            if let Some(project_root) = parent.parent().and_then(|p| p.parent()) {
-                let root_exe = project_root.join("premiere-spotlight.exe");
-                if root_exe.exists() {
-                    return Some(root_exe);
-                }
-            }
-        }
-    }
-    Some(cur)
 }
 
 fn uxp_plugin_dir(appdata_path: &Path) -> PathBuf {
@@ -140,7 +123,7 @@ fn write_uxp_plugin_and_register(exe_path: &Path, appdata_path: &Path) -> PathBu
 }
 
 pub fn ensure_installed() {
-    let Some(exe_path) = resolve_canonical_exe_path() else {
+    let Ok(exe_path) = env::current_exe() else {
         return;
     };
     let Some(appdata) = env::var("APPDATA").ok() else {
@@ -151,33 +134,18 @@ pub fn ensure_installed() {
     let plugin_dir = write_uxp_plugin_and_register(&exe_path, appdata_path);
 
     // 3. Spotlight is launched on-demand by Premiere's UXP plugin; remove any legacy Startup entry.
-    let marker_path = plugin_dir.join(".installed_exe_path");
     let no_startup_marker = plugin_dir.join(NO_AUTO_STARTUP_MARKER);
     let startup_lnk = startup_shortcut_path(appdata_path);
-
-    let exe_str = exe_path.to_string_lossy().to_string();
-    let prev_marker = fs::read_to_string(&marker_path).unwrap_or_default();
-    let path_changed = prev_marker.trim() != exe_str;
-    let needs_startup_cleanup = !no_startup_marker.exists() || startup_lnk.exists();
-
-    if path_changed || needs_startup_cleanup {
-        let _ = fs::write(&marker_path, &exe_str);
+    if !no_startup_marker.exists() || startup_lnk.exists() {
         let _ = fs::write(&no_startup_marker, b"1");
-        thread::spawn(move || {
-            if needs_startup_cleanup {
-                unregister_windows_startup(&startup_lnk);
-            }
-            if path_changed {
-                try_upia_install(&exe_path);
-            }
-        });
+        thread::spawn(move || unregister_windows_startup(&startup_lnk));
     }
 }
 
 /// Synchronously installs/registers the UXP plugin for the dedicated installer.
 /// Premiere's plugin launches Spotlight on demand, so this also removes any legacy startup entry.
 pub fn install_for_setup() {
-    let Some(exe_path) = resolve_canonical_exe_path() else {
+    let Ok(exe_path) = env::current_exe() else {
         return;
     };
     let Some(appdata) = env::var("APPDATA").ok() else {
@@ -188,12 +156,8 @@ pub fn install_for_setup() {
     let plugin_dir = write_uxp_plugin_and_register(&exe_path, appdata_path);
     let startup_lnk = startup_shortcut_path(appdata_path);
     let no_startup_marker = plugin_dir.join(NO_AUTO_STARTUP_MARKER);
-    let marker_path = plugin_dir.join(".installed_exe_path");
-    let _ = fs::write(&marker_path, exe_path.to_string_lossy().as_bytes());
     let _ = fs::write(&no_startup_marker, b"1");
     unregister_windows_startup(&startup_lnk);
-
-    try_upia_install(&exe_path);
 }
 
 /// Synchronously removes Spotlight's UXP plugin, startup registrations, and optionally user config.
@@ -222,8 +186,6 @@ pub fn uninstall_for_setup(purge_config: bool) {
             let _ = fs::remove_dir_all(&config_dir);
         }
     }
-
-    try_upia_uninstall();
 }
 
 fn report_problem(message: &str) {
@@ -352,39 +314,6 @@ fn unregister_windows_startup(startup_lnk: &Path) {
     if startup_lnk.exists() {
         let _ = fs::remove_file(startup_lnk);
     }
-}
-
-fn try_upia_install(exe_path: &Path) {
-    let upia_path = Path::new(UPIA_EXE_PATH);
-    if !upia_path.exists() {
-        return;
-    }
-    let Some(parent) = exe_path.parent() else {
-        return;
-    };
-    let ccx_path = parent.join("premiere-spotlight.ccx");
-    if !ccx_path.exists() {
-        return;
-    }
-
-    let mut cmd = Command::new(upia_path);
-    cmd.args(["/install", &ccx_path.to_string_lossy()]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let _ = cmd.status();
-}
-
-fn try_upia_uninstall() {
-    let upia_path = Path::new(UPIA_EXE_PATH);
-    if !upia_path.exists() {
-        return;
-    }
-
-    let mut cmd = Command::new(upia_path);
-    cmd.args(["/remove", plugin().name.as_str()]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let _ = cmd.status();
 }
 
 #[cfg(test)]

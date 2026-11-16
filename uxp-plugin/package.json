@@ -1,0 +1,11 @@
+{
+  "name": "premiere-spotlight-bridge",
+  "private": true,
+  "description": "Tests for the Premiere Spotlight UXP bridge plugin. Not shipped with the plugin.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

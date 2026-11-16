@@ -151,24 +151,6 @@ pub(super) fn toggle_palette_from_hotkey(ui: &SpotlightWindow, state: &mut AppSt
     );
 }
 
-#[cfg(test)]
-pub(super) fn toggle_palette_from_hotkey_for_fg(
-    ui: &SpotlightWindow,
-    state: &mut AppState,
-    bridge: &BridgeClients,
-    fg_hwnd: isize,
-    is_premiere_fg: bool,
-) {
-    toggle_palette_from_hotkey_with_focus(
-        ui,
-        state,
-        bridge,
-        fg_hwnd,
-        is_premiere_fg,
-        state.is_visible,
-    );
-}
-
 pub(super) fn toggle_palette_from_hotkey_with_focus(
     ui: &SpotlightWindow,
     state: &mut AppState,
@@ -181,7 +163,7 @@ pub(super) fn toggle_palette_from_hotkey_with_focus(
         debug_log::log_event(
             LogKind::Focus,
             "HOTKEY",
-            &format!("{} -> hide palette", state.settings.hotkey),
+            format!("{} -> hide palette", state.settings.hotkey),
         );
         hide_and_restore_focus(ui, state);
         return;
@@ -190,7 +172,7 @@ pub(super) fn toggle_palette_from_hotkey_with_focus(
         debug_log::log_event(
             LogKind::Focus,
             "HOTKEY",
-            &format!("{} -> show palette", state.settings.hotkey),
+            format!("{} -> show palette", state.settings.hotkey),
         );
         state.previous_hwnd = fg_hwnd;
         center_and_show(ui, state, bridge);
@@ -200,7 +182,7 @@ pub(super) fn toggle_palette_from_hotkey_with_focus(
         debug_log::log_event(
             LogKind::Focus,
             "HOTKEY",
-            &format!("{} -> clear stale visibility", state.settings.hotkey),
+            format!("{} -> clear stale visibility", state.settings.hotkey),
         );
         hide_and_restore_focus(ui, state);
     }

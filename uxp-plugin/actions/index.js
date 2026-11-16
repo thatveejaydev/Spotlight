@@ -3,6 +3,8 @@
 const { addAdjustmentLayer, registerAdjustmentLayer } = require("./adjustment-layer.js");
 const { removeAttributes } = require("./remove-attributes.js");
 
+// Commands answered with `{ ok, message }`. Marker commands return structured
+// replies, so index.js routes them to markers.js through their own message type.
 const handlers = new Map([
   ["add_adjustment_layer", addAdjustmentLayer],
   ["register_adjustment_layer", registerAdjustmentLayer],

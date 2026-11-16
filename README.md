@@ -7,7 +7,7 @@ An ultra-lightweight, zero-WebView Spotlight launcher for Adobe Premiere Pro eff
 1. **`helper-app/` (Rust + Slint Software Renderer)**
    - **Single process, zero WebView2:** Compiles `.slint` declarative UI directly to native Rust machine code rendered via Slint's CPU software renderer (`renderer-software`).
    - **Global Hotkey (`Ctrl + Space`):** Toggles the frameless centered floating window (`620×440`).
-   - **Fuzzy Search (`nucleo-matcher`):** Typo-tolerant fuzzy search across Video Effects, Audio Effects, Transitions, and custom presets, boosted by usage frequency.
+   - **Fuzzy Search (`nucleo-matcher`):** Typo-tolerant fuzzy search across Video Effects, Audio Effects, Transitions, and custom presets, boosted by the effects you applied most this session.
    - **Localhost WebSocket Bridge (`ws://127.0.0.1:3847`):** Event-driven, 0% idle CPU bridge to Premiere Pro.
 
 2. **`uxp-plugin/` (Adobe Premiere Pro UXP Plugin)**
@@ -22,6 +22,7 @@ An ultra-lightweight, zero-WebView Spotlight launcher for Adobe Premiere Pro eff
 cd helper-app
 cargo run --release
 ```
+Start Premiere Pro first: Spotlight exits at once when Premiere isn't running. Each launch also writes the bundled bridge plugin into `%APPDATA%\Adobe\UXP\Plugins\External` and enables it in Premiere's plugin list.
 
 ### 2. Load the Premiere Pro UXP Plugin
 1. Open the **Adobe UXP Developer Tool** (or pack `uxp-plugin/` as a `.ccx` ZIP archive).
@@ -34,6 +35,31 @@ Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install --id
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
 This builds `helper-app` in release mode and outputs `dist\PremiereSpotlightSetup-<version>.exe`, which installs Premiere Spotlight per-user into `%LOCALAPPDATA%\Programs\Premiere Spotlight`, registers the UXP bridge plugin, and adds a Windows Installed Apps uninstaller. Spotlight does not start with Windows: the bridge plugin launches it while Premiere Pro is open, and it exits when Premiere closes.
+
+## Development
+
+### Project layout
+- `helper-app/src/main.rs`: command-line flags, the single-instance check and startup.
+- `helper-app/src/app/`: the palette app. `startup.rs` wires the window, bridge and hooks to the shared state; `results`, `palette`, `activation` and `requests` hold the search list, window, result activation and Premiere replies.
+- `helper-app/src/bridge.rs`: the WebSocket server and the messages exchanged with the plugin.
+- `helper-app/src/premiere_prefs.rs`: reads Premiere's preferences and keyboard shortcut profiles.
+- `helper-app/src/win_focus/`: Windows integration (processes, foreground, synthetic input, window style and placement).
+- `helper-app/ui/`: Slint windows. `spotlight.slint` is the file `build.rs` compiles.
+- `uxp-plugin/index.js`: the bridge connection and caches. `lib/` and `actions/` hold the Premiere commands; they receive Premiere's API as a parameter and keep no state.
+- `installer/`: the Inno Setup script and build script.
+
+Every shipped file under `uxp-plugin/` (tests and `package.json` excluded) is embedded into the helper at build time, so new plugin modules need no installer change.
+
+### Running tests
+```powershell
+cd helper-app
+cargo test --profile quick
+```
+```powershell
+cd uxp-plugin
+npm test
+```
+CI runs both suites and Clippy on Windows for every push to `main` and every pull request.
 
 ## Keyboard Controls (Inside Spotlight Popup)
 - **Type:** Fuzzy search effects, transitions, custom presets, project items, and actions in **All**. Selected presets and project items show their folder path.

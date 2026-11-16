@@ -459,7 +459,8 @@ fn wire_palette(ui: &SpotlightWindow, ctx: &AppCtx, debug_log_ctrl: &Rc<DebugLog
 const NO_HOTKEY_ID: u32 = u32::MAX;
 
 struct HotkeyController {
-    manager: GlobalHotKeyManager,
+    /// `None` when Windows refused to create the hotkey manager; the keyboard hook may still work.
+    manager: Option<GlobalHotKeyManager>,
     registered: Option<(HotKey, String)>,
     active_id: Arc<AtomicU32>,
     available: bool,
@@ -468,8 +469,11 @@ struct HotkeyController {
 
 impl HotkeyController {
     fn new(initial_spec: &str, hook_active: bool) -> (Self, Option<String>) {
-        let manager =
-            GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
+        let manager = GlobalHotKeyManager::new()
+            .inspect_err(|error| {
+                debug_log::log_event(LogKind::Error, "HOTKEY", format!("Global hotkeys unavailable: {error}"));
+            })
+            .ok();
         let mut ctrl = Self {
             manager,
             registered: None,
@@ -492,8 +496,8 @@ impl HotkeyController {
 
     fn unregister(&mut self) {
         if let Some((old_hk, _)) = self.registered.take() {
-            if self.available {
-                let _ = self.manager.unregister(old_hk);
+            if let (true, Some(manager)) = (self.available, &self.manager) {
+                let _ = manager.unregister(old_hk);
             }
         }
         self.active_id.store(NO_HOTKEY_ID, Ordering::Release);
@@ -515,15 +519,18 @@ impl HotkeyController {
             return Ok(());
         }
 
+        let Some(manager) = &self.manager else {
+            return Err(format!("Windows could not set up global hotkeys, so {label} can't be used."));
+        };
         let previous = self.registered.take();
         let was_available = self.available;
         if let Some((old_hk, _)) = previous {
             if was_available {
-                let _ = self.manager.unregister(old_hk);
+                let _ = manager.unregister(old_hk);
             }
         }
 
-        match self.manager.register(hotkey) {
+        match manager.register(hotkey) {
             Ok(()) => {
                 self.active_id.store(hotkey.id(), Ordering::Release);
                 self.registered = Some((hotkey, label));
@@ -532,7 +539,7 @@ impl HotkeyController {
             }
             Err(error) => {
                 if let Some((old_hk, old_label)) = previous {
-                    if was_available && self.manager.register(old_hk).is_ok() {
+                    if was_available && manager.register(old_hk).is_ok() {
                         self.active_id.store(old_hk.id(), Ordering::Release);
                         self.registered = Some((old_hk, old_label));
                         self.available = true;
@@ -886,14 +893,15 @@ fn open_config_file_in_editor(state: &AppState) {
     if !path.exists() {
         let _ = settings::save_settings(&state.settings);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+    // JSON may have no default app; Notepad always exists on Windows.
+    let opened = win_focus::open_with_default_app(&path)
+        || (cfg!(windows) && std::process::Command::new("notepad.exe").arg(&path).spawn().is_ok());
+    if !opened {
+        debug_log::log_event(
+            LogKind::Error,
+            "SETTINGS",
+            format!("Could not open {}", path.display()),
+        );
     }
 }
 

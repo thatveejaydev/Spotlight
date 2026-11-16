@@ -211,3 +211,29 @@ pub fn spawn_premiere_exit_watcher<F: FnOnce() + Send + 'static>(on_exit: F) {
 
 #[cfg(not(windows))]
 pub fn spawn_premiere_exit_watcher<F: FnOnce() + Send + 'static>(_on_exit: F) {}
+
+/// Opens `path` with its default app, as a double-click in Explorer would.
+#[cfg(windows)]
+pub fn open_with_default_app(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+    let wide = |text: &std::ffi::OsStr| text.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open".as_ref()), wide(path.as_os_str()));
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports success with a value above 32.
+    result as usize > 32
+}
+
+#[cfg(not(windows))]
+pub fn open_with_default_app(_path: &std::path::Path) -> bool {
+    false
+}

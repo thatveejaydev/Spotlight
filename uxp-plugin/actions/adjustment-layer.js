@@ -1,5 +1,7 @@
 "use strict";
 
+const { NO_SEQUENCE, requireActiveSequence } = require("../lib/active-sequence.js");
+
 const SETUP_MESSAGE =
   "Create an adjustment layer in Premiere, place and select it on the timeline, then run Register Adjustment Layer.";
 const TIMELINE_CHANGED = "The timeline changed. Run Add Adjustment Layer again.";
@@ -17,11 +19,10 @@ function sourceIdentity(ppro, item) {
 }
 
 async function activeTimeline(ppro) {
-  const project = await ppro.Project.getActiveProject();
-  const sequence = await project?.getActiveSequence();
+  const { project, sequence } = await requireActiveSequence(ppro);
   const projectId = project?.guid?.toString();
   const sequenceId = sequence?.guid?.toString();
-  if (!projectId || !sequenceId) throw new Error("Open a sequence in the Timeline first.");
+  if (!projectId || !sequenceId) throw new Error(NO_SEQUENCE);
   return { project, sequence, projectId, sequenceId };
 }
 

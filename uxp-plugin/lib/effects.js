@@ -3,6 +3,7 @@
 // Scans Premiere's effects and transitions and applies them to the timeline selection.
 
 const { nowMs } = require("./util.js");
+const { requireActiveSequence } = require("./active-sequence.js");
 
 const HIDDEN_VIDEO_MATCH_NAMES = new Set([
   "AE.ADBE Motion",
@@ -384,15 +385,7 @@ module.exports = function createEffects(ppro) {
     const resolved = resolveEffectEntry(payload, catalog);
     const { name, matchName, effectType } = resolved;
 
-    const project = await ppro.Project.getActiveProject();
-    if (!project) {
-      throw new Error("Open a Premiere Pro project first.");
-    }
-
-    const sequence = await project.getActiveSequence();
-    if (!sequence) {
-      throw new Error("Open a sequence in the Timeline first.");
-    }
+    const { project, sequence } = await requireActiveSequence(ppro, { requireProject: true });
 
     const selection = await sequence.getSelection();
     if (!selection) {

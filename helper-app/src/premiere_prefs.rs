@@ -87,7 +87,7 @@ pub(crate) fn find_latest_premiere_prefs_file() -> Option<PathBuf> {
                 let prefs_file = prof_path.join("Adobe Premiere Pro Prefs");
                 if let Ok(meta) = fs::metadata(&prefs_file) {
                     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    if latest_file.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                    if latest_file.as_ref().is_none_or(|(_, t)| mtime > *t) {
                         latest_file = Some((prefs_file, mtime));
                     }
                 }
