@@ -1054,14 +1054,60 @@ fn finish_activation(
     }
 }
 
+#[cfg(windows)]
+struct InstanceMutexGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for InstanceMutexGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_instance_mutex() -> Option<InstanceMutexGuard> {
+    let name: Vec<u16> = "PremiereSpotlightInstanceMutex\0".encode_utf16().collect();
+    let handle = unsafe {
+        windows_sys::Win32::System::Threading::CreateMutexW(
+            std::ptr::null(),
+            0,
+            name.as_ptr(),
+        )
+    };
+    if handle.is_null() {
+        None
+    } else {
+        Some(InstanceMutexGuard(handle))
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has_flag = |flag: &str| args.iter().any(|arg| arg == flag);
+
+    if has_flag("--install") {
+        installer::install_for_setup(!has_flag("--no-startup"));
+        return Ok(());
+    }
+    if has_flag("--uninstall") {
+        installer::uninstall_for_setup(has_flag("--purge-config"));
+        return Ok(());
+    }
+
     // 1. Auto-install / enable the UXP bridge plugin in Premiere Pro & register Windows Startup (--watch)
     installer::ensure_installed();
 
-    // 2. Single-instance check: if Premiere Spotlight is already running in the System Tray, wake it (only opens if Premiere is active) and exit
-    if bridge::check_or_wake_existing_instance(true) {
+    // 2. Single-instance check: if Premiere Spotlight is already running in the System Tray, wake it (unless --watch) and exit
+    if bridge::check_or_wake_existing_instance(!has_flag("--watch")) {
         return Ok(());
     }
+
+    #[cfg(windows)]
+    let _instance_mutex = acquire_instance_mutex();
 
     #[cfg(windows)]
     {

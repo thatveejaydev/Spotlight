@@ -5,10 +5,17 @@ target/
 *.pdb
 
 # Packaged binaries & archives
+dist/
+installer/
 *.exe
 *.ccx
 *.zip
 
-# OS / Editor files
+# OS / Editor / Temp files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+node_modules/
+*.log
+*.tmp

@@ -13,8 +13,12 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const PLUGIN_ID: &str = "dev.spotlight.premiere";
+const PLUGIN_NAME: &str = "Premiere Spotlight Bridge";
 const PLUGIN_VERSION: &str = "0.1.0";
 const PLUGIN_FOLDER_NAME: &str = "dev.spotlight.premiere_0.1.0";
+const STARTUP_REG_NAME: &str = "PremiereSpotlight";
+const NO_AUTO_STARTUP_MARKER: &str = ".no_auto_startup";
+const UPIA_EXE_PATH: &str = r"C:\Program Files\Common Files\Adobe\Adobe Desktop Common\RemoteComponents\UPI\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe";
 
 const MANIFEST_JSON: &str = include_str!("../../uxp-plugin/manifest.json");
 const INDEX_HTML: &str = include_str!("../../uxp-plugin/index.html");
@@ -40,21 +44,36 @@ fn resolve_canonical_exe_path() -> Option<PathBuf> {
     Some(cur)
 }
 
-pub fn ensure_installed() {
-    let Some(exe_path) = resolve_canonical_exe_path() else {
-        return;
-    };
-    let Some(appdata) = env::var("APPDATA").ok() else {
-        return;
-    };
-
-    let appdata_path = Path::new(&appdata);
-    let plugin_dir = appdata_path
+fn uxp_plugin_dir(appdata_path: &Path) -> PathBuf {
+    appdata_path
         .join("Adobe")
         .join("UXP")
         .join("Plugins")
         .join("External")
-        .join(PLUGIN_FOLDER_NAME);
+        .join(PLUGIN_FOLDER_NAME)
+}
+
+fn premiere_plugins_info_path(appdata_path: &Path) -> PathBuf {
+    appdata_path
+        .join("Adobe")
+        .join("UXP")
+        .join("PluginsInfo")
+        .join("v1")
+        .join("premierepro.json")
+}
+
+fn startup_shortcut_path(appdata_path: &Path) -> PathBuf {
+    appdata_path
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs")
+        .join("Startup")
+        .join("Premiere Spotlight.lnk")
+}
+
+fn write_uxp_plugin_and_register(exe_path: &Path, appdata_path: &Path) -> PathBuf {
+    let plugin_dir = uxp_plugin_dir(appdata_path);
 
     // 1. Write UXP plugin files directly into %APPDATA%\Adobe\UXP\Plugins\External\dev.spotlight.premiere_0.1.0
     let actions_dir = plugin_dir.join("actions");
@@ -72,43 +91,109 @@ pub fn ensure_installed() {
     }
 
     // 2. Register plugin as enabled in %APPDATA%\Adobe\UXP\PluginsInfo\v1\premierepro.json
-    let plugins_info_dir = appdata_path
-        .join("Adobe")
-        .join("UXP")
-        .join("PluginsInfo")
-        .join("v1");
-    if fs::create_dir_all(&plugins_info_dir).is_ok() {
-        let premiere_json_path = plugins_info_dir.join("premierepro.json");
-        update_premiere_plugins_info(&premiere_json_path);
+    let premiere_json_path = premiere_plugins_info_path(appdata_path);
+    if let Some(plugins_info_dir) = premiere_json_path.parent() {
+        if fs::create_dir_all(plugins_info_dir).is_ok() {
+            update_premiere_plugins_info(&premiere_json_path);
+        }
     }
+
+    plugin_dir
+}
+
+pub fn ensure_installed() {
+    let Some(exe_path) = resolve_canonical_exe_path() else {
+        return;
+    };
+    let Some(appdata) = env::var("APPDATA").ok() else {
+        return;
+    };
+
+    let appdata_path = Path::new(&appdata);
+    let plugin_dir = write_uxp_plugin_and_register(&exe_path, appdata_path);
 
     // 3. Ensure Windows Startup registration (--watch) and optional UPIA install in background
     let marker_path = plugin_dir.join(".installed_exe_path");
-    let startup_lnk = appdata_path
-        .join("Microsoft")
-        .join("Windows")
-        .join("Start Menu")
-        .join("Programs")
-        .join("Startup")
-        .join("Premiere Spotlight.lnk");
+    let auto_startup_disabled = plugin_dir.join(NO_AUTO_STARTUP_MARKER).exists();
+    let startup_lnk = startup_shortcut_path(appdata_path);
 
     let exe_str = exe_path.to_string_lossy().to_string();
     let prev_marker = fs::read_to_string(&marker_path).unwrap_or_default();
-    let needs_startup_sync = prev_marker.trim() != exe_str || !startup_lnk.exists();
+    let path_changed = prev_marker.trim() != exe_str;
+    let needs_startup_sync = !auto_startup_disabled && (path_changed || !startup_lnk.exists());
 
-    if needs_startup_sync {
+    if path_changed || needs_startup_sync {
         let _ = fs::write(&marker_path, &exe_str);
         thread::spawn(move || {
-            register_windows_startup(&exe_path, &startup_lnk);
+            if !auto_startup_disabled {
+                register_windows_startup(&exe_path, &startup_lnk);
+            }
             try_upia_install(&exe_path);
         });
     }
 }
 
+/// Synchronously installs/registers the UXP plugin and Windows Startup for the dedicated installer.
+pub fn install_for_setup(register_startup: bool) {
+    let Some(exe_path) = resolve_canonical_exe_path() else {
+        return;
+    };
+    let Some(appdata) = env::var("APPDATA").ok() else {
+        return;
+    };
+
+    let appdata_path = Path::new(&appdata);
+    let plugin_dir = write_uxp_plugin_and_register(&exe_path, appdata_path);
+    let startup_lnk = startup_shortcut_path(appdata_path);
+    let no_startup_marker = plugin_dir.join(NO_AUTO_STARTUP_MARKER);
+    let marker_path = plugin_dir.join(".installed_exe_path");
+    let _ = fs::write(&marker_path, exe_path.to_string_lossy().as_bytes());
+
+    if register_startup {
+        let _ = fs::remove_file(&no_startup_marker);
+        register_windows_startup(&exe_path, &startup_lnk);
+    } else {
+        let _ = fs::write(&no_startup_marker, b"1");
+        unregister_windows_startup(&startup_lnk);
+    }
+
+    try_upia_install(&exe_path);
+}
+
+/// Synchronously removes Spotlight's UXP plugin, startup registrations, and optionally user config.
+pub fn uninstall_for_setup(purge_config: bool) {
+    let Some(appdata) = env::var("APPDATA").ok() else {
+        return;
+    };
+
+    let appdata_path = Path::new(&appdata);
+    let startup_lnk = startup_shortcut_path(appdata_path);
+    unregister_windows_startup(&startup_lnk);
+
+    let plugin_dir = uxp_plugin_dir(appdata_path);
+    if plugin_dir.exists() {
+        let _ = fs::remove_dir_all(&plugin_dir);
+    }
+
+    let premiere_json_path = premiere_plugins_info_path(appdata_path);
+    if premiere_json_path.exists() {
+        remove_from_premiere_plugins_info(&premiere_json_path);
+    }
+
+    if purge_config {
+        let config_dir = appdata_path.join("PremiereSpotlight");
+        if config_dir.exists() {
+            let _ = fs::remove_dir_all(&config_dir);
+        }
+    }
+
+    try_upia_uninstall();
+}
+
 fn update_premiere_plugins_info(json_path: &Path) {
     let our_entry = json!({
         "hostMinVersion": "25.2.0",
-        "name": "Premiere Spotlight Bridge",
+        "name": PLUGIN_NAME,
         "path": format!("$localPlugins\\External\\{}", PLUGIN_FOLDER_NAME),
         "pluginId": PLUGIN_ID,
         "status": "enabled",
@@ -163,6 +248,26 @@ fn update_premiere_plugins_info(json_path: &Path) {
     }
 }
 
+fn remove_from_premiere_plugins_info(json_path: &Path) {
+    let Ok(existing) = fs::read_to_string(json_path) else {
+        return;
+    };
+    let Ok(mut root) = serde_json::from_str::<Value>(&existing) else {
+        return;
+    };
+    let Some(arr) = root.get_mut("plugins").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+
+    let before_len = arr.len();
+    arr.retain(|item| item.get("pluginId").and_then(|v| v.as_str()) != Some(PLUGIN_ID));
+    if arr.len() != before_len {
+        if let Ok(serialized) = serde_json::to_string_pretty(&root) {
+            let _ = fs::write(json_path, serialized);
+        }
+    }
+}
+
 fn register_windows_startup(exe_path: &Path, startup_lnk: &Path) {
     let exe_str = exe_path.to_string_lossy();
     let work_dir = exe_path
@@ -177,7 +282,7 @@ fn register_windows_startup(exe_path: &Path, startup_lnk: &Path) {
         "add",
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
         "/v",
-        "PremiereSpotlight",
+        STARTUP_REG_NAME,
         "/t",
         "REG_SZ",
         "/d",
@@ -216,10 +321,26 @@ fn register_windows_startup(exe_path: &Path, startup_lnk: &Path) {
     let _ = ps_cmd.status();
 }
 
+fn unregister_windows_startup(startup_lnk: &Path) {
+    let mut reg_cmd = Command::new("reg");
+    reg_cmd.args([
+        "delete",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        "/v",
+        STARTUP_REG_NAME,
+        "/f",
+    ]);
+    #[cfg(windows)]
+    reg_cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = reg_cmd.status();
+
+    if startup_lnk.exists() {
+        let _ = fs::remove_file(startup_lnk);
+    }
+}
+
 fn try_upia_install(exe_path: &Path) {
-    let upia_path = Path::new(
-        r"C:\Program Files\Common Files\Adobe\Adobe Desktop Common\RemoteComponents\UPI\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe",
-    );
+    let upia_path = Path::new(UPIA_EXE_PATH);
     if !upia_path.exists() {
         return;
     }
@@ -236,4 +357,62 @@ fn try_upia_install(exe_path: &Path) {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let _ = cmd.status();
+}
+
+fn try_upia_uninstall() {
+    let upia_path = Path::new(UPIA_EXE_PATH);
+    if !upia_path.exists() {
+        return;
+    }
+
+    let mut cmd = Command::new(upia_path);
+    cmd.args(["/remove", PLUGIN_NAME]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.status();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_json_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("premiere_spotlight_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn update_and_remove_preserves_other_plugins() {
+        let path = temp_json_path("plugins_info");
+        let initial = json!({
+            "plugins": [
+                {
+                    "pluginId": "is.helm.palette.bridge",
+                    "name": "Helm Bridge",
+                    "status": "enabled"
+                }
+            ]
+        });
+        fs::write(&path, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
+
+        update_premiere_plugins_info(&path);
+        let after_add: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = after_add["plugins"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().any(|p| p["pluginId"] == "is.helm.palette.bridge"));
+        assert!(arr.iter().any(|p| p["pluginId"] == PLUGIN_ID));
+
+        remove_from_premiere_plugins_info(&path);
+        let after_remove: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = after_remove["plugins"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["pluginId"], "is.helm.palette.bridge");
+
+        let _ = fs::remove_file(&path);
+    }
 }

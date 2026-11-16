@@ -28,6 +28,13 @@ cargo run --release
 2. Click **Add Plugin** and select `C:\Users\omiso\Desktop\premiere-spotlight\uxp-plugin\manifest.json`.
 3. With Adobe Premiere Pro open, click **Load** on **Premiere Spotlight Bridge**.
 
+### 3. Build the Windows Installer (`.exe`)
+Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install --id JRSoftware.InnoSetup -e`).
+```powershell
+powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
+```
+This builds `helper-app` in release mode and outputs `dist\PremiereSpotlightSetup-<version>.exe`, which installs Premiere Spotlight per-user into `%LOCALAPPDATA%\Programs\Premiere Spotlight`, registers the UXP bridge plugin + Windows startup (optional), and adds a Windows Installed Apps uninstaller.
+
 ## Keyboard Controls (Inside Spotlight Popup)
 - **Type:** Fuzzy search effects, transitions, custom presets, project items, and actions in **All**. Selected presets and project items show their folder path.
 - **`↑` / `↓` Arrows:** Navigate results

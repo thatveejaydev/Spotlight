@@ -22,8 +22,8 @@ use windows_sys::{
                 DestroyMenu, DestroyWindow, GetCursorPos, GetSystemMetrics, LoadImageW,
                 PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenu, CW_USEDEFAULT,
                 HICON, IMAGE_ICON, MF_GRAYED, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SM_CYSMICON,
-                TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, WM_CONTEXTMENU,
-                WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_USER, WNDCLASSW,
+                TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, WM_CLOSE,
+                WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_USER, WNDCLASSW,
             },
         },
     },
@@ -219,6 +219,10 @@ unsafe extern "system" fn tray_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_CLOSE {
+        push_tray_action(TrayAction::Quit);
+        return 0;
+    }
     if msg == WM_TRAYICON {
         let mouse_msg = (lparam as u32) & 0xFFFF;
         if mouse_msg == WM_LBUTTONUP {
