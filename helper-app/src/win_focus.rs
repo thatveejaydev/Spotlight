@@ -754,6 +754,9 @@ unsafe extern "system" fn winevent_proc(
     if event == EVENT_SYSTEM_FOREGROUND {
         crate::presets::foreground_changed(hwnd as isize);
         crate::actions::markers::foreground_changed(hwnd as isize, event_time);
+        crate::action_hotkeys::foreground_changed(hwnd as isize);
+    } else if event == EVENT_SYSTEM_MINIMIZESTART && is_premiere_hwnd(hwnd as isize) {
+        crate::action_hotkeys::release_active_hold();
     }
     if !PALETTE_VISIBLE.load(std::sync::atomic::Ordering::Acquire) {
         return;

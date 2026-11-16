@@ -17,6 +17,7 @@ export struct DebugLogEntryUI {
 export struct ActionHotkeyUI {
     id: string,
     label: string,
+    hint: string,
     shortcut: string,
 }
 
@@ -490,7 +491,7 @@ export component SpotlightWindow inherits Window {
     in-out property <string> hotkey-label: "Ctrl+Space";
     in-out property <string> status-message: "Ready · " + root.hotkey-label;
     in-out property <bool> settings-open: false;
-    private property <int> settings-tab-index: 0;
+    in-out property <int> settings-tab-index: 0;
     in-out property <bool> recording-hotkey: false;
     in-out property <string> recording-target: "";
     in-out property <bool> open-effect-controls-default: false;
@@ -578,10 +579,11 @@ export component SpotlightWindow inherits Window {
 
     changed settings-open => {
         if (root.settings-open) {
-            root.settings-tab-index = 0;
             if (!root.recording-hotkey) {
                 settings-focus.focus();
             }
+        } else {
+            root.settings-tab-index = 0;
         }
     }
 
@@ -1130,6 +1132,7 @@ export component SpotlightWindow inherits Window {
                                         padding: 10px;
                                         ShortcutRecorderRow {
                                             label: action.label;
+                                            hint: action.hint;
                                             shortcut-text: action.shortcut;
                                             empty-text: "Record hotkey";
                                             recording: root.recording-hotkey && root.recording-target == action.id;

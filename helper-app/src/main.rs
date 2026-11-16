@@ -5,6 +5,7 @@ mod actions;
 mod audio_preview;
 mod bridge;
 mod catalog;
+mod cursor_lock;
 mod debug_log;
 mod error_toast;
 mod installer;
@@ -937,6 +938,26 @@ fn activate_action(
             }
             state.marker_dialog = Some(MarkerDialog::new(state.previous_hwnd, bridge)?);
         }
+        Action::LockHorizontalAxis => {
+            if let Some(shortcut) = state
+                .settings
+                .action_hotkeys
+                .get(action.id())
+                .filter(|spec| !spec.trim().is_empty())
+            {
+                ui.set_status_message(
+                    format!("Hold {shortcut} in Premiere Pro to lock the horizontal axis.").into(),
+                );
+            } else {
+                ui.set_settings_tab_index(1);
+                ui.set_settings_open(true);
+                ui.set_settings_feedback_error(false);
+                ui.set_settings_feedback(
+                    "Assign a shortcut to Lock Horizontal Axis, then hold it while dragging in Premiere."
+                        .into(),
+                );
+            }
+        }
         _ => {
             if state.pending_action.is_some() {
                 return Err("A Premiere action is already in progress.".into());
@@ -949,7 +970,7 @@ fn activate_action(
             });
         }
     }
-    if action != Action::GoToMarker && state.is_visible {
+    if action != Action::GoToMarker && action != Action::LockHorizontalAxis && state.is_visible {
         hide_and_restore_focus(ui, state);
     }
     schedule_action_deadlines(state);
@@ -1619,6 +1640,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_action_hotkeys(ModelRc::new(VecModel::from(Action::ALL.map(|action| ActionHotkeyUI {
             id: action.id().into(),
             label: action.name().into(),
+            hint: action.hotkey_hint().into(),
             shortcut: settings.action_hotkeys.get(action.id()).map_or("", String::as_str).into(),
         }).to_vec())));
         action_hotkeys::update_bindings(settings);
@@ -2998,6 +3020,21 @@ mod tests {
         escape_palette(&ui, &mut state);
         assert!(state.is_visible && !ui.get_marker_picker());
         assert_eq!(ui.get_active_catalog(), "actions");
+
+        activate_action(Action::LockHorizontalAxis, &ui, &mut state, &bridge).unwrap();
+        assert!(state.is_visible && ui.get_settings_open());
+        assert_eq!(ui.get_settings_tab_index(), 1);
+        assert!(requests.try_recv().is_err());
+
+        ui.set_settings_open(false);
+        state
+            .settings
+            .action_hotkeys
+            .insert(Action::LockHorizontalAxis.id().into(), "F8".into());
+        activate_action(Action::LockHorizontalAxis, &ui, &mut state, &bridge).unwrap();
+        assert!(state.is_visible && !ui.get_settings_open());
+        assert!(ui.get_status_message().as_str().contains("Hold F8"));
+        assert!(requests.try_recv().is_err());
     }
 
     #[test]
@@ -3996,6 +4033,7 @@ mod tests {
         ui.set_action_hotkeys(ModelRc::new(VecModel::from(vec![ActionHotkeyUI {
             id: Action::AddAdjustmentLayer.id().into(),
             label: Action::AddAdjustmentLayer.name().into(),
+            hint: Action::AddAdjustmentLayer.hotkey_hint().into(),
             shortcut: "F6".into(),
         }])));
         let cleared = Rc::new(RefCell::new(SharedString::default()));

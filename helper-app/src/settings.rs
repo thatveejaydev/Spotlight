@@ -500,7 +500,8 @@ pub fn match_palette_shortcut(
         return Some(PaletteShortcutAction::PreviewAudio);
     }
     Action::ALL.into_iter().find(|action| {
-        settings.action_hotkeys.get(action.id()).is_some_and(|spec| matches_spec(spec))
+        !action.is_hold()
+            && settings.action_hotkeys.get(action.id()).is_some_and(|spec| matches_spec(spec))
     }).map(PaletteShortcutAction::RunAction)
 }
 
@@ -808,7 +809,8 @@ mod tests {
         let dir = env::temp_dir().join(format!("spotlight-action-hotkeys-{}", std::process::id()));
         let path = dir.join("config.json");
         for (action, (key, label)) in Action::ALL.into_iter().zip([
-            (Key::F6, "F6"), (Key::F7, "F7"), (Key::F8, "F8"), (Key::F9, "F9"), (Key::F10, "F10"),
+            (Key::F5, "F5"), (Key::F6, "F6"), (Key::F7, "F7"),
+            (Key::F8, "F8"), (Key::F9, "F9"), (Key::F10, "F10"),
         ]) {
             assert_eq!(serde_json::to_value(action).unwrap(), action.id());
             save_action_hotkey(&path, &mut settings, action, Some(label)).unwrap();
@@ -816,9 +818,10 @@ mod tests {
             assert!(errors.is_empty());
             assert!(normalize_action_hotkeys(&mut loaded).is_empty());
             assert_eq!(loaded, settings);
+            let expected = (!action.is_hold()).then_some(PaletteShortcutAction::RunAction(action));
             assert_eq!(
                 match_palette_shortcut(&loaded, false, &String::from(char::from(key)), false, false, false, false),
-                Some(PaletteShortcutAction::RunAction(action)),
+                expected,
             );
             assert_eq!(
                 match_palette_shortcut(&loaded, true, &String::from(char::from(key)), false, false, false, false),
@@ -828,9 +831,9 @@ mod tests {
         let original = settings.clone();
         assert!(save_action_hotkey(&path, &mut settings, Action::AddMarker, Some("Ctrl+P"))
             .unwrap_err().contains("Preview Audio"));
-        assert!(save_action_hotkey(&path, &mut settings, Action::AddMarker, Some("F6"))
+        assert!(save_action_hotkey(&path, &mut settings, Action::AddMarker, Some("F5"))
             .unwrap_err().contains("Add Adjustment Layer"));
-        assert!(shortcut_conflict("launch", "F7", &settings).unwrap().contains("Add Marker"));
+        assert!(shortcut_conflict("launch", "F6", &settings).unwrap().contains("Add Marker"));
         assert!(save_action_hotkey(&dir, &mut settings, Action::AddMarker, Some("F11")).is_err());
         assert_eq!(settings, original);
         assert_eq!(load_settings_from(&path), original);
