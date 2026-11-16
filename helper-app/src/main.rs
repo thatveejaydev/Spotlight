@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod action_hotkeys;
 mod actions;
 mod audio_preview;
 mod bridge;
@@ -857,37 +858,8 @@ fn apply_entry_with_options(
             }
             return Ok(None);
         }
-        SearchResult::Action(Action::GoToMarker) => {
-            let picker = MarkerPicker::open(bridge, ui.get_search_text());
-            ui.set_marker_picker(true);
-            ui.set_marker_status(picker.status().into());
-            ui.set_search_text("".into());
-            state.marker_picker = Some(picker);
-            refresh_marker_results(ui, state);
-            ui.invoke_focus_search();
-            schedule_action_deadlines(state);
-            return Ok(None);
-        }
-        SearchResult::Action(Action::AddMarker) => {
-            if state.marker_dialog.is_some() {
-                return Err("Add Marker is already in progress.".into());
-            }
-            state.marker_dialog = Some(MarkerDialog::new(state.previous_hwnd, bridge)?);
-            hide_and_restore_focus(ui, state);
-            schedule_action_deadlines(state);
-            return Ok(None);
-        }
         SearchResult::Action(action) => {
-            if state.pending_action.is_some() {
-                return Err("A Premiere action is already in progress.".into());
-            }
-            let (request_id, peer_id) = bridge.run_action(action).map_err(SharedString::from)?;
-            state.pending_action = Some(PendingAction {
-                request_id,
-                peer_id,
-                deadline: Instant::now() + ACTION_TIMEOUT,
-            });
-            schedule_action_deadlines(state);
+            return activate_action(action, ui, state, bridge).map(|()| None);
         }
         SearchResult::Effect(entry) => {
             let Some((request_id, recipients)) = bridge.send_apply(&entry) else {
@@ -933,6 +905,79 @@ fn apply_entry_with_options(
     hide_palette(ui, state);
     restore_premiere_focus(state.previous_hwnd);
     Ok(None)
+}
+
+fn activate_action(
+    action: Action,
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+) -> Result<(), SharedString> {
+    if state.pending_placement.is_some() {
+        return Err("A media placement is already in progress.".into());
+    }
+    match action {
+        Action::GoToMarker => {
+            if state.marker_picker.is_some() { return Ok(()); }
+            if !state.is_visible {
+                center_and_show(ui, state, bridge);
+                ui.set_active_catalog("actions".into());
+            }
+            let picker = MarkerPicker::open(bridge, ui.get_search_text());
+            ui.set_marker_picker(true);
+            ui.set_marker_status(picker.status().into());
+            ui.set_search_text("".into());
+            state.marker_picker = Some(picker);
+            refresh_marker_results(ui, state);
+            ui.invoke_focus_search();
+        }
+        Action::AddMarker => {
+            if state.marker_dialog.is_some() {
+                return Err("Add Marker is already in progress.".into());
+            }
+            state.marker_dialog = Some(MarkerDialog::new(state.previous_hwnd, bridge)?);
+        }
+        _ => {
+            if state.pending_action.is_some() {
+                return Err("A Premiere action is already in progress.".into());
+            }
+            let (request_id, peer_id) = bridge.run_action(action).map_err(SharedString::from)?;
+            state.pending_action = Some(PendingAction {
+                request_id,
+                peer_id,
+                deadline: Instant::now() + ACTION_TIMEOUT,
+            });
+        }
+    }
+    if action != Action::GoToMarker && state.is_visible {
+        hide_and_restore_focus(ui, state);
+    }
+    schedule_action_deadlines(state);
+    Ok(())
+}
+
+fn dispatch_action_hotkey(
+    action: Action,
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+    toast: &Rc<ErrorToast>,
+    foreground: Option<isize>,
+) {
+    if ui.get_settings_open() || ui.get_recording_hotkey() {
+        return;
+    }
+    if let Some(hwnd) = foreground {
+        if win_focus::get_foreground_hwnd() != hwnd || !win_focus::is_premiere_action_window(hwnd) {
+            return;
+        }
+        state.previous_hwnd = hwnd;
+    } else if !state.is_visible || !win_focus::is_premiere_action_window(state.previous_hwnd) {
+        return;
+    }
+    if let Err(message) = activate_action(action, ui, state, bridge) {
+        toast.show(message, state.previous_hwnd);
+    }
 }
 
 fn shift_activate_at(
@@ -1030,7 +1075,11 @@ fn main() -> Result<(), slint::PlatformError> {
     win_focus::init_palette_window(extract_window_hwnd(&ui));
     debug_log::log_event(LogKind::Info, "INIT", "Premiere Spotlight helper started");
 
-    let initial_settings = settings::load_settings();
+    let (mut initial_settings, mut action_hotkey_errors) = settings::load_settings_with_feedback();
+    action_hotkey_errors.extend(settings::normalize_action_hotkeys(&mut initial_settings));
+    for message in action_hotkey_errors {
+        debug_log::log_event(LogKind::Error, "HOTKEY", &message);
+    }
 
     // Create native Windows System Tray icon (no taskbar icon)
     let tray = Rc::new(RefCell::new(SystemTray::new()));
@@ -1567,6 +1616,12 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_catalog_project_hotkey_label(settings.catalog_project_hotkey.clone().into());
         ui.set_catalog_actions_hotkey_label(settings.catalog_actions_hotkey.clone().into());
         ui.set_audio_preview_hotkey_label(settings.audio_preview_hotkey.clone().into());
+        ui.set_action_hotkeys(ModelRc::new(VecModel::from(Action::ALL.map(|action| ActionHotkeyUI {
+            id: action.id().into(),
+            label: action.name().into(),
+            shortcut: settings.action_hotkeys.get(action.id()).map_or("", String::as_str).into(),
+        }).to_vec())));
+        action_hotkeys::update_bindings(settings);
         ui.set_auto_preview_audio(settings.auto_preview_audio);
         ui.set_config_path_display(settings::config_path().to_string_lossy().into_owned().into());
         if !ui.get_bridge_connected() {
@@ -1627,6 +1682,25 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
+    fn update_action_hotkey(
+        ui: &SpotlightWindow,
+        state: &mut AppState,
+        action: Action,
+        label: Option<&str>,
+    ) {
+        let result = settings::save_action_hotkey(&settings::config_path(), &mut state.settings, action, label);
+        ui.set_settings_feedback_error(result.is_err());
+        let message = match result {
+            Ok(()) => match label {
+                Some(label) => format!("{} hotkey set to {label}.", action.name()),
+                None => format!("Cleared {} hotkey.", action.name()),
+            },
+            Err(err) => err,
+        };
+        ui.set_settings_feedback(message.into());
+        sync_settings_ui(ui, &state.settings);
+    }
+
     fn toggle_default_effect_controls_setting(
         ui: &SpotlightWindow,
         state: &mut AppState,
@@ -1649,7 +1723,7 @@ fn main() -> Result<(), slint::PlatformError> {
         state: &mut AppState,
         hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
     ) {
-        let loaded = settings::load_settings();
+        let (loaded, mut feedback) = settings::load_settings_with_feedback();
         state.settings.theme = loaded.theme;
         state.settings.open_effect_controls_by_default = loaded.open_effect_controls_by_default;
         state.settings.alternate_modifier = loaded.alternate_modifier;
@@ -1660,6 +1734,7 @@ fn main() -> Result<(), slint::PlatformError> {
         state.settings.catalog_actions_hotkey = loaded.catalog_actions_hotkey;
         state.settings.audio_preview_hotkey = loaded.audio_preview_hotkey;
         state.settings.auto_preview_audio = loaded.auto_preview_audio;
+        state.settings.action_hotkeys.clear();
 
         let mut error_msg = None;
         if let Ok((hotkey, label)) = settings::parse_hotkey_spec(&loaded.hotkey) {
@@ -1675,11 +1750,16 @@ fn main() -> Result<(), slint::PlatformError> {
             if settings::shortcut_conflict("audio_preview", &state.settings.audio_preview_hotkey, &state.settings).is_some() {
                 state.settings.audio_preview_hotkey.clear();
             }
-            ui.set_settings_feedback_error(true);
-            ui.set_settings_feedback(err.into());
-        } else {
+            feedback.push(err);
+        }
+        state.settings.action_hotkeys = loaded.action_hotkeys;
+        feedback.extend(settings::normalize_action_hotkeys(&mut state.settings));
+        if feedback.is_empty() {
             ui.set_settings_feedback_error(false);
             ui.set_settings_feedback("Reloaded settings from config.json".into());
+        } else {
+            ui.set_settings_feedback_error(true);
+            ui.set_settings_feedback(feedback.join(" ").into());
         }
         sync_settings_ui(ui, &state.settings);
     }
@@ -1801,6 +1881,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 Ok(Some((_hotkey, label))) => {
                     stop_shortcut_recording(&ui, Some(&rec_flag));
                     let mut st = state_ref.borrow_mut();
+                    if let Some(action) = Action::from_id(target_str) {
+                        update_action_hotkey(&ui, &mut st, action, Some(&label));
+                        return;
+                    }
                     if let Some(conflict) =
                         settings::shortcut_conflict(target_str, &label, &st.settings)
                     {
@@ -1835,6 +1919,10 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             stop_shortcut_recording(&ui, Some(&rec_flag));
             let mut st = state_ref.borrow_mut();
+            if let Some(action) = Action::from_id(target.as_str()) {
+                update_action_hotkey(&ui, &mut st, action, None);
+                return;
+            }
             if let Some((slot_name, slot)) =
                 palette_shortcut_slot_mut(&mut st.settings, target.as_str())
             {
@@ -1887,6 +1975,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let rec_flag = recording_hotkey_flag.clone();
+        let bridge = bridge.clone();
+        let toast = error_toast.clone();
         ui.on_try_palette_shortcut(move |text, ctrl, alt, shift, meta, repeat| {
             let Some(ui) = ui_weak.upgrade() else {
                 return false;
@@ -1923,6 +2013,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 Some(PaletteShortcutAction::PreviewAudio) => {
                     if !repeat {
                         ui.invoke_toggle_preview_playback();
+                    }
+                    true
+                }
+                Some(PaletteShortcutAction::RunAction(action)) => {
+                    if !repeat {
+                        dispatch_action_hotkey(
+                            action, &ui, &mut state_ref.borrow_mut(), &bridge, &toast, None,
+                        );
                     }
                     true
                 }
@@ -2018,24 +2116,68 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let pending_flag = hotkey_pending.clone();
         let rec_flag = recording_hotkey_flag.clone();
+        let ui_weak = ui.as_weak();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-            if event.state == HotKeyState::Pressed
-                && !rec_flag.load(Ordering::Acquire)
-                && event.id == hotkey_id_ref.load(Ordering::Acquire)
+            if event.state != HotKeyState::Pressed
+                || event.id != hotkey_id_ref.load(Ordering::Acquire)
             {
-                // Capture WM_HOTKEY foreground rights immediately and wake the event loop without timer lag.
-                win_focus::allow_current_process_foreground();
-                pending_flag.store(true, Ordering::Release);
-                let _ = slint::invoke_from_event_loop(|| {
-                    HOTKEY_DISPATCH.with(|slot| {
-                        if let Some(callback) = slot.borrow_mut().as_mut() {
-                            callback();
-                        }
-                    });
-                });
+                return;
             }
+            if rec_flag.load(Ordering::Acquire) {
+                // Windows delivers the registered launch chord here instead of to the recorder.
+                let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                    if ui.get_recording_hotkey() && ui.get_recording_target() != "launch" {
+                        ui.set_settings_feedback_error(true);
+                        ui.set_settings_feedback(format!(
+                            "{} is already assigned to Launch Hotkey.", ui.get_hotkey_label(),
+                        ).into());
+                    }
+                });
+                return;
+            }
+            // Capture WM_HOTKEY foreground rights immediately and wake the event loop without timer lag.
+            win_focus::allow_current_process_foreground();
+            pending_flag.store(true, Ordering::Release);
+            let _ = slint::invoke_from_event_loop(|| {
+                HOTKEY_DISPATCH.with(|slot| {
+                    if let Some(callback) = slot.borrow_mut().as_mut() {
+                        callback();
+                    }
+                });
+            });
         }));
     }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge = bridge.clone();
+        let toast = error_toast.clone();
+        ACTION_HOTKEY_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |binding, hwnd| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let mut state = state_ref.borrow_mut();
+                if binding.is_current(&state.settings) {
+                    dispatch_action_hotkey(binding.action, &ui, &mut state, &bridge, &toast, Some(hwnd));
+                }
+            }));
+        });
+    }
+    let rec_flag = recording_hotkey_flag.clone();
+    let _action_hotkey_hook = match action_hotkeys::ActionHotkeyHook::install(move |binding, hwnd| {
+        !rec_flag.load(Ordering::Acquire) && slint::invoke_from_event_loop(move || {
+            ACTION_HOTKEY_DISPATCH.with(|slot| {
+                if let Some(dispatch) = slot.borrow().as_ref() {
+                    dispatch(binding, hwnd);
+                }
+            });
+        }).is_ok()
+    }) {
+        Ok(hook) => Some(hook),
+        Err(message) => {
+            ui.set_action_hotkeys_warning(message.into());
+            None
+        }
+    };
     let foreground_hook_active = Rc::new(std::cell::Cell::new(false));
     let sync_palette_focus = {
         let state_ref = state.clone();
@@ -2228,6 +2370,8 @@ thread_local! {
     static BRIDGE_DISPATCH: RefCell<Option<Box<dyn FnMut(BridgeEvent)>>> = const { RefCell::new(None) };
     static PRESET_CATALOG_DISPATCH: RefCell<Option<Box<dyn FnMut(Vec<EffectEntry>)>>> = const { RefCell::new(None) };
     static HOTKEY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    static ACTION_HOTKEY_DISPATCH: RefCell<Option<Box<dyn Fn(action_hotkeys::Binding, isize)>>> =
+        const { RefCell::new(None) };
     static SYNC_FOCUS_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static DEADLINE_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static FOCUS_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
@@ -2345,6 +2489,7 @@ mod tests {
         };
 
         key(Key::RightArrow);
+        key(Key::RightArrow);
         key(Key::Tab);
         key(Key::Return);
         key(Key::DownArrow);
@@ -2387,6 +2532,7 @@ mod tests {
         assert_eq!(ui.get_theme_name(), "Premiere");
         assert_eq!(ui.get_caption_color(), Color::from_rgb_u8(0x25, 0x25, 0x25));
         ui.set_settings_open(true);
+        key(Key::RightArrow);
         key(Key::RightArrow);
         click(505., 136.);
         key(Key::UpArrow);
@@ -2841,6 +2987,17 @@ mod tests {
             assert_eq!(ui.get_search_text().as_str(), "Clip");
             assert_eq!(state.recent_items.len(), 1);
         }
+
+        activate_action(Action::RemoveAttributes, &ui, &mut state, &bridge).unwrap();
+        assert_eq!(read_command()["action"], "remove_attributes");
+        assert!(!state.is_visible);
+        activate_action(Action::GoToMarker, &ui, &mut state, &bridge).unwrap();
+        assert!(state.is_visible && ui.get_marker_picker());
+        assert_eq!(read_command()["type"], "request_project_items");
+        assert_eq!(read_command()["operation"], "list");
+        escape_palette(&ui, &mut state);
+        assert!(state.is_visible && !ui.get_marker_picker());
+        assert_eq!(ui.get_active_catalog(), "actions");
     }
 
     #[test]
@@ -3799,13 +3956,13 @@ mod tests {
         );
 
         // About cancels recording and hides the shortcut controls.
-        click(236., 72.);
+        click(375., 72.);
         assert!(!ui.get_recording_hotkey());
         click(490., 142.);
         assert!(!ui.get_recording_hotkey());
         assert!(ui.get_settings_open());
 
-        for _ in 0..2 {
+        for _ in 0..3 {
             window.dispatch_event(WindowEvent::KeyPressed {
                 text: Key::LeftArrow.into(),
             });
@@ -3835,6 +3992,24 @@ mod tests {
         });
         assert!(!ui.get_settings_open());
         assert_eq!(closed.get(), 0);
+
+        ui.set_action_hotkeys(ModelRc::new(VecModel::from(vec![ActionHotkeyUI {
+            id: Action::AddAdjustmentLayer.id().into(),
+            label: Action::AddAdjustmentLayer.name().into(),
+            shortcut: "F6".into(),
+        }])));
+        let cleared = Rc::new(RefCell::new(SharedString::default()));
+        let cleared_cb = cleared.clone();
+        ui.on_clear_shortcut(move |id| *cleared_cb.borrow_mut() = id);
+        click(594., 422.);
+        click(193., 72.);
+        click(530., 128.);
+        assert_eq!(ui.get_recording_target(), Action::AddAdjustmentLayer.id());
+        window.dispatch_event(WindowEvent::KeyPressed { text: Key::F7.into() });
+        window.dispatch_event(WindowEvent::KeyReleased { text: Key::F7.into() });
+        assert_eq!(captured.borrow().last().unwrap().1, "F7");
+        click(580., 128.);
+        assert_eq!(cleared.borrow().as_str(), Action::AddAdjustmentLayer.id());
     }
 
     #[test]
@@ -3938,7 +4113,7 @@ mod tests {
                     }
                     true
                 }
-                Some(PaletteShortcutAction::PreviewAudio) => false,
+                Some(PaletteShortcutAction::PreviewAudio | PaletteShortcutAction::RunAction(_)) => false,
                 None => false,
             }
         });

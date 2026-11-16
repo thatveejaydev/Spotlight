@@ -22,6 +22,20 @@ impl Action {
         Self::RemoveAttributes,
     ];
 
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::AddAdjustmentLayer => "add_adjustment_layer",
+            Self::AddMarker => "add_marker",
+            Self::GoToMarker => "go_to_marker",
+            Self::RegisterAdjustmentLayer => "register_adjustment_layer",
+            Self::RemoveAttributes => "remove_attributes",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.id() == id)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::AddAdjustmentLayer => "Add Adjustment Layer",

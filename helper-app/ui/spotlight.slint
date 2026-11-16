@@ -14,6 +14,12 @@ export struct DebugLogEntryUI {
     color: color,
 }
 
+export struct ActionHotkeyUI {
+    id: string,
+    label: string,
+    shortcut: string,
+}
+
 component DebugMetric inherits Rectangle {
     in property <string> label;
     in property <string> hint;
@@ -497,6 +503,8 @@ export component SpotlightWindow inherits Window {
     in-out property <string> catalog-project-hotkey-label: "";
     in-out property <string> catalog-actions-hotkey-label: "";
     in property <string> audio-preview-hotkey-label: "Ctrl+P";
+    in property <[ActionHotkeyUI]> action-hotkeys;
+    in property <string> action-hotkeys-warning;
     in property <bool> auto-preview-audio: false;
     in property <bool> preview-active: false;
     in property <string> preview-message: "";
@@ -638,7 +646,7 @@ export component SpotlightWindow inherits Window {
                 if (!root.recording-hotkey && !event.modifiers.control && !event.modifiers.alt
                     && !event.modifiers.shift && !event.modifiers.meta
                     && (event.text == Key.LeftArrow || event.text == Key.RightArrow)) {
-                    root.select-settings-tab((root.settings-tab-index + (event.text == Key.LeftArrow ? -1 : 1)).clamp(0, 2));
+                    root.select-settings-tab((root.settings-tab-index + (event.text == Key.LeftArrow ? -1 : 1)).clamp(0, 3));
                     return accept;
                 }
                 return reject;
@@ -1019,8 +1027,8 @@ export component SpotlightWindow inherits Window {
                                 spacing: 6px;
                                 alignment: start;
 
-                                for title[index] in ["Shortcuts", "Appearance", "About"] : Rectangle {
-                                    width: 88px;
+                                for title[index] in ["Spotlight Controls", "Hotkeys", "Appearance", "About"] : Rectangle {
+                                    width: index == 0 ? 133px : 88px;
                                     border-radius: 6px;
                                     background: index == root.settings-tab-index ? Theme.selected-tab-background
                                         : (tab-touch.has-hover ? Theme.tab-hover : transparent);
@@ -1048,7 +1056,7 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        if root.settings-tab-index == 2 : VerticalLayout {
+                        if root.settings-tab-index == 3 : VerticalLayout {
                             vertical-stretch: 1;
                             alignment: center;
                             spacing: 6px;
@@ -1078,7 +1086,7 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        if root.settings-tab-index != 2 && root.settings-feedback != "" : Rectangle {
+                        if root.settings-tab-index != 3 && root.settings-feedback != "" : Rectangle {
                             background: root.settings-feedback-error ? Theme.error-background : Theme.success-background;
                             HorizontalLayout {
                                 padding-left: 14px;
@@ -1094,7 +1102,49 @@ export component SpotlightWindow inherits Window {
                             }
                         }
 
-                        if root.settings-tab-index == 1 : VerticalLayout {
+                        if root.settings-tab-index == 1 : Flickable {
+                            vertical-stretch: 1;
+                            interactive: true;
+                            content-height: hotkeys-list.preferred-height;
+
+                            hotkeys-list := VerticalLayout {
+                                width: 100%;
+                                padding: 14px;
+                                spacing: 8px;
+                                alignment: start;
+
+                                if root.action-hotkeys-warning != "" : Text {
+                                    text: root.action-hotkeys-warning;
+                                    font-size: 11px;
+                                    color: Theme.error-text;
+                                    wrap: word-wrap;
+                                }
+
+                                for action in root.action-hotkeys : Rectangle {
+                                    background: Theme.header-background;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: Theme.card-border;
+
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        ShortcutRecorderRow {
+                                            label: action.label;
+                                            shortcut-text: action.shortcut;
+                                            empty-text: "Record hotkey";
+                                            recording: root.recording-hotkey && root.recording-target == action.id;
+                                            toggle-record => { root.begin-recording(action.id); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut(action.id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.settings-tab-index == 2 : VerticalLayout {
                             vertical-stretch: 1;
                             alignment: start;
                             padding: 14px;

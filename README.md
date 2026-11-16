@@ -52,3 +52,4 @@ cargo run --release
   - Customize the **Preview Audio Shortcut** (default `Ctrl+P`) and enable **Auto-preview audio** to play a clip after its highlight settles. Auto-preview is off by default.
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.
 - Under **Appearance**, choose **Light**, **Dark**, **Midnight Indigo** (the default), or **Premiere**.
+- Under **Hotkeys**, record or clear a shortcut for any ACT command. Action hotkeys start unassigned and work from Premiere or Spotlight search. Spotlight saves them under `action_hotkeys` in the same config file. Use **Spotlight Controls** for launch, catalog, and preview shortcuts.

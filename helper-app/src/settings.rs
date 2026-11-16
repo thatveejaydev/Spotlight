@@ -1,7 +1,9 @@
+use crate::actions::Action;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use serde::{Deserialize, Serialize};
 use slint::platform::Key;
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -86,6 +88,7 @@ pub struct AppSettings {
     pub catalog_actions_hotkey: String,
     pub audio_preview_hotkey: String,
     pub auto_preview_audio: bool,
+    pub action_hotkeys: BTreeMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -102,6 +105,7 @@ impl Default for AppSettings {
             catalog_actions_hotkey: String::new(),
             audio_preview_hotkey: DEFAULT_AUDIO_PREVIEW_HOTKEY.into(),
             auto_preview_audio: false,
+            action_hotkeys: BTreeMap::new(),
         }
     }
 }
@@ -111,6 +115,7 @@ pub enum PaletteShortcutAction {
     ToggleSettings,
     SelectCatalog(&'static str),
     PreviewAudio,
+    RunAction(Action),
 }
 
 pub fn config_path() -> PathBuf {
@@ -130,8 +135,9 @@ pub fn config_path() -> PathBuf {
     PathBuf::from("premiere-spotlight-config.json")
 }
 
-pub fn load_settings() -> AppSettings {
-    normalize_settings(load_settings_from(&config_path()))
+pub fn load_settings_with_feedback() -> (AppSettings, Vec<String>) {
+    let (settings, errors) = read_config(&config_path());
+    (normalize_settings(settings), errors)
 }
 
 fn normalize_settings(mut settings: AppSettings) -> AppSettings {
@@ -166,11 +172,36 @@ fn normalize_optional_hotkey(spec: &str, fallback: &str) -> String {
         .unwrap_or_else(|_| fallback.to_string())
 }
 
+#[cfg(test)]
 pub fn load_settings_from(path: &Path) -> AppSettings {
+    read_config(path).0
+}
+
+fn read_config(path: &Path) -> (AppSettings, Vec<String>) {
     let Ok(raw) = fs::read_to_string(path) else {
-        return AppSettings::default();
+        return (AppSettings::default(), Vec::new());
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (AppSettings::default(), Vec::new());
+    };
+    let mut errors = Vec::new();
+    if let Some(hotkeys) = config.get_mut("action_hotkeys") {
+        if let Some(bindings) = hotkeys.as_object_mut() {
+            bindings.retain(|id, value| {
+                if value.is_string() {
+                    return true;
+                }
+                if let Some(action) = Action::from_id(id) {
+                    errors.push(format!("{} hotkey must be a string.", action.name()));
+                }
+                false
+            });
+        } else {
+            *hotkeys = serde_json::json!({});
+            errors.push("Action hotkeys must be a JSON object.".into());
+        }
+    }
+    (serde_json::from_value(config).unwrap_or_default(), errors)
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
@@ -214,6 +245,69 @@ pub fn parse_palette_hotkey_spec(spec: &str) -> Result<(HotKey, String), String>
         return Err("In-palette shortcuts must use Ctrl, Alt, or F1–F24.".into());
     }
     Ok((hotkey, label))
+}
+
+pub fn validate_action_hotkey(hotkey: HotKey) -> Result<(), String> {
+    let mods = hotkey.mods;
+    let key = hotkey.key;
+    if mods.intersects(Modifiers::SUPER | Modifiers::META) ||
+        matches!(key, Code::Escape | Code::F12 | Code::Enter | Code::Tab
+            | Code::ArrowUp | Code::ArrowDown | Code::Backspace) ||
+        (mods == Modifiers::ALT && matches!(key, Code::F4 | Code::Space)) ||
+        (mods == (Modifiers::CONTROL | Modifiers::ALT) && key == Code::Delete) {
+        return Err("That combination is reserved by Windows or Spotlight.".into());
+    }
+    if crate::action_hotkeys::virtual_key(key).is_none() {
+        return Err("That key is unavailable for action hotkeys.".into());
+    }
+    Ok(())
+}
+
+pub fn normalize_action_hotkeys(settings: &mut AppSettings) -> Vec<String> {
+    let mut stored = std::mem::take(&mut settings.action_hotkeys);
+    let mut errors = Vec::new();
+    for action in Action::ALL {
+        let Some(spec) = stored.remove(action.id()) else { continue };
+        if spec.trim().is_empty() {
+            continue;
+        }
+        let result = parse_palette_hotkey_spec(&spec).and_then(|(hotkey, label)| {
+            validate_action_hotkey(hotkey)?;
+            if let Some(conflict) = shortcut_conflict(action.id(), &label, settings) {
+                return Err(conflict);
+            }
+            Ok(label)
+        });
+        match result {
+            Ok(label) => { settings.action_hotkeys.insert(action.id().into(), label); }
+            Err(err) => errors.push(format!("{}: {err}", action.name())),
+        }
+    }
+    // Keep string bindings belonging to a newer version of Spotlight.
+    settings.action_hotkeys.append(&mut stored);
+    errors
+}
+
+pub fn save_action_hotkey(
+    path: &Path,
+    settings: &mut AppSettings,
+    action: Action,
+    spec: Option<&str>,
+) -> Result<(), String> {
+    let mut updated = settings.clone();
+    if let Some(spec) = spec {
+        let (hotkey, label) = parse_palette_hotkey_spec(spec)?;
+        validate_action_hotkey(hotkey)?;
+        if let Some(conflict) = shortcut_conflict(action.id(), &label, settings) {
+            return Err(conflict);
+        }
+        updated.action_hotkeys.insert(action.id().into(), label);
+    } else {
+        updated.action_hotkeys.remove(action.id());
+    }
+    save_settings_to(path, &updated)?;
+    *settings = updated;
+    Ok(())
 }
 
 fn is_valid_hotkey(mods: Modifiers, code: Code) -> bool {
@@ -402,7 +496,12 @@ pub fn match_palette_shortcut(
             return Some(PaletteShortcutAction::SelectCatalog(catalog));
         }
     }
-    matches_spec(&settings.audio_preview_hotkey).then_some(PaletteShortcutAction::PreviewAudio)
+    if matches_spec(&settings.audio_preview_hotkey) {
+        return Some(PaletteShortcutAction::PreviewAudio);
+    }
+    Action::ALL.into_iter().find(|action| {
+        settings.action_hotkeys.get(action.id()).is_some_and(|spec| matches_spec(spec))
+    }).map(PaletteShortcutAction::RunAction)
 }
 
 pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> Option<String> {
@@ -440,6 +539,13 @@ pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> O
     for (slot, name, existing) in slots {
         if slot != target && !existing.is_empty() && existing.eq_ignore_ascii_case(label) {
             return Some(format!("{label} is already assigned to {name}."));
+        }
+    }
+    for action in Action::ALL {
+        if action.id() != target && settings.action_hotkeys.get(action.id()).is_some_and(|existing|
+            !existing.is_empty() && existing.eq_ignore_ascii_case(label)
+        ) {
+            return Some(format!("{label} is already assigned to {}.", action.name()));
         }
     }
     None
@@ -638,6 +744,7 @@ mod tests {
             catalog_actions_hotkey: "Ctrl+4".into(),
             audio_preview_hotkey: "Alt+P".into(),
             auto_preview_audio: true,
+            action_hotkeys: BTreeMap::new(),
         };
         for (theme, value) in [
             (PaletteTheme::Light, "light"),
@@ -655,6 +762,12 @@ mod tests {
             assert_eq!(json["theme"], value);
             assert_eq!(load_settings_from(&file), saved);
         }
+
+        fs::write(&file, r#"{"theme":"dark","action_hotkeys":{"add_marker":42,"go_to_marker":"F8"}}"#).unwrap();
+        let (loaded, errors) = read_config(&file);
+        assert_eq!(loaded.theme, PaletteTheme::Dark);
+        assert_eq!(loaded.action_hotkeys["go_to_marker"], "F8");
+        assert_eq!(errors, ["Add Marker hotkey must be a string."]);
 
         fs::write(&file, "{ not valid json").unwrap();
         assert_eq!(load_settings_from(&file), AppSettings::default());
@@ -686,6 +799,72 @@ mod tests {
         );
         assert!(cleared.audio_preview_hotkey.is_empty());
         assert!(cleared.auto_preview_audio);
+    }
+
+    #[test]
+    fn action_hotkeys_persist_and_each_matches_its_command() {
+        let mut settings = normalize_settings(serde_json::from_str(r#"{"theme":"dark"}"#).unwrap());
+        assert!(settings.action_hotkeys.is_empty());
+        let dir = env::temp_dir().join(format!("spotlight-action-hotkeys-{}", std::process::id()));
+        let path = dir.join("config.json");
+        for (action, (key, label)) in Action::ALL.into_iter().zip([
+            (Key::F6, "F6"), (Key::F7, "F7"), (Key::F8, "F8"), (Key::F9, "F9"), (Key::F10, "F10"),
+        ]) {
+            assert_eq!(serde_json::to_value(action).unwrap(), action.id());
+            save_action_hotkey(&path, &mut settings, action, Some(label)).unwrap();
+            let (mut loaded, errors) = read_config(&path);
+            assert!(errors.is_empty());
+            assert!(normalize_action_hotkeys(&mut loaded).is_empty());
+            assert_eq!(loaded, settings);
+            assert_eq!(
+                match_palette_shortcut(&loaded, false, &String::from(char::from(key)), false, false, false, false),
+                Some(PaletteShortcutAction::RunAction(action)),
+            );
+            assert_eq!(
+                match_palette_shortcut(&loaded, true, &String::from(char::from(key)), false, false, false, false),
+                None,
+            );
+        }
+        let original = settings.clone();
+        assert!(save_action_hotkey(&path, &mut settings, Action::AddMarker, Some("Ctrl+P"))
+            .unwrap_err().contains("Preview Audio"));
+        assert!(save_action_hotkey(&path, &mut settings, Action::AddMarker, Some("F6"))
+            .unwrap_err().contains("Add Adjustment Layer"));
+        assert!(shortcut_conflict("launch", "F7", &settings).unwrap().contains("Add Marker"));
+        assert!(save_action_hotkey(&dir, &mut settings, Action::AddMarker, Some("F11")).is_err());
+        assert_eq!(settings, original);
+        assert_eq!(load_settings_from(&path), original);
+
+        save_action_hotkey(&path, &mut settings, Action::AddMarker, Some("F11")).unwrap();
+        assert_eq!(settings.action_hotkeys["add_marker"], "F11");
+        save_action_hotkey(&path, &mut settings, Action::AddMarker, None).unwrap();
+        assert!(!load_settings_from(&path).action_hotkeys.contains_key("add_marker"));
+        assert_eq!(settings.theme, PaletteTheme::Dark);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn action_hotkey_reload_keeps_existing_controls_and_reports_conflicts() {
+        let mut settings = normalize_settings(serde_json::from_str(r#"{
+            "hotkey": "Alt+J",
+            "action_hotkeys": {
+                "add_adjustment_layer": "control+k",
+                "add_marker": "Ctrl+K",
+                "go_to_marker": "Alt+J",
+                "register_adjustment_layer": "F12",
+                "remove_attributes": "",
+                "future_action": "F3"
+            }
+        }"#).unwrap());
+        let errors = normalize_action_hotkeys(&mut settings);
+        assert_eq!(settings.action_hotkeys["add_adjustment_layer"], "Ctrl+K");
+        assert_eq!(settings.action_hotkeys["future_action"], "F3");
+        assert_eq!(settings.action_hotkeys.len(), 2);
+        assert_eq!(errors.len(), 3);
+        assert!(errors[0].contains("already assigned to Add Adjustment Layer"));
+        assert!(errors[1].contains("Launch Hotkey"));
+        assert!(errors[2].contains("reserved"));
     }
 
     #[test]

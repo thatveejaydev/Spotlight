@@ -432,22 +432,39 @@ pub(crate) fn preset_handoff_keys_released() -> bool {
 #[cfg(windows)]
 fn can_send_preset_input(process_id: u32) -> bool {
     let foreground = get_foreground_hwnd();
-    if window_process_id(foreground) != Some(process_id) {
-        return false;
-    }
+    window_process_id(foreground) == Some(process_id)
+        && accepts_premiere_keys(foreground)
+        && get_foreground_hwnd() == foreground
+}
+
+#[cfg(windows)]
+fn accepts_premiere_keys(hwnd: isize) -> bool {
     unsafe {
         let mut info: GUITHREADINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-        let thread = GetWindowThreadProcessId(foreground as _, std::ptr::null_mut());
+        let thread = GetWindowThreadProcessId(hwnd as _, std::ptr::null_mut());
         let mut class = [0u16; 32];
-        let class_len = GetClassNameW(foreground as _, class.as_mut_ptr(), class.len() as i32);
+        let class_len = GetClassNameW(hwnd as _, class.as_mut_ptr(), class.len() as i32);
         thread != 0
             && GetGUIThreadInfo(thread, &mut info) != 0
             && info.flags & (GUI_INMENUMODE | GUI_INMOVESIZE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE)
                 == 0
-            && String::from_utf16_lossy(&class[..class_len.max(0) as usize]) != "#32770"
-            && get_foreground_hwnd() == foreground
+            && class[..class_len.max(0) as usize].iter().copied().ne("#32770".encode_utf16())
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn is_premiere_action_window(hwnd: isize) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+    is_premiere_active_and_unminimized(hwnd) && accepts_premiere_keys(hwnd) && unsafe {
+        let owner = GetAncestor(hwnd as _, GA_ROOTOWNER);
+        IsWindowEnabled(hwnd as _) != 0 && !owner.is_null() && IsWindowEnabled(owner) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_premiere_action_window(_hwnd: isize) -> bool {
+    false
 }
 
 #[cfg(windows)]
