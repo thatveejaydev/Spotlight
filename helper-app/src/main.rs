@@ -10,6 +10,7 @@ mod debug_log;
 mod error_toast;
 mod installer;
 mod presets;
+mod safe_file;
 mod settings;
 mod tray;
 mod win_focus;
@@ -1169,10 +1170,24 @@ fn main() -> Result<(), slint::PlatformError> {
     win_focus::init_palette_window(extract_window_hwnd(&ui));
     debug_log::log_event(LogKind::Info, "INIT", "Premiere Spotlight helper started");
 
-    let (mut initial_settings, mut action_hotkey_errors) = settings::load_settings_with_feedback();
+    let (mut initial_settings, mut action_hotkey_errors, settings_file_warning) =
+        settings::load_settings_with_feedback();
     action_hotkey_errors.extend(settings::normalize_action_hotkeys(&mut initial_settings));
     for message in action_hotkey_errors {
         debug_log::log_event(LogKind::Error, "HOTKEY", &message);
+    }
+    if let Some(warning) = settings_file_warning {
+        let toast = error_toast.clone();
+        // Give Premiere a moment to own the foreground so the toast lands on its monitor.
+        slint::Timer::single_shot(Duration::from_secs(2), move || {
+            let foreground = win_focus::get_foreground_hwnd();
+            let anchor = if win_focus::is_premiere_active_and_unminimized(foreground) {
+                foreground
+            } else {
+                0
+            };
+            toast.show(warning.into(), anchor);
+        });
     }
 
     // Create native Windows System Tray icon (no taskbar icon)
@@ -1835,7 +1850,16 @@ fn main() -> Result<(), slint::PlatformError> {
         state: &mut AppState,
         hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
     ) {
-        let (loaded, mut feedback) = settings::load_settings_with_feedback();
+        let (loaded, mut feedback, file_warning) = settings::load_settings_with_feedback();
+        if file_warning.is_some() {
+            // Keep the working settings instead of swapping in defaults from an unreadable file.
+            ui.set_settings_feedback_error(true);
+            ui.set_settings_feedback(
+                "Couldn't reload: the settings file has an error. Your current settings are unchanged."
+                    .into(),
+            );
+            return;
+        }
         state.settings.theme = loaded.theme;
         state.settings.open_effect_controls_by_default = loaded.open_effect_controls_by_default;
         state.settings.alternate_modifier = loaded.alternate_modifier;

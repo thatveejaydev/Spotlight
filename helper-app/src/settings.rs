@@ -135,9 +135,10 @@ pub fn config_path() -> PathBuf {
     PathBuf::from("premiere-spotlight-config.json")
 }
 
-pub fn load_settings_with_feedback() -> (AppSettings, Vec<String>) {
-    let (settings, errors) = read_config(&config_path());
-    (normalize_settings(settings), errors)
+/// Returns the settings, per-hotkey problems, and a warning when the settings file itself could not be used.
+pub fn load_settings_with_feedback() -> (AppSettings, Vec<String>, Option<String>) {
+    let (settings, errors, file_warning) = read_config(&config_path());
+    (normalize_settings(settings), errors, file_warning)
 }
 
 fn normalize_settings(mut settings: AppSettings) -> AppSettings {
@@ -177,12 +178,54 @@ pub fn load_settings_from(path: &Path) -> AppSettings {
     read_config(path).0
 }
 
-fn read_config(path: &Path) -> (AppSettings, Vec<String>) {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return (AppSettings::default(), Vec::new());
+fn log_settings_problem(details: String) {
+    crate::debug_log::log_event(crate::debug_log::LogKind::Error, "SETTINGS", details);
+}
+
+/// Keeps a copy of a settings file Spotlight cannot use, so the next save can't destroy it.
+/// Returns a short message that fits the two-line error toast; file paths go to the debug log.
+fn set_aside_unreadable_config(path: &Path) -> String {
+    match crate::safe_file::back_up(path) {
+        Ok(backup) => {
+            log_settings_problem(format!(
+                "{} has an error. Using defaults; the file was copied to {}.",
+                path.display(),
+                backup.display()
+            ));
+            "Settings file has an error. Using defaults; your file was backed up.".into()
+        }
+        Err(error) => {
+            log_settings_problem(format!(
+                "{} has an error and couldn't be copied: {error}",
+                path.display()
+            ));
+            "Settings file has an error. Copy it before changing settings.".into()
+        }
+    }
+}
+
+fn read_config(path: &Path) -> (AppSettings, Vec<String>, Option<String>) {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (AppSettings::default(), Vec::new(), None);
+        }
+        Err(error) => {
+            log_settings_problem(format!("Could not open {}: {error}", path.display()));
+            return (
+                AppSettings::default(),
+                Vec::new(),
+                Some("Couldn't open the settings file. Using defaults for now.".into()),
+            );
+        }
     };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return (AppSettings::default(), Vec::new());
+    // Notepad can save UTF-8 with a byte order mark, which JSON parsers reject.
+    let parsed = std::str::from_utf8(&bytes)
+        .ok()
+        .map(|raw| raw.strip_prefix('\u{feff}').unwrap_or(raw))
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let Some(mut config) = parsed else {
+        return (AppSettings::default(), Vec::new(), Some(set_aside_unreadable_config(path)));
     };
     let mut errors = Vec::new();
     if let Some(hotkeys) = config.get_mut("action_hotkeys") {
@@ -201,7 +244,10 @@ fn read_config(path: &Path) -> (AppSettings, Vec<String>) {
             errors.push("Action hotkeys must be a JSON object.".into());
         }
     }
-    (serde_json::from_value(config).unwrap_or_default(), errors)
+    match serde_json::from_value(config) {
+        Ok(settings) => (settings, errors, None),
+        Err(_) => (AppSettings::default(), errors, Some(set_aside_unreadable_config(path))),
+    }
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
@@ -217,7 +263,7 @@ pub fn save_settings_to(path: &Path, settings: &AppSettings) -> Result<(), Strin
     }
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {e}"))?;
-    fs::write(path, json).map_err(|e| format!("Failed to save settings: {e}"))
+    crate::safe_file::write_atomic(path, json).map_err(|e| format!("Failed to save settings: {e}"))
 }
 
 pub fn resolve_open_effect_controls(open_by_default: bool, is_shift_activate: bool) -> bool {
@@ -765,13 +811,57 @@ mod tests {
         }
 
         fs::write(&file, r#"{"theme":"dark","action_hotkeys":{"add_marker":42,"go_to_marker":"F8"}}"#).unwrap();
-        let (loaded, errors) = read_config(&file);
+        let (loaded, errors, warning) = read_config(&file);
         assert_eq!(loaded.theme, PaletteTheme::Dark);
         assert_eq!(loaded.action_hotkeys["go_to_marker"], "F8");
         assert_eq!(errors, ["Add Marker hotkey must be a string."]);
+        assert_eq!(warning, None);
+        assert!(!dir.join("config.json.bak").exists());
 
         fs::write(&file, "{ not valid json").unwrap();
         assert_eq!(load_settings_from(&file), AppSettings::default());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_settings_are_backed_up_before_defaults_can_overwrite_them() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("premiere_spotlight_bad_settings_{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.json");
+        let backup = dir.join("config.json.bak");
+
+        for broken in [
+            "{ not valid json",
+            r#"{"hotkey": 5, "action_hotkeys": {"add_marker": "F8"}}"#,
+        ] {
+            fs::write(&file, broken).unwrap();
+            let (loaded, _, warning) = read_config(&file);
+            assert_eq!(loaded, AppSettings::default());
+            assert_eq!(
+                warning.as_deref(),
+                Some("Settings file has an error. Using defaults; your file was backed up.")
+            );
+            assert_eq!(fs::read_to_string(&backup).unwrap(), broken);
+
+            // Saving afterwards replaces the live file but never the recovery copy.
+            save_settings_to(&file, &AppSettings::default()).unwrap();
+            assert_eq!(fs::read_to_string(&backup).unwrap(), broken);
+            assert_eq!(read_config(&file).2, None);
+            assert!(!dir.join("config.json.tmp").exists());
+        }
+
+        fs::write(&file, "\u{feff}{\"theme\":\"light\"}").unwrap();
+        let (loaded, _, warning) = read_config(&file);
+        assert_eq!(loaded.theme, PaletteTheme::Light);
+        assert_eq!(warning, None);
+
+        fs::remove_file(&file).unwrap();
+        assert_eq!(read_config(&file).2, None);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -814,7 +904,7 @@ mod tests {
         ]) {
             assert_eq!(serde_json::to_value(action).unwrap(), action.id());
             save_action_hotkey(&path, &mut settings, action, Some(label)).unwrap();
-            let (mut loaded, errors) = read_config(&path);
+            let (mut loaded, errors, _) = read_config(&path);
             assert!(errors.is_empty());
             assert!(normalize_action_hotkeys(&mut loaded).is_empty());
             assert_eq!(loaded, settings);

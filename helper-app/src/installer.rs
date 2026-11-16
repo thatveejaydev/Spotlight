@@ -94,7 +94,9 @@ fn write_uxp_plugin_and_register(exe_path: &Path, appdata_path: &Path) -> PathBu
     let premiere_json_path = premiere_plugins_info_path(appdata_path);
     if let Some(plugins_info_dir) = premiere_json_path.parent() {
         if fs::create_dir_all(plugins_info_dir).is_ok() {
-            update_premiere_plugins_info(&premiere_json_path);
+            if let Err(message) = update_premiere_plugins_info(&premiere_json_path) {
+                report_problem(&message);
+            }
         }
     }
 
@@ -187,7 +189,26 @@ pub fn uninstall_for_setup(purge_config: bool) {
     try_upia_uninstall();
 }
 
-fn update_premiere_plugins_info(json_path: &Path) {
+fn report_problem(message: &str) {
+    eprintln!("[installer] {message}");
+    crate::debug_log::log_event(crate::debug_log::LogKind::Error, "INSTALL", message);
+}
+
+/// Premiere's plugin list also registers other vendors' plugins, so an unreadable
+/// list is backed up and left untouched instead of being replaced.
+fn leave_unreadable_plugins_info(json_path: &Path) -> String {
+    let backup = match crate::safe_file::back_up(json_path) {
+        Ok(path) => format!("A copy was saved as {}.", path.display()),
+        Err(error) => format!("Spotlight could not save a copy: {error}."),
+    };
+    format!(
+        "Premiere's plugin list at {} isn't valid, so Spotlight left it unchanged. {backup} \
+         Repair or delete the file, then restart Premiere.",
+        json_path.display()
+    )
+}
+
+fn update_premiere_plugins_info(json_path: &Path) -> Result<(), String> {
     let our_entry = json!({
         "hostMinVersion": "25.2.0",
         "name": PLUGIN_NAME,
@@ -198,27 +219,29 @@ fn update_premiere_plugins_info(json_path: &Path) {
         "versionString": PLUGIN_VERSION
     });
 
-    let mut root: Value = if let Ok(existing) = fs::read_to_string(json_path) {
-        serde_json::from_str(&existing).unwrap_or_else(|_| json!({ "plugins": [] }))
-    } else {
-        json!({ "plugins": [] })
+    let mut root: Value = match fs::read_to_string(json_path) {
+        Ok(existing) => match serde_json::from_str::<Value>(&existing) {
+            Ok(root) if root.is_object() && root.get("plugins").is_none_or(Value::is_array) => root,
+            _ => return Err(leave_unreadable_plugins_info(json_path)),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({ "plugins": [] }),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(leave_unreadable_plugins_info(json_path));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not read Premiere's plugin list at {}: {error}",
+                json_path.display()
+            ));
+        }
     };
 
-    if !root.is_object() {
-        root = json!({ "plugins": [] });
-    }
-
-    let plugins_arr = root
+    let Some(arr) = root
         .as_object_mut()
-        .unwrap()
-        .entry("plugins")
-        .or_insert_with(|| json!([]));
-
-    if !plugins_arr.is_array() {
-        *plugins_arr = json!([]);
-    }
-
-    let arr = plugins_arr.as_array_mut().unwrap();
+        .and_then(|object| object.entry("plugins").or_insert_with(|| json!([])).as_array_mut())
+    else {
+        return Err(leave_unreadable_plugins_info(json_path));
+    };
     let mut found = false;
     let mut changed = false;
 
@@ -239,10 +262,16 @@ fn update_premiere_plugins_info(json_path: &Path) {
     }
 
     if changed || !json_path.exists() {
-        if let Ok(serialized) = serde_json::to_string_pretty(&root) {
-            let _ = fs::write(json_path, serialized);
-        }
+        let serialized = serde_json::to_string_pretty(&root)
+            .map_err(|error| format!("Could not prepare Premiere's plugin list: {error}"))?;
+        crate::safe_file::write_atomic(json_path, serialized).map_err(|error| {
+            format!(
+                "Could not save Premiere's plugin list at {}: {error}",
+                json_path.display()
+            )
+        })?;
     }
+    Ok(())
 }
 
 fn remove_from_premiere_plugins_info(json_path: &Path) {
@@ -260,7 +289,12 @@ fn remove_from_premiere_plugins_info(json_path: &Path) {
     arr.retain(|item| item.get("pluginId").and_then(|v| v.as_str()) != Some(PLUGIN_ID));
     if arr.len() != before_len {
         if let Ok(serialized) = serde_json::to_string_pretty(&root) {
-            let _ = fs::write(json_path, serialized);
+            if let Err(error) = crate::safe_file::write_atomic(json_path, serialized) {
+                report_problem(&format!(
+                    "Could not remove Spotlight from Premiere's plugin list at {}: {error}",
+                    json_path.display()
+                ));
+            }
         }
     }
 }
@@ -343,7 +377,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
 
-        update_premiere_plugins_info(&path);
+        update_premiere_plugins_info(&path).unwrap();
         let after_add: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let arr = after_add["plugins"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -357,6 +391,48 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["pluginId"], "is.helm.palette.bridge");
 
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unreadable_plugin_lists_are_backed_up_and_left_unchanged() {
+        let invalid_utf8: &[u8] = &[b'{', 0xFF, 0xFE, b'}'];
+        let cases: [(&str, &[u8]); 4] = [
+            ("not_json", b"not json"),
+            ("plugins_not_array", br#"{"plugins":"oops","other":1}"#),
+            ("root_not_object", b"[1, 2, 3]"),
+            ("invalid_utf8", invalid_utf8),
+        ];
+        for (name, original) in cases {
+            let path = temp_json_path(name);
+            fs::write(&path, original).unwrap();
+
+            let message = update_premiere_plugins_info(&path).unwrap_err();
+            assert!(message.contains("left it unchanged"), "{name}: {message}");
+            assert_eq!(fs::read(&path).unwrap(), original, "{name} was modified");
+
+            let mut backup = path.clone().into_os_string();
+            backup.push(".bak");
+            let backup = PathBuf::from(backup);
+            assert_eq!(fs::read(&backup).unwrap(), original, "{name} backup differs");
+
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&backup);
+        }
+    }
+
+    #[test]
+    fn missing_plugin_list_is_created_with_spotlight_registered() {
+        let path = temp_json_path("missing");
+        update_premiere_plugins_info(&path).unwrap();
+        let created: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let plugins = created["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["pluginId"], PLUGIN_ID);
+
+        let mut temp = path.clone().into_os_string();
+        temp.push(".tmp");
+        assert!(!PathBuf::from(temp).exists());
         let _ = fs::remove_file(&path);
     }
 }
