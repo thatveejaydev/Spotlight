@@ -473,6 +473,9 @@ export component SpotlightWindow inherits Window {
     in-out property <int> selected-index: 0;
     in-out property <string> active-catalog: "all";
     in-out property <string> active-bin: "";
+    in property <bool> marker-picker: false;
+    in property <string> marker-status: "";
+    in property <string> marker-context: "";
     in property <bool> show-recent-items: false;
     in-out property <bool> bridge-connected: false;
     in-out property <int> total-matches: 0;
@@ -492,6 +495,7 @@ export component SpotlightWindow inherits Window {
     in-out property <string> catalog-all-hotkey-label: "";
     in-out property <string> catalog-effects-hotkey-label: "";
     in-out property <string> catalog-project-hotkey-label: "";
+    in-out property <string> catalog-actions-hotkey-label: "";
     in property <string> audio-preview-hotkey-label: "Ctrl+P";
     in property <bool> auto-preview-audio: false;
     in property <bool> preview-active: false;
@@ -589,7 +593,8 @@ export component SpotlightWindow inherits Window {
 
     function switch-catalog() {
         root.select-catalog(root.active-catalog == "all" ? "effects"
-            : root.active-catalog == "effects" ? "project" : "all");
+            : root.active-catalog == "effects" ? "project"
+            : root.active-catalog == "project" ? "actions" : "all");
     }
 
     function select-catalog(catalog: string) {
@@ -815,10 +820,12 @@ export component SpotlightWindow inherits Window {
                             x: 0px;
                             width: 100%;
                             height: 100%;
-                            text: root.active-bin != "" ? "Search in \{root.active-bin}…"
+                            text: root.marker-picker ? "Search markers…"
+                                : root.active-bin != "" ? "Search in \{root.active-bin}…"
                                 : root.active-catalog == "effects" ? "Search effects and transitions…"
                                 : root.active-catalog == "project" ? "Search project items…"
-                                : "Search effects and project items…";
+                                : root.active-catalog == "actions" ? "Search actions…"
+                                : "Search effects, project items, and actions…";
                             color: Theme.placeholder-text;
                             font-size: 13.5px;
                             vertical-alignment: center;
@@ -899,7 +906,7 @@ export component SpotlightWindow inherits Window {
                 background: Theme.strip-background;
                 accessible-role: tab-list;
                 accessible-label: "Search catalogs";
-                accessible-item-count: 3;
+                accessible-item-count: 4;
 
                 HorizontalLayout {
                     padding-left: 16px;
@@ -912,6 +919,7 @@ export component SpotlightWindow inherits Window {
                         { id: "all", label: "All", name: "All", accent: Theme.catalog-all },
                         { id: "effects", label: "FX", name: "Effects", accent: Theme.catalog-effects },
                         { id: "project", label: "PRJ", name: "Project", accent: Theme.catalog-project },
+                        { id: "actions", label: "ACT", name: "Actions", accent: Theme.catalog-actions },
                     ] : Rectangle {
                         private property <bool> active: catalog.id == root.active-catalog;
                         width: 46px;
@@ -1431,6 +1439,17 @@ export component SpotlightWindow inherits Window {
                                                 root.clear-shortcut("catalog_project");
                                             }
                                         }
+
+                                        ShortcutRecorderRow {
+                                            label: "Switch to Actions Catalog";
+                                            shortcut-text: root.catalog-actions-hotkey-label;
+                                            recording: root.recording-hotkey && root.recording-target == "catalog_actions";
+                                            toggle-record => { root.begin-recording("catalog_actions"); }
+                                            clear-clicked => {
+                                                root.set-recording(false);
+                                                root.clear-shortcut("catalog_actions");
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1581,7 +1600,8 @@ export component SpotlightWindow inherits Window {
                 if !root.settings-open && root.results.length == 0 : VerticalLayout {
                     alignment: center;
                     Text {
-                        text: root.active-bin != "" && root.search-text == "" ? "This bin is empty"
+                        text: root.marker-picker && root.marker-status != "" ? root.marker-status
+                            : root.active-bin != "" && root.search-text == "" ? "This bin is empty"
                             : root.show-recent-items ? "No recently added items"
                             : "No matching results";
                         font-size: 13px;
@@ -1653,8 +1673,8 @@ export component SpotlightWindow inherits Window {
                                 spacing: 10px;
 
                                 VerticalLayout {
-                                    horizontal-stretch: (idx == root.selected-index && item.folder != "") ? 0 : 1;
-                                    max-width: (idx == root.selected-index && item.folder != "") ? 260px : 1000px;
+                                    horizontal-stretch: ((root.marker-picker || idx == root.selected-index) && item.folder != "") ? 0 : 1;
+                                    max-width: ((root.marker-picker || idx == root.selected-index) && item.folder != "") ? 260px : 1000px;
                                     alignment: center;
                                     Text {
                                         text: item.name;
@@ -1665,7 +1685,7 @@ export component SpotlightWindow inherits Window {
                                     }
                                 }
 
-                                if idx == root.selected-index && item.folder != "" : Text {
+                                if (root.marker-picker || idx == root.selected-index) && item.folder != "" : Text {
                                     min-width: 0px;
                                     horizontal-stretch: 1;
                                     text: item.folder;
@@ -1801,7 +1821,10 @@ export component SpotlightWindow inherits Window {
                             horizontal-stretch: 1;
                             alignment: center;
                             Text {
-                                text: root.preview-message != "" ? root.preview-message : root.status-message;
+                                text: root.marker-picker ? (root.marker-status != "" && root.results.length > 0 ? root.marker-status
+                                    : root.marker-context != "" ? root.marker-context + " · Esc to return"
+                                    : root.marker-status != "" ? root.marker-status : "Go to Marker · Esc to return")
+                                    : root.preview-message != "" ? root.preview-message : root.status-message;
                                 font-size: 11px;
                                 color: Theme.muted-text;
                                 wrap: word-wrap;

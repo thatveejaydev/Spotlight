@@ -1,3 +1,7 @@
+use crate::actions::{
+    markers::{MarkerCommand, MarkerEvent, MarkerReply, MarkerRequest},
+    Action, ActionResult,
+};
 use crate::catalog::{EffectEntry, ProjectItemEntry};
 use crate::debug_log::{self, LogKind};
 use serde::{Deserialize, Serialize};
@@ -216,6 +220,14 @@ pub enum IncomingPluginMessage {
         sequence_id: Option<String>,
         items: Vec<ProjectItemEntry>,
     },
+    #[serde(rename = "action_ack", rename_all = "camelCase")]
+    ActionAck {
+        request_id: u64,
+        ok: bool,
+        message: String,
+    },
+    #[serde(rename = "marker_ack", rename_all = "camelCase")]
+    MarkerAck { request_id: u64, result: Option<MarkerReply>, message: String },
     #[serde(rename = "placement_ack", rename_all = "camelCase")]
     PlacementAck {
         request_id: u64,
@@ -273,6 +285,14 @@ pub enum OutgoingHelperMessage {
         project_id: String,
         item_id: String,
     },
+    #[serde(rename = "marker_command", rename_all = "camelCase")]
+    MarkerCommand {
+        request_id: u64,
+        #[serde(flatten)]
+        command: MarkerCommand,
+    },
+    #[serde(rename = "run_action", rename_all = "camelCase")]
+    RunAction { request_id: u64, action: Action },
     #[serde(rename = "apply_effect")]
     ApplyEffect {
         #[serde(rename = "requestId")]
@@ -620,6 +640,29 @@ fn parse_preset_search_shortcuts(xml: &str) -> Result<(ShortcutSpec, ShortcutSpe
 pub(crate) fn read_preset_search_shortcuts(
     premiere_exe: &Path,
 ) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
+    parse_preset_search_shortcuts(&read_premiere_shortcut_profile(premiere_exe)?)
+}
+
+pub(crate) fn read_marker_shortcuts(
+    premiere_exe: &Path,
+) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
+    parse_marker_shortcuts(&read_premiere_shortcut_profile(premiere_exe)?)
+}
+
+fn parse_marker_shortcuts(xml: &str) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
+    use EffectControlsShortcut::Bound;
+    let Some(Bound(timeline)) = parse_shortcut_kys(xml, "context.global", "uif.window.Timelines") else {
+        return Err("Assign a shortcut to Timeline in Premiere Keyboard Shortcuts.");
+    };
+    let add_marker = parse_shortcut_kys(xml, "context.timeline", "cmd.set.marker")
+        .or_else(|| parse_shortcut_kys(xml, "context.global", "cmd.set.marker"));
+    let Some(Bound(add_marker)) = add_marker else {
+        return Err("Assign a shortcut to Add Marker in Premiere Keyboard Shortcuts.");
+    };
+    Ok((timeline, add_marker))
+}
+
+fn read_premiere_shortcut_profile(premiere_exe: &Path) -> Result<String, &'static str> {
     const UNREADABLE: &str = "Could not read Premiere's keyboard shortcuts.";
     let mut name = None;
     let mut custom_path = None;
@@ -655,7 +698,7 @@ pub(crate) fn read_preset_search_shortcuts(
             fs::read_to_string(bundled.join(name)).map_err(|_| UNREADABLE)?
         }
     };
-    parse_preset_search_shortcuts(&xml)
+    Ok(xml)
 }
 
 struct CachedEffectControlsShortcut {
@@ -750,6 +793,8 @@ pub enum BridgeEvent {
     ClientDisconnected,
     CatalogReceived(Vec<EffectEntry>),
     ApplyResult(ApplyResult),
+    ActionResult(ActionResult),
+    MarkerResult(MarkerEvent),
     ProjectItemsChanged,
     PlacementResult(PlacementResult),
     SourceMonitorResult(PlacementResult),
@@ -829,6 +874,14 @@ pub struct MediaCatalog {
     pub project_id: Option<String>,
     pub sequence_id: Option<String>,
     pub items: Vec<ProjectItemEntry>,
+}
+
+fn sole_marker_peer(peers: &[Peer], expected: Option<usize>) -> Result<&Peer, &'static str> {
+    match peers {
+        [peer] if expected.is_none_or(|id| id == peer.id) => Ok(peer),
+        [] | [_] => Err("The Premiere marker bridge disconnected."),
+        _ => Err("Leave one Premiere bridge connected to use sequence markers."),
+    }
 }
 
 fn project_source<'a>(
@@ -1028,6 +1081,46 @@ impl BridgeClients {
         Ok(request_id)
     }
 
+    pub fn marker_peer_id(&self) -> Result<usize, &'static str> {
+        let peers = self.peers.lock().unwrap();
+        sole_marker_peer(&peers, None).map(|peer| peer.id)
+    }
+
+    pub fn marker_command(
+        &self,
+        command: MarkerCommand,
+        expected_peer: Option<usize>,
+    ) -> Result<MarkerRequest, &'static str> {
+        let peers = self.peers.lock().unwrap();
+        let peer = sole_marker_peer(&peers, expected_peer)?;
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let message = OutgoingHelperMessage::MarkerCommand { request_id, command };
+        let json = serde_json::to_string(&message).map_err(|_| "Could not prepare the marker command.")?;
+        peer.tx.send(json).map_err(|_| "The Premiere marker bridge disconnected.")?;
+        self.track_request(request_id, "marker_command");
+        Ok(MarkerRequest::new(peer.id, request_id))
+    }
+
+    pub fn run_action(&self, action: Action) -> Result<(u64, usize), &'static str> {
+        let peers = self.peers.lock().unwrap();
+        let peer = match peers.as_slice() {
+            [peer] => peer,
+            [] => return Err("Premiere action bridge disconnected."),
+            _ => return Err("Multiple Premiere bridges are connected. Leave one connected to run an action."),
+        };
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let message = OutgoingHelperMessage::RunAction { request_id, action };
+        let json = serde_json::to_string(&message).map_err(|_| "Could not prepare the action.")?;
+        peer.tx.send(json).map_err(|_| "Premiere action bridge disconnected.")?;
+        self.track_request(request_id, "run_action");
+        debug_log::log_event(
+            LogKind::Bridge,
+            "BRIDGE",
+            format!("-> run_action \"{}\" (id={request_id})", action.name()),
+        );
+        Ok((request_id, peer.id))
+    }
+
     pub fn send_apply(&self, entry: &EffectEntry) -> Option<(u64, Vec<usize>)> {
         if entry.is_preset() {
             return None;
@@ -1160,6 +1253,8 @@ where
                                 parsed,
                                 IncomingPluginMessage::ShowWindow
                                     | IncomingPluginMessage::Ack { .. }
+                                    | IncomingPluginMessage::ActionAck { .. }
+                                    | IncomingPluginMessage::MarkerAck { .. }
                                     | IncomingPluginMessage::PlacementAck { .. }
                                     | IncomingPluginMessage::SourceMonitorAck { .. }
                                     | IncomingPluginMessage::AudioPreviewAck { .. }
@@ -1216,6 +1311,20 @@ where
                                         format!("<- project_items (id={request_id}, {item_count} items)"),
                                     );
                                     cb(BridgeEvent::ProjectItemsChanged);
+                                }
+                            }
+                            IncomingPluginMessage::ActionAck { request_id, ok, message } => {
+                                if is_plugin_client {
+                                    bridge.finish_request(request_id);
+                                    cb(BridgeEvent::ActionResult(ActionResult {
+                                        peer_id, request_id, ok, message,
+                                    }));
+                                }
+                            }
+                            IncomingPluginMessage::MarkerAck { request_id, result, message } => {
+                                if is_plugin_client {
+                                    bridge.finish_request(request_id);
+                                    cb(BridgeEvent::MarkerResult(MarkerEvent { peer_id, request_id, result, message }));
                                 }
                             }
                             IncomingPluginMessage::PlacementAck {
@@ -1542,6 +1651,26 @@ mod tests {
 
         let _ = ws.close(None);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn marker_shortcuts_respect_the_timeline_override_and_unbound_commands() {
+        let profile = r#"<context.global>
+          <item.1><commandname>uif.window.Timelines</commandname><modifier.shift>true</modifier.shift><virtualkey>2147483699</virtualkey></item.1>
+          <item.2><commandname>cmd.set.marker</commandname><virtualkey>2147483725</virtualkey></item.2>
+        </context.global>"#;
+        let (timeline, add) = parse_marker_shortcuts(profile).unwrap();
+        assert_eq!(timeline.vk, u16::from(b'3'));
+        assert!(timeline.shift);
+        assert_eq!(add.vk, u16::from(b'M'));
+
+        let custom = format!(r#"{profile}<context.timeline>
+          <item.3><commandname>cmd.set.marker</commandname><modifier.alt>true</modifier.alt><virtualkey>2147483726</virtualkey></item.3>
+        </context.timeline>"#);
+        let (_, add) = parse_marker_shortcuts(&custom).unwrap();
+        assert_eq!(add.vk, u16::from(b'N'));
+        assert!(add.alt);
+        assert!(parse_marker_shortcuts(&custom.replace("<virtualkey>2147483726</virtualkey>", "")).is_err());
     }
 
     #[test]

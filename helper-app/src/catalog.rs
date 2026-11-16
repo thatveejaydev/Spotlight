@@ -1,9 +1,10 @@
+use crate::actions::{markers::SequenceMarker, Action};
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +94,8 @@ impl ProjectItemKind {
 pub enum SearchResult {
     Effect(Arc<EffectEntry>),
     ProjectItem(Arc<ProjectItemEntry>),
+    Action(Action),
+    Marker(Arc<SequenceMarker>),
 }
 
 struct IndexedEffect {
@@ -138,6 +141,7 @@ impl IndexedProjectItem {
 enum CatalogEntry<'a> {
     Effect(&'a IndexedEffect),
     ProjectItem(&'a IndexedProjectItem),
+    Action(Action),
 }
 
 impl SearchResult {
@@ -147,6 +151,8 @@ impl SearchResult {
                 a.effect_type == b.effect_type && a.match_name == b.match_name
             }
             (Self::ProjectItem(a), Self::ProjectItem(b)) => a.item_id == b.item_id,
+            (Self::Action(a), Self::Action(b)) => a == b,
+            (Self::Marker(a), Self::Marker(b)) => a == b,
             _ => false,
         }
     }
@@ -157,13 +163,15 @@ impl CatalogEntry<'_> {
         match self {
             Self::Effect(item) => &item.entry.name,
             Self::ProjectItem(item) => &item.entry.name,
+            Self::Action(action) => action.name(),
         }
     }
 
-    fn name_lower(&self) -> &str {
+    fn name_lower(&self) -> Cow<'_, str> {
         match self {
-            Self::Effect(item) => &item.name_lower,
-            Self::ProjectItem(item) => &item.name_lower,
+            Self::Effect(item) => Cow::Borrowed(&item.name_lower),
+            Self::ProjectItem(item) => Cow::Borrowed(&item.name_lower),
+            Self::Action(action) => Cow::Owned(action.name().to_lowercase()),
         }
     }
 
@@ -171,6 +179,7 @@ impl CatalogEntry<'_> {
         match self {
             Self::Effect(item) => &item.entry.folder,
             Self::ProjectItem(item) => &item.entry.bin_path,
+            Self::Action(_) => "",
         }
     }
 
@@ -178,6 +187,7 @@ impl CatalogEntry<'_> {
         match self {
             Self::Effect(item) => &item.haystack,
             Self::ProjectItem(item) => &item.haystack,
+            Self::Action(action) => action.name(),
         }
     }
 
@@ -185,6 +195,7 @@ impl CatalogEntry<'_> {
         match self {
             Self::Effect(item) => SearchResult::Effect(Arc::clone(&item.entry)),
             Self::ProjectItem(item) => SearchResult::ProjectItem(Arc::clone(&item.entry)),
+            Self::Action(action) => SearchResult::Action(action),
         }
     }
 }
@@ -287,6 +298,22 @@ impl CatalogStore {
         self.search_in_bin(query, catalog, None)
     }
 
+    pub fn search_markers(&mut self, query: &str, markers: &[Arc<SequenceMarker>]) -> Vec<SearchResult> {
+        let query = query.trim();
+        let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
+        markers.iter()
+            .filter(|marker| {
+                if query.is_empty() {
+                    return true;
+                }
+                let text = format!("{} {} {} {}", marker.title(), marker.sequence_name, marker.comments, marker.position());
+                pattern.score(Utf32Str::new(&text, &mut self.utf32_buf), &mut self.matcher).is_some()
+            })
+            .cloned()
+            .map(SearchResult::Marker)
+            .collect()
+    }
+
     pub fn search_in_bin(
         &mut self,
         query: &str,
@@ -294,14 +321,14 @@ impl CatalogStore {
         bin_scope: Option<&str>,
     ) -> Vec<SearchResult> {
         let trimmed = query.trim();
-        let include_effects = catalog != "project" && bin_scope.is_none();
+        let include_effects = matches!(catalog, "all" | "effects") && bin_scope.is_none();
         let effects = self
             .items
             .iter()
             .chain(&self.presets)
             .filter(move |item| include_effects && item.supported)
             .map(CatalogEntry::Effect);
-        let include_project = catalog != "effects";
+        let include_project = matches!(catalog, "all" | "project");
         let project_items = self
             .project_items
             .iter()
@@ -310,14 +337,18 @@ impl CatalogStore {
                     && bin_scope.is_none_or(|scope| in_bin_scope(&item.entry.bin_path, scope))
             })
             .map(CatalogEntry::ProjectItem);
-        let entries = effects.chain(project_items);
+        let actions = Action::ALL
+            .into_iter()
+            .filter(|_| matches!(catalog, "all" | "actions") && bin_scope.is_none())
+            .map(CatalogEntry::Action);
+        let entries = effects.chain(project_items).chain(actions);
         let usage = |item: &CatalogEntry| match item {
             CatalogEntry::Effect(indexed) => self
                 .usage_counts
                 .get(&indexed.entry.match_name)
                 .copied()
                 .unwrap_or(0),
-            CatalogEntry::ProjectItem(_) => 0,
+            CatalogEntry::ProjectItem(_) | CatalogEntry::Action(_) => 0,
         };
 
         if trimmed.is_empty() {
@@ -334,7 +365,7 @@ impl CatalogStore {
                 scope_order(a)
                     .cmp(&scope_order(b))
                     .then_with(|| usage(b).cmp(&usage(a)))
-                    .then_with(|| a.name_lower().cmp(b.name_lower()))
+                    .then_with(|| a.name_lower().cmp(&b.name_lower()))
                     .then_with(|| a.folder().cmp(b.folder()))
             });
             return filtered.into_iter().map(CatalogEntry::to_result).collect();
@@ -494,6 +525,26 @@ mod tests {
                 matches!(item, SearchResult::Effect(entry) if entry.effect_type == effect_type)
             }));
         }
+        assert!(matches!(
+            store.search("", "actions").as_slice(),
+            [
+                SearchResult::Action(Action::AddMarker),
+                SearchResult::Action(Action::GoToMarker),
+                SearchResult::Action(Action::RemoveAttributes)
+            ]
+        ));
+        for query in ["rmat", "remove attributes"] {
+            assert!(matches!(
+                store.search(query, "actions").as_slice(),
+                [SearchResult::Action(Action::RemoveAttributes)]
+            ));
+        }
+        assert!(store.search("Gaussian Blur", "actions").is_empty());
+        for action in Action::ALL {
+            assert!(store.search(action.name(), "all").iter().any(
+                |result| matches!(result, SearchResult::Action(found) if *found == action)
+            ));
+        }
         store.set_project_items(Vec::new());
         assert!(store.search("", "project").is_empty());
     }
@@ -547,6 +598,8 @@ mod tests {
             .map(|r| match r {
                 SearchResult::ProjectItem(item) => item.name.as_str(),
                 SearchResult::Effect(e) => e.name.as_str(),
+                SearchResult::Action(action) => action.name(),
+                SearchResult::Marker(marker) => marker.title(),
             })
             .collect();
         assert_eq!(names, ["B-Roll", "A-Cam.mov", "Street.mov"]);

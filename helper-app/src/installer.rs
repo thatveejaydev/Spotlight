@@ -19,6 +19,9 @@ const PLUGIN_FOLDER_NAME: &str = "dev.spotlight.premiere_0.1.0";
 const MANIFEST_JSON: &str = include_str!("../../uxp-plugin/manifest.json");
 const INDEX_HTML: &str = include_str!("../../uxp-plugin/index.html");
 const INDEX_JS: &str = include_str!("../../uxp-plugin/index.js");
+const ACTIONS_INDEX_JS: &str = include_str!("../../uxp-plugin/actions/index.js");
+const REMOVE_ATTRIBUTES_JS: &str = include_str!("../../uxp-plugin/actions/remove-attributes.js");
+const MARKERS_JS: &str = include_str!("../../uxp-plugin/actions/markers.js");
 
 fn resolve_canonical_exe_path() -> Option<PathBuf> {
     let cur = env::current_exe().ok()?;
@@ -53,12 +56,16 @@ pub fn ensure_installed() {
         .join(PLUGIN_FOLDER_NAME);
 
     // 1. Write UXP plugin files directly into %APPDATA%\Adobe\UXP\Plugins\External\dev.spotlight.premiere_0.1.0
-    if fs::create_dir_all(&plugin_dir).is_ok() {
+    let actions_dir = plugin_dir.join("actions");
+    if fs::create_dir_all(&actions_dir).is_ok() {
         let escaped_exe = exe_path.to_string_lossy().replace('\\', "\\\\");
         let patched_js = INDEX_JS.replace("__SPOTLIGHT_HELPER_EXE_PATH__", &escaped_exe);
 
         let _ = fs::write(plugin_dir.join("manifest.json"), MANIFEST_JSON);
         let _ = fs::write(plugin_dir.join("index.html"), INDEX_HTML);
+        let _ = fs::write(actions_dir.join("index.js"), ACTIONS_INDEX_JS);
+        let _ = fs::write(actions_dir.join("remove-attributes.js"), REMOVE_ATTRIBUTES_JS);
+        let _ = fs::write(actions_dir.join("markers.js"), MARKERS_JS);
         let _ = fs::write(plugin_dir.join("index.js"), patched_js);
     }
 

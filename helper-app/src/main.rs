@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
 mod audio_preview;
 mod bridge;
 mod catalog;
@@ -11,6 +12,10 @@ mod settings;
 mod tray;
 mod win_focus;
 
+use actions::{
+    markers::{MarkerDialog, MarkerEvent, MarkerPicker},
+    Action, ActionResult, PendingAction,
+};
 use audio_preview::AudioPreview;
 use bridge::{
     ApplyResult, BridgeClients, BridgeEvent, EffectControlsShortcut, MediaCatalog, PlacementResult,
@@ -55,6 +60,9 @@ struct AppState {
     media_catalog: Option<MediaCatalog>,
     pending_placement: Option<PendingPlacement>,
     pending_source_open: Option<PendingSourceOpen>,
+    pending_action: Option<PendingAction>,
+    marker_picker: Option<MarkerPicker>,
+    marker_dialog: Option<MarkerDialog>,
     audio_preview: AudioPreview,
     active_bin_path: Option<String>,
     settings: AppSettings,
@@ -148,6 +156,7 @@ fn recent_results(state: &AppState) -> Vec<SearchResult> {
         .iter()
         .filter_map(|recent| match &recent.item {
             SearchResult::Effect(_) => Some(recent.item.clone()),
+            SearchResult::Action(_) | SearchResult::Marker(_) => None,
             SearchResult::ProjectItem(item) => {
                 let catalog = state.media_catalog.as_ref()?;
                 if recent.project_id != catalog.project_id {
@@ -285,7 +294,9 @@ fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
         state.active_bin_path.is_none() && catalog.as_str() == "all" && query.trim().is_empty();
     ui.set_show_recent_items(show_history);
     let started = Instant::now();
-    state.matched_items = if show_history {
+    state.matched_items = if let Some(picker) = &state.marker_picker {
+        state.catalog.search_markers(query.as_str(), picker.markers())
+    } else if show_history {
         recent_results(state)
     } else {
         state.catalog.search_in_bin(
@@ -303,7 +314,15 @@ fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
             query.as_str(),
             catalog.as_str(),
             total,
-            effects_count + media_count,
+            if let Some(picker) = &state.marker_picker {
+                picker.markers().len()
+            } else if catalog.as_str() == "actions" {
+                Action::ALL.len()
+            } else if catalog.as_str() == "all" && !show_history {
+                effects_count + media_count + Action::ALL.len()
+            } else {
+                effects_count + media_count
+            },
         );
     }
     ui.set_total_matches(total as i32);
@@ -372,7 +391,18 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
     let slice: Vec<EffectItemUI> = state.matched_items[state.scroll_offset..end]
         .iter()
         .map(|entry| {
+            let position;
             let (name, category, folder, colors) = match entry {
+                SearchResult::Marker(marker) => {
+                    position = marker.position();
+                    (marker.title(), position.as_str(), marker.sequence_name.as_str(), badge_colors("action"))
+                }
+                SearchResult::Action(action) => (
+                    action.name(),
+                    "Action",
+                    action.description(),
+                    badge_colors("action"),
+                ),
                 SearchResult::Effect(entry) => (
                     entry.name.as_str(),
                     entry.category_short(),
@@ -398,7 +428,11 @@ fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
             EffectItemUI {
                 name: name.into(),
                 category: category.into(),
-                folder: folder.replace(" / ", " › ").into(),
+                folder: if matches!(entry, SearchResult::Marker(_)) {
+                    folder.into()
+                } else {
+                    folder.replace(" / ", " › ").into()
+                },
                 badge_bg: colors.0,
                 badge_fg: colors.1,
             }
@@ -427,6 +461,7 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
     stop_shortcut_recording(ui, None);
     ui.set_settings_open(false);
     ui.set_settings_feedback("".into());
+    clear_marker_picker(ui, state);
     ui.set_active_catalog("all".into());
     ui.set_search_text(SharedString::from(""));
     clear_bin_scope(ui, state);
@@ -513,6 +548,7 @@ fn restore_premiere_focus(hwnd: isize) {
 }
 
 fn hide_palette(ui: &SpotlightWindow, state: &mut AppState) {
+    clear_marker_picker(ui, state);
     state.audio_preview.cancel(ui);
     win_focus::set_palette_visible(false);
     stop_focus_grace_timer();
@@ -557,6 +593,99 @@ fn update_placement(
         return Some("Placement outcome unknown. Check the timeline before retrying.".into());
     }
     None
+}
+
+fn clear_marker_picker(ui: &SpotlightWindow, state: &mut AppState) -> Option<MarkerPicker> {
+    let picker = state.marker_picker.take()?;
+    ui.set_marker_picker(false);
+    ui.set_marker_status("".into());
+    ui.set_marker_context("".into());
+    ui.set_search_text("".into());
+    schedule_action_deadlines(state);
+    Some(picker)
+}
+
+fn escape_palette(ui: &SpotlightWindow, state: &mut AppState) {
+    if let Some(picker) = clear_marker_picker(ui, state) {
+        ui.set_search_text(picker.previous_query);
+        refresh_marker_results(ui, state);
+        ui.invoke_focus_search();
+    } else {
+        hide_and_restore_focus(ui, state);
+    }
+}
+
+fn refresh_marker_results(ui: &SpotlightWindow, state: &mut AppState) {
+    state.selected_abs_index = 0;
+    state.scroll_offset = 0;
+    refresh_results_ui(ui, state);
+}
+
+fn receive_marker(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+    event: MarkerEvent,
+    toast: &Rc<ErrorToast>,
+) {
+    if let Some(picker) = state.marker_picker.as_mut().filter(|picker| picker.accepts(&event)) {
+        let sought = picker.receive(event);
+        ui.set_marker_context(picker.context_label.as_str().into());
+        if sought {
+            hide_and_restore_focus(ui, state);
+        } else {
+            ui.set_marker_status(picker.status().into());
+            refresh_marker_results(ui, state);
+        }
+    } else if let Some(dialog) = state.marker_dialog.as_mut().filter(|dialog| dialog.accepts(&event)) {
+        if let Err(message) = dialog.receive(bridge, event) {
+            let message = dialog.failure(message);
+            state.marker_dialog = None;
+            toast.show(message.into(), state.previous_hwnd);
+        }
+    }
+    schedule_action_deadlines(state);
+}
+
+fn poll_markers(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeClients, toast: &Rc<ErrorToast>) {
+    if let Some(picker) = &mut state.marker_picker {
+        if picker.expire() {
+            ui.set_marker_status(picker.status().into());
+        }
+    }
+    if let Some(dialog) = &mut state.marker_dialog {
+        match dialog.tick(bridge) {
+            Ok(false) => {}
+            Ok(true) => state.marker_dialog = None,
+            Err(message) => {
+                let message = dialog.failure(message);
+                state.marker_dialog = None;
+                toast.show(message.into(), state.previous_hwnd);
+            }
+        }
+    }
+}
+
+fn finish_action(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    result: Option<ActionResult>,
+    toast: &Rc<ErrorToast>,
+) {
+    let Some(outcome) = state.pending_action.as_ref().and_then(|pending| pending.outcome(result)) else {
+        return;
+    };
+    state.pending_action = None;
+    match outcome {
+        Ok(message) => {
+            debug_log::log_event(LogKind::Success, "ACTION", &message);
+            ui.set_status_message(message.into());
+        }
+        Err(message) => {
+            debug_log::log_event(LogKind::Error, "ACTION", &message);
+            toast.show(message.into(), state.previous_hwnd);
+        }
+    }
 }
 
 fn update_source_open(
@@ -720,6 +849,46 @@ fn apply_entry_with_options(
         return Ok(None);
     }
     match chosen {
+        SearchResult::Marker(marker) => {
+            if let Some(picker) = &mut state.marker_picker {
+                picker.seek(bridge, marker);
+                ui.set_marker_status(picker.status().into());
+                schedule_action_deadlines(state);
+            }
+            return Ok(None);
+        }
+        SearchResult::Action(Action::GoToMarker) => {
+            let picker = MarkerPicker::open(bridge, ui.get_search_text());
+            ui.set_marker_picker(true);
+            ui.set_marker_status(picker.status().into());
+            ui.set_search_text("".into());
+            state.marker_picker = Some(picker);
+            refresh_marker_results(ui, state);
+            ui.invoke_focus_search();
+            schedule_action_deadlines(state);
+            return Ok(None);
+        }
+        SearchResult::Action(Action::AddMarker) => {
+            if state.marker_dialog.is_some() {
+                return Err("Add Marker is already in progress.".into());
+            }
+            state.marker_dialog = Some(MarkerDialog::new(state.previous_hwnd, bridge)?);
+            hide_and_restore_focus(ui, state);
+            schedule_action_deadlines(state);
+            return Ok(None);
+        }
+        SearchResult::Action(Action::RemoveAttributes) => {
+            if state.pending_action.is_some() {
+                return Err("A Premiere action is already in progress.".into());
+            }
+            let (request_id, peer_id) = bridge.run_action(Action::RemoveAttributes).map_err(SharedString::from)?;
+            state.pending_action = Some(PendingAction {
+                request_id,
+                peer_id,
+                deadline: Instant::now() + ACTION_TIMEOUT,
+            });
+            schedule_action_deadlines(state);
+        }
         SearchResult::Effect(entry) => {
             let Some((request_id, recipients)) = bridge.send_apply(&entry) else {
                 return Err("Premiere effect bridge disconnected.".into());
@@ -776,6 +945,9 @@ fn shift_activate_at(
         return Ok(None);
     };
     match chosen {
+        SearchResult::Action(_) | SearchResult::Marker(_) => {
+            apply_entry_with_options(abs_index, ui, state, bridge, false)
+        }
         SearchResult::Effect(_) => {
             let open_effect_controls = settings::resolve_open_effect_controls(
                 state.settings.open_effect_controls_by_default,
@@ -871,6 +1043,9 @@ fn main() -> Result<(), slint::PlatformError> {
         media_catalog: None,
         pending_placement: None,
         pending_source_open: None,
+        pending_action: None,
+        marker_picker: None,
+        marker_dialog: None,
         audio_preview: AudioPreview::default(),
         active_bin_path: None,
         settings: initial_settings.clone(),
@@ -1042,6 +1217,13 @@ fn main() -> Result<(), slint::PlatformError> {
                             .map(|catalog| catalog.items.clone())
                             .unwrap_or_default();
                         st.catalog.set_project_items(items);
+                        if let (Some(picker), Some(catalog)) = (&mut st.marker_picker, &catalog) {
+                            if picker.refresh_if_project_changed(&bridge_ref, catalog) {
+                                ui.set_marker_context("".into());
+                                ui.set_marker_status(picker.status().into());
+                                schedule_action_deadlines(&st);
+                            }
+                        }
                         st.media_catalog = catalog;
                         if !preserve_media
                             || st
@@ -1068,6 +1250,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             error_toast.show(message, st.previous_hwnd);
                         }
                         schedule_action_deadlines(&st);
+                    }
+                    BridgeEvent::ActionResult(result) => {
+                        let mut st = state_ref.borrow_mut();
+                        finish_action(&ui, &mut st, Some(result), &error_toast);
+                        schedule_action_deadlines(&st);
+                    }
+                    BridgeEvent::MarkerResult(event) => {
+                        receive_marker(&ui, &mut state_ref.borrow_mut(), &bridge_ref, event, &error_toast);
                     }
                     BridgeEvent::AudioPreviewResult(result) => {
                         state_ref.borrow_mut().audio_preview.resolved(&ui, result);
@@ -1116,6 +1306,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_catalog_changed(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state_ref.borrow_mut();
+                clear_marker_picker(&ui, &mut st);
                 if ui.get_active_catalog().as_str() != "project" {
                     clear_bin_scope(&ui, &mut st);
                 }
@@ -1235,14 +1426,13 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Escape key closes popup
+    // Escape leaves a nested marker picker or closes the palette.
     {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         ui.on_close_requested(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let mut st = state_ref.borrow_mut();
-                hide_and_restore_focus(&ui, &mut st);
+                escape_palette(&ui, &mut state_ref.borrow_mut());
             }
         });
     }
@@ -1358,6 +1548,9 @@ fn main() -> Result<(), slint::PlatformError> {
             "catalog_project" => {
                 Some(("Project catalog shortcut", &mut settings.catalog_project_hotkey))
             }
+            "catalog_actions" => {
+                Some(("Actions catalog shortcut", &mut settings.catalog_actions_hotkey))
+            }
             "audio_preview" => Some(("Preview audio shortcut", &mut settings.audio_preview_hotkey)),
             _ => None,
         }
@@ -1372,6 +1565,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_catalog_all_hotkey_label(settings.catalog_all_hotkey.clone().into());
         ui.set_catalog_effects_hotkey_label(settings.catalog_effects_hotkey.clone().into());
         ui.set_catalog_project_hotkey_label(settings.catalog_project_hotkey.clone().into());
+        ui.set_catalog_actions_hotkey_label(settings.catalog_actions_hotkey.clone().into());
         ui.set_audio_preview_hotkey_label(settings.audio_preview_hotkey.clone().into());
         ui.set_auto_preview_audio(settings.auto_preview_audio);
         ui.set_config_path_display(settings::config_path().to_string_lossy().into_owned().into());
@@ -1463,6 +1657,7 @@ fn main() -> Result<(), slint::PlatformError> {
         state.settings.catalog_all_hotkey = loaded.catalog_all_hotkey;
         state.settings.catalog_effects_hotkey = loaded.catalog_effects_hotkey;
         state.settings.catalog_project_hotkey = loaded.catalog_project_hotkey;
+        state.settings.catalog_actions_hotkey = loaded.catalog_actions_hotkey;
         state.settings.audio_preview_hotkey = loaded.audio_preview_hotkey;
         state.settings.auto_preview_audio = loaded.auto_preview_audio;
 
@@ -1494,6 +1689,9 @@ fn main() -> Result<(), slint::PlatformError> {
         stop_shortcut_recording(ui, Some(rec_flag));
         ui.set_settings_feedback("".into());
         ui.set_settings_open(next);
+        if next && clear_marker_picker(ui, state).is_some() {
+            refresh_marker_results(ui, state);
+        }
         sync_audio_selection(ui, state);
         if !next {
             ui.invoke_focus_search();
@@ -1504,6 +1702,7 @@ fn main() -> Result<(), slint::PlatformError> {
         if ui.get_active_catalog().as_str() == target {
             return;
         }
+        clear_marker_picker(ui, state);
         ui.set_active_catalog(target.into());
         if target != "project" {
             clear_bin_scope(ui, state);
@@ -1942,6 +2141,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let error_toast = error_toast.clone();
+        let bridge = bridge.clone();
         DEADLINE_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
                 let Some(ui) = ui_weak.upgrade() else {
@@ -1958,6 +2158,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
                     error_toast.show(message, st.previous_hwnd);
                 }
+                finish_action(&ui, &mut st, None, &error_toast);
+                poll_markers(&ui, &mut st, &bridge, &error_toast);
                 schedule_action_deadlines(&st);
             }));
         });
@@ -1995,6 +2197,9 @@ fn schedule_action_deadlines(state: &AppState) {
     let earliest = [
         state.pending_placement.as_ref().map(|p| p.deadline),
         state.pending_source_open.as_ref().map(|p| p.deadline),
+        state.pending_action.as_ref().map(|p| p.deadline),
+        state.marker_picker.as_ref().and_then(MarkerPicker::deadline),
+        state.marker_dialog.as_ref().map(MarkerDialog::deadline),
     ]
     .into_iter()
     .flatten()
@@ -2412,6 +2617,8 @@ mod tests {
 
     #[test]
     fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
+        use slint::Model;
+
         let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
         let ui = SpotlightWindow::new().unwrap();
@@ -2443,6 +2650,9 @@ mod tests {
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
@@ -2468,6 +2678,115 @@ mod tests {
         assert!(!state.is_visible);
         assert_eq!(state.pending_effects.len(), 1);
         assert!(requests.try_recv().unwrap().contains("apply_effect"));
+
+        show_palette(&ui, &mut state);
+        ui.set_active_catalog("actions".into());
+        ui.set_search_text("Remove Attributes".into());
+        refresh_results_ui(&ui, &mut state);
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+        assert!(!state.is_visible);
+        let request_id = state.pending_action.as_ref().unwrap().request_id;
+        let command: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(command["type"], "run_action");
+        assert_eq!(command["action"], "remove_attributes");
+        assert_eq!(command["requestId"], request_id);
+        let toast = Rc::new(ErrorToast::default());
+        for peer_id in [8, 7] {
+            finish_action(&ui, &mut state, Some(ActionResult {
+                peer_id, request_id, ok: true, message: "Removed effects".into(),
+            }), &toast);
+            assert_eq!(state.pending_action.is_some(), peer_id == 8);
+        }
+        assert_eq!(ui.get_status_message().as_str(), "Removed effects");
+        assert!(state.recent_items.is_empty());
+
+        show_palette(&ui, &mut state);
+        ui.set_active_catalog("all".into());
+        ui.set_search_text("go to marker".into());
+        refresh_results_ui(&ui, &mut state);
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+        assert!(state.is_visible && ui.get_marker_picker());
+        assert_eq!(ui.get_marker_status().as_str(), "Loading markers…");
+
+        let read_command = || -> serde_json::Value {
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap()
+        };
+        let list_reply = |request: &serde_json::Value| {
+            let json = serde_json::json!({
+                "type": "marker_ack",
+                "requestId": request["requestId"],
+                "result": {
+                    "kind": "list",
+                    "projectId": "project",
+                    "projectName": "Editing project",
+                    "markers": [
+                        { "name": "Cue", "comments": "Later", "ticks": "508032000000", "sequenceId": "sequence", "sequenceName": "Selects" },
+                        { "name": "", "comments": "", "ticks": "0", "sequenceId": "nested", "sequenceName": "Nested" },
+                        { "name": "Cue", "comments": "Earlier", "ticks": "254016000000", "sequenceId": "sequence", "sequenceName": "Selects" }
+                    ]
+                },
+                "message": ""
+            });
+            let bridge::IncomingPluginMessage::MarkerAck { request_id, result, message } =
+                serde_json::from_value(json).unwrap()
+            else { panic!("Expected a marker reply") };
+            MarkerEvent { peer_id: 7, request_id, result, message }
+        };
+        let discarded = read_command();
+        assert_eq!(discarded["operation"], "list");
+        escape_palette(&ui, &mut state);
+        assert!(state.is_visible && !ui.get_marker_picker());
+        assert_eq!(ui.get_search_text().as_str(), "go to marker");
+        assert_eq!(ui.get_active_catalog().as_str(), "all");
+
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+        let active = read_command();
+        receive_marker(&ui, &mut state, &bridge, list_reply(&discarded), &toast);
+        assert_eq!(ui.get_marker_status().as_str(), "Loading markers…");
+        receive_marker(&ui, &mut state, &bridge, list_reply(&active), &toast);
+        assert_eq!(ui.get_marker_context().as_str(), "Editing project");
+        let results = ui.get_results();
+        assert_eq!(results.row_count(), 3);
+        assert_eq!(results.row_data(0).unwrap().name.as_str(), "Unnamed marker");
+        assert_eq!(results.row_data(0).unwrap().folder.as_str(), "Nested");
+        assert_eq!(results.row_data(1).unwrap().folder.as_str(), "Selects");
+        assert_eq!(results.row_data(1).unwrap().category.as_str(), "00:00:01.000");
+        assert_eq!(results.row_data(2).unwrap().category.as_str(), "00:00:02.000");
+        ui.set_search_text("Earlier".into());
+        refresh_marker_results(&ui, &mut state);
+        assert_eq!(ui.get_results().row_count(), 1);
+
+        apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+        let seek = read_command();
+        assert_eq!(seek["operation"], "seek");
+        assert_eq!(seek["projectId"], "project");
+        assert_eq!(seek["marker"]["sequenceId"], "sequence");
+        assert_eq!(seek["marker"]["ticks"], "254016000000");
+        receive_marker(&ui, &mut state, &bridge, MarkerEvent {
+            peer_id: 7,
+            request_id: seek["requestId"].as_u64().unwrap(),
+            result: Some(actions::markers::MarkerReply::Sought),
+            message: String::new(),
+        }, &toast);
+        assert!(!state.is_visible && !ui.get_marker_picker());
+
+        let mut picker = MarkerPicker::open(&bridge, "".into());
+        let list = read_command();
+        picker.receive(list_reply(&list));
+        let mut other_timeline = MediaCatalog {
+            peer_id: 7,
+            project_id: Some("project".into()),
+            sequence_id: Some("other-sequence".into()),
+            items: vec![],
+        };
+        assert!(!picker.refresh_if_project_changed(&bridge, &other_timeline));
+        other_timeline.project_id = Some("other-project".into());
+        assert!(picker.refresh_if_project_changed(&bridge, &other_timeline));
+        assert!(picker.markers().is_empty());
+        assert!(picker.context_label.is_empty());
+        assert_eq!(picker.status(), "Loading markers…");
+        assert_eq!(read_command()["operation"], "list");
+        assert!(!picker.accepts(&list_reply(&list)));
 
         show_palette(&ui, &mut state);
         ui.set_active_catalog("project".into());
@@ -2569,6 +2888,9 @@ mod tests {
             media_catalog: Some(catalog.clone()),
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
@@ -2707,22 +3029,25 @@ mod tests {
             let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
             window.request_redraw();
             assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
-            let background = pixels[64 * width + 195];
+            let background = pixels[64 * width + 250];
             let divider = Rgb8Pixel { r: 0x26, g: 0x28, b: 0x3a };
             assert_ne!(background, pixels[26 * width + 550]);
             assert_eq!(pixels[50 * width + 550], divider);
             assert_eq!(pixels[87 * width + 550], divider);
-            for (index, x) in [23, 77, 131].into_iter().enumerate() {
+            for (index, x) in [23, 77, 131, 185].into_iter().enumerate() {
                 assert_eq!(pixels[64 * width + x] != background, index == selected);
             }
         };
         assert_highlight(0);
-        for (index, expected) in [(1, "effects"), (2, "project"), (0, "all")] {
+        for (index, expected) in [(1, "effects"), (2, "project"), (3, "actions"), (0, "all")] {
             press_tab();
             assert_eq!(ui.get_active_catalog().as_str(), expected);
             assert_eq!(ui.get_search_text().as_str(), "Take");
             assert_highlight(index);
         }
+        click_tab(201.);
+        assert_eq!(ui.get_active_catalog().as_str(), "actions");
+        assert_highlight(3);
         click_tab(147.);
         assert_eq!(ui.get_active_catalog().as_str(), "project");
         assert_highlight(2);
@@ -2739,6 +3064,9 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
@@ -3029,6 +3357,9 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
@@ -3102,6 +3433,9 @@ mod tests {
             media_catalog: Some(catalog),
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings::default(),
@@ -3319,6 +3653,9 @@ mod tests {
             media_catalog: Some(catalog),
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings: AppSettings {
@@ -3488,6 +3825,9 @@ mod tests {
             media_catalog: None,
             pending_placement: None,
             pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: Some("01_Footage".into()),
             settings: AppSettings {

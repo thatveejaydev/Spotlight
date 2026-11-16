@@ -1,6 +1,8 @@
 "use strict";
 
 const ppro = require("premierepro");
+const { runAction } = require("./actions/index.js");
+const { runMarkerCommand } = require("./actions/markers.js");
 const { entrypoints, shell } = require("uxp");
 
 const WS_URLS = ["ws://localhost:3847", "ws://127.0.0.1:3847"];
@@ -1357,6 +1359,32 @@ function connectBridge() {
         }
         if (ws === connection) {
           sendJson({ type: "audio_preview_ack", requestId: msg.requestId, source, message });
+        }
+      } else if (msg.type === "marker_command" && Number.isSafeInteger(msg.requestId)) {
+        const isCurrent = () => ws === connection && connection.readyState === WebSocket.OPEN;
+        let result = null;
+        let message = "";
+        try {
+          result = await runMarkerCommand(ppro, msg, isCurrent);
+        } catch (error) {
+          message = error?.message || String(error);
+        }
+        if (isCurrent()) sendJson({ type: "marker_ack", requestId: msg.requestId, result, message });
+      } else if (msg.type === "run_action" && Number.isSafeInteger(msg.requestId)) {
+        const revision = projectContextRevision;
+        const isCurrent = () => revision === projectContextRevision
+          && ws === connection && connection.readyState === WebSocket.OPEN;
+        let ok = false;
+        let message;
+        try {
+          message = await runAction(ppro, msg.action, isCurrent);
+          ok = true;
+        } catch (error) {
+          message = error?.message || String(error);
+        }
+        if (ws === connection) {
+          setLog(message);
+          sendJson({ type: "action_ack", requestId: msg.requestId, ok, message });
         }
       } else if (msg.type === "apply_effect") {
         setLog(`Applying ${msg.name}...`);

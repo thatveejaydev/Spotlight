@@ -307,6 +307,48 @@ pub fn open_effect_controls(premiere_hwnd: isize, shortcut: crate::bridge::Short
 }
 
 #[cfg(windows)]
+pub(crate) fn send_marker_shortcut(process_id: u32, shortcut: crate::bridge::ShortcutSpec) -> Option<isize> {
+    let foreground = get_foreground_hwnd();
+    (can_send_preset_input(process_id)
+        && preset_handoff_keys_released()
+        && get_foreground_hwnd() == foreground
+        && send_inputs(&shortcut_inputs(shortcut)))
+        .then_some(foreground)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn send_marker_shortcut(_process_id: u32, _shortcut: crate::bridge::ShortcutSpec) -> Option<isize> {
+    None
+}
+
+#[cfg(windows)]
+pub(crate) fn foreground_event_clock() -> u32 {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn foreground_event_clock() -> u32 {
+    0
+}
+
+#[cfg(windows)]
+pub(crate) fn has_owned_modal(target: isize) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+    let foreground = get_foreground_hwnd();
+    foreground != 0 && foreground != target && unsafe {
+        let owner = GetAncestor(target as _, GA_ROOTOWNER);
+        !owner.is_null()
+            && GetAncestor(foreground as _, GA_ROOTOWNER) == owner
+            && (IsWindowEnabled(target as _) == 0 || IsWindowEnabled(owner) == 0)
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn has_owned_modal(_target: isize) -> bool {
+    false
+}
+
+#[cfg(windows)]
 fn shortcut_inputs(shortcut: crate::bridge::ShortcutSpec) -> Vec<INPUT> {
     let mut inputs = Vec::with_capacity(10);
 
@@ -690,10 +732,11 @@ unsafe extern "system" fn winevent_proc(
     _id_object: i32,
     _id_child: i32,
     _id_event_thread: u32,
-    _event_time: u32,
+    event_time: u32,
 ) {
     if event == EVENT_SYSTEM_FOREGROUND {
         crate::presets::foreground_changed(hwnd as isize);
+        crate::actions::markers::foreground_changed(hwnd as isize, event_time);
     }
     if !PALETTE_VISIBLE.load(std::sync::atomic::Ordering::Acquire) {
         return;

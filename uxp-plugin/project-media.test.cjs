@@ -84,7 +84,11 @@ function fixture() {
     }) }
   };
   const context = vm.createContext({
-    require: (id) => id === "premierepro" ? ppro : { entrypoints: { setup() {} } },
+    require: (id) => {
+      if (id === "premierepro") return ppro;
+      if (id === "uxp") return { entrypoints: { setup() {} } };
+      return require(id);
+    },
     document: { readyState: "loading", addEventListener() {}, getElementById: () => null },
     WebSocket: { OPEN: 1 }, console, socket
   });

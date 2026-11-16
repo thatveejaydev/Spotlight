@@ -29,10 +29,13 @@ cargo run --release
 3. With Adobe Premiere Pro open, click **Load** on **Premiere Spotlight Bridge**.
 
 ## Keyboard Controls (Inside Spotlight Popup)
-- **Type:** Fuzzy search effects, transitions, custom presets, and items in the active project. Selected presets and project items show their folder path.
+- **Type:** Fuzzy search effects, transitions, custom presets, project items, and actions in **All**. Selected presets and project items show their folder path.
 - **`↑` / `↓` Arrows:** Navigate results
 - **`Ctrl+P` (configurable):** Play or pause the highlighted audio clip in Project or All. The highlighted audio row also has a play/pause icon. During preview, click the progress line to seek within the clip’s Premiere In and Out points. Audio preview requires Premiere Pro 25.6 or later and supports WAV, PCM AIFF, MP3, FLAC, AAC, and AAC/ALAC in M4A.
-- **`Tab`:** Cycle through **All** → **FX** → **PRJ**, or click a tab below the search bar to go straight to that catalog. Spotlight opens in **All** and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
+- **`Tab`:** Cycle through **All** → **FX** → **PRJ** → **ACT**, or click a tab below the search bar to go straight to that catalog. Spotlight opens in **All** and shows recently applied effects and inserted items from the active project. Select a recent item to apply or insert it again.
+- **Add Marker (All or ACT):** Add a sequence marker at the playhead and open Premiere’s Marker dialog. At an existing marker, open its dialog. Uses Premiere’s Timeline and Add Marker shortcuts.
+- **Go to Marker (All or ACT):** Search markers across the active project by marker name, sequence name, comment, or elapsed position. Each row shows its sequence. Choose a marker to open its sequence and move the playhead to its start, or press **Esc** to return to the catalog you opened it from.
+- **`Enter` (or Click) on `Remove Attributes` in All or ACT:** Remove applied effects from the selected timeline clips in one undo step. Built-in controls such as Motion, Opacity, and Volume keep their settings. Requires Premiere Pro 25.6 or later.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, drill into a project bin to browse/search its contents, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
 - **`Enter` (or Click) on a `Preset` result:** Open Premiere’s Effects panel and search for that preset by name. Drag it onto a clip to apply it. Spotlight uses the Effects and Select Find Box bindings from Premiere’s Keyboard Shortcuts and refreshes presets after Premiere saves them to your profile.
 - **`Backspace` (when search is empty inside a bin, or Click the bin pill):** Step back up one folder level (or exit bin view).
@@ -44,7 +47,7 @@ cargo run --release
   - Customize the global **Launch Hotkey** (default `Ctrl+Space`).
   - Toggle **Always open Effect Controls on Enter** (swaps primary and alternate actions for effects).
   - Choose the **Alternate Action Modifier** (`Shift`, `Ctrl`, or `Alt`, default `Shift`) used with `Enter` / Click.
-  - Customize the **Open Settings Shortcut** (default `Ctrl+,`) and optional **Direct Catalog Shortcuts** for **All**, **Effects**, and **Project** (all empty by default).
+  - Customize the **Open Settings Shortcut** (default `Ctrl+,`) and optional **Direct Catalog Shortcuts** for **All**, **Effects**, **Project**, and **Actions** (all empty by default).
   - Customize the **Preview Audio Shortcut** (default `Ctrl+P`) and enable **Auto-preview audio** to play a clip after its highlight settles. Auto-preview is off by default.
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.
 - Under **Appearance**, choose **Light**, **Dark**, **Midnight Indigo** (the default), or **Premiere**.

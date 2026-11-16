@@ -83,6 +83,7 @@ pub struct AppSettings {
     pub catalog_all_hotkey: String,
     pub catalog_effects_hotkey: String,
     pub catalog_project_hotkey: String,
+    pub catalog_actions_hotkey: String,
     pub audio_preview_hotkey: String,
     pub auto_preview_audio: bool,
 }
@@ -98,6 +99,7 @@ impl Default for AppSettings {
             catalog_all_hotkey: String::new(),
             catalog_effects_hotkey: String::new(),
             catalog_project_hotkey: String::new(),
+            catalog_actions_hotkey: String::new(),
             audio_preview_hotkey: DEFAULT_AUDIO_PREVIEW_HOTKEY.into(),
             auto_preview_audio: false,
         }
@@ -145,6 +147,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
         normalize_optional_hotkey(&settings.catalog_effects_hotkey, "");
     settings.catalog_project_hotkey =
         normalize_optional_hotkey(&settings.catalog_project_hotkey, "");
+    settings.catalog_actions_hotkey =
+        normalize_optional_hotkey(&settings.catalog_actions_hotkey, "");
     settings.audio_preview_hotkey =
         normalize_optional_hotkey(&settings.audio_preview_hotkey, DEFAULT_AUDIO_PREVIEW_HOTKEY);
     if shortcut_conflict("audio_preview", &settings.audio_preview_hotkey, &settings).is_some() {
@@ -392,6 +396,7 @@ pub fn match_palette_shortcut(
         (&settings.catalog_all_hotkey, "all"),
         (&settings.catalog_effects_hotkey, "effects"),
         (&settings.catalog_project_hotkey, "project"),
+        (&settings.catalog_actions_hotkey, "actions"),
     ] {
         if matches_spec(spec) {
             return Some(PaletteShortcutAction::SelectCatalog(catalog));
@@ -424,6 +429,11 @@ pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> O
             "catalog_project",
             "Project Catalog",
             settings.catalog_project_hotkey.as_str(),
+        ),
+        (
+            "catalog_actions",
+            "Actions Catalog",
+            settings.catalog_actions_hotkey.as_str(),
         ),
         ("audio_preview", "Preview Audio", settings.audio_preview_hotkey.as_str()),
     ];
@@ -625,6 +635,7 @@ mod tests {
             catalog_all_hotkey: "Ctrl+1".into(),
             catalog_effects_hotkey: "Ctrl+2".into(),
             catalog_project_hotkey: "Ctrl+3".into(),
+            catalog_actions_hotkey: "Ctrl+4".into(),
             audio_preview_hotkey: "Alt+P".into(),
             auto_preview_audio: true,
         };
@@ -669,6 +680,7 @@ mod tests {
         );
         assert_eq!(migrated.catalog_project_hotkey, "Ctrl+P");
         assert!(migrated.audio_preview_hotkey.is_empty());
+        assert!(migrated.catalog_actions_hotkey.is_empty());
         let cleared = normalize_settings(
             serde_json::from_str(r#"{"audio_preview_hotkey":"","auto_preview_audio":true}"#).unwrap(),
         );
@@ -699,6 +711,7 @@ mod tests {
         settings.catalog_all_hotkey = "Ctrl+1".into();
         settings.catalog_effects_hotkey = "Ctrl+2".into();
         settings.catalog_project_hotkey = "Ctrl+3".into();
+        settings.catalog_actions_hotkey = "Ctrl+4".into();
         assert_eq!(
             match_palette_shortcut(&settings, false, "1", true, false, false, false),
             Some(PaletteShortcutAction::SelectCatalog("all"))
@@ -711,6 +724,11 @@ mod tests {
             match_palette_shortcut(&settings, false, "3", true, false, false, false),
             Some(PaletteShortcutAction::SelectCatalog("project"))
         );
+        assert_eq!(
+            match_palette_shortcut(&settings, false, "4", true, false, false, false),
+            Some(PaletteShortcutAction::SelectCatalog("actions"))
+        );
+        assert!(shortcut_conflict("catalog_project", "Ctrl+4", &settings).is_some());
         // Catalog shortcuts stay inactive while Settings is open.
         assert_eq!(
             match_palette_shortcut(&settings, true, "1", true, false, false, false),
