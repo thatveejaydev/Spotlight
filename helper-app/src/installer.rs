@@ -20,6 +20,7 @@ const MANIFEST_JSON: &str = include_str!("../../uxp-plugin/manifest.json");
 const INDEX_HTML: &str = include_str!("../../uxp-plugin/index.html");
 const INDEX_JS: &str = include_str!("../../uxp-plugin/index.js");
 const ACTIONS_INDEX_JS: &str = include_str!("../../uxp-plugin/actions/index.js");
+const ADJUSTMENT_LAYER_JS: &str = include_str!("../../uxp-plugin/actions/adjustment-layer.js");
 const REMOVE_ATTRIBUTES_JS: &str = include_str!("../../uxp-plugin/actions/remove-attributes.js");
 const MARKERS_JS: &str = include_str!("../../uxp-plugin/actions/markers.js");
 
@@ -64,6 +65,7 @@ pub fn ensure_installed() {
         let _ = fs::write(plugin_dir.join("manifest.json"), MANIFEST_JSON);
         let _ = fs::write(plugin_dir.join("index.html"), INDEX_HTML);
         let _ = fs::write(actions_dir.join("index.js"), ACTIONS_INDEX_JS);
+        let _ = fs::write(actions_dir.join("adjustment-layer.js"), ADJUSTMENT_LAYER_JS);
         let _ = fs::write(actions_dir.join("remove-attributes.js"), REMOVE_ATTRIBUTES_JS);
         let _ = fs::write(actions_dir.join("markers.js"), MARKERS_JS);
         let _ = fs::write(plugin_dir.join("index.js"), patched_js);

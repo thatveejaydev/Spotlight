@@ -6,26 +6,38 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    AddAdjustmentLayer,
     AddMarker,
     GoToMarker,
+    RegisterAdjustmentLayer,
     RemoveAttributes,
 }
 
 impl Action {
-    pub const ALL: [Self; 3] = [Self::AddMarker, Self::GoToMarker, Self::RemoveAttributes];
+    pub const ALL: [Self; 5] = [
+        Self::AddAdjustmentLayer,
+        Self::AddMarker,
+        Self::GoToMarker,
+        Self::RegisterAdjustmentLayer,
+        Self::RemoveAttributes,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::AddAdjustmentLayer => "Add Adjustment Layer",
             Self::AddMarker => "Add Marker",
             Self::GoToMarker => "Go to Marker",
+            Self::RegisterAdjustmentLayer => "Register Adjustment Layer",
             Self::RemoveAttributes => "Remove Attributes",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
+            Self::AddAdjustmentLayer => "Place a layer above selected video clips",
             Self::AddMarker => "Open the Marker dialog at the playhead",
             Self::GoToMarker => "Find a marker in the active project",
+            Self::RegisterAdjustmentLayer => "Use the selected adjustment layer as this project's source",
             Self::RemoveAttributes => "Remove applied effects from selected clips",
         }
     }

@@ -250,7 +250,7 @@ function inspectFolderItem(item, path) {
   };
 }
 
-async function collectProjectEntries(project, { targetItemId = null, shouldAbort = null } = {}) {
+async function collectProjectEntries(project, { targetItemId = null, matchesClip = null, shouldAbort = null } = {}) {
   const entries = [];
   const byId = new Map();
   const seen = new Set();
@@ -283,7 +283,8 @@ async function collectProjectEntries(project, { targetItemId = null, shouldAbort
           bin: entry.bin,
           clip: entry.clip
         };
-        if (targetItemId !== null && entry.itemId === targetItemId) {
+        if ((targetItemId !== null && entry.itemId === targetItemId) ||
+            (entry.clip && matchesClip?.(entry.item))) {
           return { found: stored, entries, byId };
         }
         entries.push(stored);
@@ -1371,16 +1372,32 @@ function connectBridge() {
         }
         if (isCurrent()) sendJson({ type: "marker_ack", requestId: msg.requestId, result, message });
       } else if (msg.type === "run_action" && Number.isSafeInteger(msg.requestId)) {
-        const revision = projectContextRevision;
-        const isCurrent = () => revision === projectContextRevision
-          && ws === connection && connection.readyState === WebSocket.OPEN;
+        const isConnected = () => ws === connection && connection.readyState === WebSocket.OPEN;
+        const watchTimeline = () => {
+          const revision = projectContextRevision;
+          return () => revision === projectContextRevision && isConnected();
+        };
+        const isCurrent = watchTimeline();
+        const placing = msg.action === "add_adjustment_layer";
         let ok = false;
         let message;
-        try {
-          message = await runAction(ppro, msg.action, isCurrent);
-          ok = true;
-        } catch (error) {
-          message = error?.message || String(error);
+        if (placing && placementInProgress) {
+          message = "A timeline placement is already in progress.";
+        } else {
+          if (placing) placementInProgress = true;
+          try {
+            message = await runAction(ppro, msg.action, isCurrent, {
+              storage: globalThis.localStorage,
+              findSource: async (project, matchesClip) =>
+                (await collectProjectEntries(project, { matchesClip }))?.found,
+              readTicks, readItemRange, readSingleTrack, trackLayout, trackLayoutsEqual, isConnected, watchTimeline
+            });
+            ok = true;
+          } catch (error) {
+            message = error?.message || String(error);
+          } finally {
+            if (placing) placementInProgress = false;
+          }
         }
         if (ws === connection) {
           setLog(message);

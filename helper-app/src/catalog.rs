@@ -528,8 +528,10 @@ mod tests {
         assert!(matches!(
             store.search("", "actions").as_slice(),
             [
+                SearchResult::Action(Action::AddAdjustmentLayer),
                 SearchResult::Action(Action::AddMarker),
                 SearchResult::Action(Action::GoToMarker),
+                SearchResult::Action(Action::RegisterAdjustmentLayer),
                 SearchResult::Action(Action::RemoveAttributes)
             ]
         ));

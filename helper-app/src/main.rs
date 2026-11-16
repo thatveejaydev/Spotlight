@@ -877,11 +877,11 @@ fn apply_entry_with_options(
             schedule_action_deadlines(state);
             return Ok(None);
         }
-        SearchResult::Action(Action::RemoveAttributes) => {
+        SearchResult::Action(action) => {
             if state.pending_action.is_some() {
                 return Err("A Premiere action is already in progress.".into());
             }
-            let (request_id, peer_id) = bridge.run_action(Action::RemoveAttributes).map_err(SharedString::from)?;
+            let (request_id, peer_id) = bridge.run_action(action).map_err(SharedString::from)?;
             state.pending_action = Some(PendingAction {
                 request_id,
                 peer_id,
@@ -2699,6 +2699,28 @@ mod tests {
         }
         assert_eq!(ui.get_status_message().as_str(), "Removed effects");
         assert!(state.recent_items.is_empty());
+
+        for (catalog, action, wire_name) in [
+            ("actions", Action::RegisterAdjustmentLayer, "register_adjustment_layer"),
+            ("all", Action::AddAdjustmentLayer, "add_adjustment_layer"),
+        ] {
+            show_palette(&ui, &mut state);
+            ui.set_active_catalog(catalog.into());
+            ui.set_search_text(action.name().into());
+            refresh_results_ui(&ui, &mut state);
+            apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+            assert!(!state.is_visible);
+            let command: serde_json::Value =
+                serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+            let pending = state.pending_action.as_ref().unwrap();
+            assert_eq!(command["type"], "run_action");
+            assert_eq!(command["action"], wire_name);
+            assert_eq!(command["requestId"], pending.request_id);
+            let request_id = pending.request_id;
+            finish_action(&ui, &mut state, Some(ActionResult {
+                peer_id: 7, request_id, ok: true, message: "Done".into(),
+            }), &toast);
+        }
 
         show_palette(&ui, &mut state);
         ui.set_active_catalog("all".into());
