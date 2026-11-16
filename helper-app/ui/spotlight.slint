@@ -903,17 +903,16 @@ export component SpotlightWindow inherits Window {
 
             if !root.settings-open : Rectangle {
                 height: 36px;
-                background: Theme.strip-background;
+                background: Theme.section-divider;
                 accessible-role: tab-list;
                 accessible-label: "Search catalogs";
                 accessible-item-count: 4;
 
                 HorizontalLayout {
-                    padding-left: 16px;
-                    padding-top: 6px;
-                    padding-bottom: 6px;
-                    spacing: 8px;
-                    alignment: start;
+                    width: 100%;
+                    height: 100%;
+                    spacing: 1px;
+                    alignment: stretch;
 
                     for catalog[index] in [
                         { id: "all", label: "All", name: "All", accent: Theme.catalog-all },
@@ -922,17 +921,21 @@ export component SpotlightWindow inherits Window {
                         { id: "actions", label: "ACT", name: "Actions", accent: Theme.catalog-actions },
                     ] : Rectangle {
                         private property <bool> active: catalog.id == root.active-catalog;
-                        width: 46px;
-                        border-radius: 5px;
-                        background: active ? catalog.accent.with-alpha(0.12) : transparent;
-                        border-width: active ? 1px : 0px;
-                        border-color: catalog.accent.with-alpha(0.4);
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        horizontal-stretch: 1;
+                        background: Theme.strip-background;
                         accessible-role: tab;
                         accessible-label: catalog.name;
                         accessible-item-index: index;
                         accessible-item-selectable: true;
                         accessible-item-selected: active;
                         accessible-action-default => { root.select-catalog(catalog.id); }
+                        if active : Rectangle {
+                            background: catalog.accent.with-alpha(0.12);
+                            border-width: 1px;
+                            border-color: catalog.accent.with-alpha(0.4);
+                        }
                         Text {
                             text: catalog.label;
                             font-size: 11px;

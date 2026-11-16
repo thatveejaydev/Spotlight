@@ -3029,13 +3029,27 @@ mod tests {
             let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
             window.request_redraw();
             assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
-            let background = pixels[64 * width + 250];
+            let tab_width = width / 4;
+            let inactive = (selected + 1) % 4;
+            let background = pixels[64 * width + inactive * tab_width + 12];
             let divider = Rgb8Pixel { r: 0x26, g: 0x28, b: 0x3a };
             assert_ne!(background, pixels[26 * width + 550]);
             assert_eq!(pixels[50 * width + 550], divider);
             assert_eq!(pixels[87 * width + 550], divider);
-            for (index, x) in [23, 77, 131, 185].into_iter().enumerate() {
-                assert_eq!(pixels[64 * width + x] != background, index == selected);
+            for index in 0..4 {
+                for x in [index * tab_width + 4, (index + 1) * tab_width - 5] {
+                    for y in [54, 84] {
+                        assert_eq!(pixels[y * width + x] != background, index == selected);
+                    }
+                }
+                if index < 3 {
+                    let boundary = (index + 1) * tab_width;
+                    assert!(
+                        pixels[64 * width + boundary - 1..=64 * width + boundary + 1]
+                            .contains(&divider),
+                        "missing divider near x={boundary}"
+                    );
+                }
             }
         };
         assert_highlight(0);
@@ -3045,14 +3059,17 @@ mod tests {
             assert_eq!(ui.get_search_text().as_str(), "Take");
             assert_highlight(index);
         }
-        click_tab(201.);
+        click_tab(WINDOW_WIDTH as f32 - 5.);
         assert_eq!(ui.get_active_catalog().as_str(), "actions");
         assert_highlight(3);
-        click_tab(147.);
+        click_tab(WINDOW_WIDTH as f32 * 0.625);
         assert_eq!(ui.get_active_catalog().as_str(), "project");
         assert_highlight(2);
-        click_tab(93.);
+        click_tab(WINDOW_WIDTH as f32 * 0.375);
         assert_eq!(ui.get_active_catalog().as_str(), "effects");
+        click_tab(5.);
+        assert_eq!(ui.get_active_catalog().as_str(), "all");
+        click_tab(WINDOW_WIDTH as f32 * 0.375);
         press_tab();
         assert_eq!(ui.get_active_catalog().as_str(), "project");
         assert_eq!(ui.get_search_text().as_str(), "Take");
@@ -3166,8 +3183,8 @@ mod tests {
         refresh_results_ui(&ui, &mut state);
         assert_eq!(ui.get_total_matches(), 8);
         click_tab(39.);
-        click_tab(93.);
-        click_tab(147.);
+        click_tab(WINDOW_WIDTH as f32 * 0.375);
+        click_tab(WINDOW_WIDTH as f32 * 0.625);
         assert_eq!(ui.get_active_catalog().as_str(), "project");
         ui.set_status_message("This project item can't be placed on the timeline.".into());
 
