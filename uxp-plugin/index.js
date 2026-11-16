@@ -20,6 +20,8 @@ let launchAttempted = false;
 let mediaRequestId = 0;
 let mediaScanGeneration = 0;
 let projectContextRevision = 0;
+// Last list sent to the helper, reused while projectContextRevision is unchanged.
+let lastProjectScan = null;
 let projectEventBindings = [];
 let placementInProgress = false;
 
@@ -312,20 +314,23 @@ function guid(object) {
   return object?.guid?.toString() || null;
 }
 
-function sendProjectItems(connection, requestId, projectId, sequenceId, items) {
+function sendProjectItems(connection, requestId, projectId, sequenceId, items, scanMode = "cleared", scanMs = 0) {
   if (connection && ws === connection) {
-    sendJson({ type: "project_items", requestId, projectId, sequenceId, items });
+    sendJson({ type: "project_items", requestId, projectId, sequenceId, items, scanMode, scanMs });
   }
 }
 
-async function syncProjectItems(connection, requestId, clear = false) {
+// `reuse` sends the last list without walking the project when nothing changed since it was built.
+async function syncProjectItems(connection, requestId, clear = false, reuse = false) {
   if (!connection || ws !== connection) return;
   const generation = ++mediaScanGeneration;
+  const revision = projectContextRevision;
   const startedAt = nowMs();
   const stale = () => generation !== mediaScanGeneration || ws !== connection;
   if (clear) {
+    lastProjectScan = null;
     cachedProjectEntries = { projectId: null, byId: new Map() };
-    sendProjectItems(connection, requestId, null, null, []);
+    sendProjectItems(connection, requestId, null, null, [], "scanning");
   }
   try {
     const project = await ppro.Project.getActiveProject();
@@ -333,6 +338,14 @@ async function syncProjectItems(connection, requestId, clear = false) {
     const sequence = await project?.getActiveSequence();
     const sequenceId = guid(sequence);
     if (stale()) return;
+
+    const previous = lastProjectScan;
+    if (reuse && previous && previous.revision === revision && revision === projectContextRevision
+        && previous.projectId === projectId && previous.sequenceId === sequenceId) {
+      const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
+      sendProjectItems(connection, requestId, projectId, sequenceId, previous.items, "reused", elapsedMs);
+      return;
+    }
 
     let items = [];
     let nextById = new Map();
@@ -373,18 +386,21 @@ async function syncProjectItems(connection, requestId, clear = false) {
     if (generation === mediaScanGeneration) {
       if (guid(currentProject) === projectId && guid(currentSequence) === sequenceId) {
         cachedProjectEntries = { projectId, byId: nextById };
-        sendProjectItems(connection, requestId, projectId, sequenceId, items);
+        lastProjectScan = { revision, projectId, sequenceId, items };
+        const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
+        sendProjectItems(connection, requestId, projectId, sequenceId, items, "rescanned", elapsedMs);
         if (cachedCatalogStatsText) {
-          const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
           setStats(`${cachedCatalogStatsText} • ${items.length} media (${elapsedMs} ms)`);
         }
       } else {
+        lastProjectScan = null;
         cachedProjectEntries = { projectId: null, byId: new Map() };
         sendProjectItems(connection, requestId, null, null, []);
       }
     }
   } catch (error) {
     if (generation === mediaScanGeneration) {
+      lastProjectScan = null;
       cachedProjectEntries = { projectId: null, byId: new Map() };
       sendProjectItems(connection, requestId, null, null, []);
       console.warn("[Spotlight] Project media scan failed:", error);
@@ -1316,7 +1332,7 @@ function connectBridge() {
       const msg = JSON.parse(event.data);
       if (msg.type === "request_project_items" && Number.isSafeInteger(msg.requestId)) {
         mediaRequestId = msg.requestId;
-        void syncProjectItems(connection, mediaRequestId);
+        void syncProjectItems(connection, mediaRequestId, false, true);
       } else if (msg.type === "place_project_item" && Number.isSafeInteger(msg.requestId)) {
         let ok = false;
         let message;
@@ -1487,6 +1503,7 @@ function stopPlugin() {
   ++mediaScanGeneration;
   ++projectContextRevision;
   catalogScanPromise = null;
+  lastProjectScan = null;
   cachedProjectEntries = { projectId: null, byId: new Map() };
   for (const [event, listener] of projectEventBindings) {
     try {

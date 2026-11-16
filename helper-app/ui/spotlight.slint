@@ -484,6 +484,10 @@ export component SpotlightWindow inherits Window {
     in property <string> marker-status: "";
     in property <string> marker-context: "";
     in property <bool> show-recent-items: false;
+    // True while Premiere is still building the project list.
+    in property <bool> project-loading: false;
+    private property <bool> show-project-loading: project-loading
+        && (active-catalog == "all" || active-catalog == "project");
     in-out property <bool> bridge-connected: false;
     in-out property <int> total-matches: 0;
     private property <string> gear-tooltip: settings-open ? "Back to Search"
@@ -1659,6 +1663,7 @@ export component SpotlightWindow inherits Window {
                         text: root.marker-picker && root.marker-status != "" ? root.marker-status
                             : root.active-bin != "" && root.search-text == "" ? "This bin is empty"
                             : root.show-recent-items ? "No recently added items"
+                            : root.show-project-loading ? "Loading project items…"
                             : "No matching results";
                         font-size: 13px;
                         color: Theme.subtle-text;
@@ -1894,8 +1899,9 @@ export component SpotlightWindow inherits Window {
                     if !root.settings-open : VerticalLayout {
                         alignment: center;
                         Text {
-                            text: root.show-recent-items ? "Recently added"
-                                : root.total-matches == 1 ? "1 result" : root.total-matches + " results";
+                            text: (root.show-project-loading ? "Loading… · " : "")
+                                + (root.show-recent-items ? "Recently added"
+                                : root.total-matches == 1 ? "1 result" : root.total-matches + " results");
                             font-size: 11px;
                             color: Theme.muted-text;
                         }

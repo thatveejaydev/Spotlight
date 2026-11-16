@@ -468,9 +468,9 @@ fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge: &BridgeCl
     ui.set_active_catalog("all".into());
     ui.set_search_text(SharedString::from(""));
     clear_bin_scope(ui, state);
-    state.media_catalog = None;
-    state.catalog.set_project_items(Vec::new());
+    // Keep the last project list visible; the plugin replies at once if nothing changed.
     bridge.request_project_items();
+    ui.set_project_loading(bridge.project_scan_pending());
     state.selected_abs_index = 0;
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
@@ -1351,6 +1351,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         schedule_action_deadlines(&st);
                     }
                     BridgeEvent::ProjectItemsChanged => {
+                        ui.set_project_loading(bridge_ref.project_scan_pending());
                         let mut st = state_ref.borrow_mut();
                         let catalog = match bridge_ref.media_catalog() {
                             Ok(catalog) => catalog,

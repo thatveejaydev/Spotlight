@@ -93,12 +93,12 @@ function fixture() {
     WebSocket: { OPEN: 1 }, console, socket
   });
   const exports = vm.runInContext(
-    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog });", context
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog, markProjectChanged: () => ++projectContextRevision });", context
   );
   const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = exports;
   return {
     ...exports,
-    clip, seq, bin, root, project, commits, messages, ppro, applyEffectToSelection,
+    clip, seq, bin, root, project, commits, messages, ppro, applyEffectToSelection, connection: socket,
     place(itemId = "take") {
       return placeProjectItem({ itemId, projectId: "project", sequenceId: "timeline" }, socket);
     },
@@ -203,6 +203,34 @@ test("an older scan cannot replace a newer project response", async () => {
   f.ppro.Project.getActiveProject = () => null;
   await Promise.all([stale, f.scan(2)]);
   assert.deepEqual(f.messages.map(({ requestId, projectId }) => [requestId, projectId]), [[2, null]]);
+});
+
+test("helper requests reuse the last list until the project changes", async () => {
+  const f = fixture();
+  let rootWalks = 0;
+  const baseRoot = f.project.getRootItem;
+  f.project.getRootItem = () => { rootWalks++; return baseRoot(); };
+  const send = (id) => f.syncProjectItems(f.connection, id, false, true);
+  await send(1);
+  await send(2);
+  assert.equal(rootWalks, 1);
+  assert.deepEqual(f.messages.map((m) => [m.requestId, m.scanMode]), [[1, "rescanned"], [2, "reused"]]);
+  assert.deepEqual(f.messages[1].items, f.messages[0].items);
+
+  f.markProjectChanged();
+  await send(3);
+  assert.equal(rootWalks, 2);
+  assert.equal(f.messages[2].scanMode, "rescanned");
+
+  f.project.getActiveSequence = () => ({ ...f.seq, guid: "other" });
+  await send(4);
+  assert.equal(rootWalks, 3);
+  assert.equal(f.messages[3].scanMode, "rescanned");
+
+  await f.syncProjectItems(f.connection, 5, true);
+  assert.equal(rootWalks, 4);
+  assert.deepEqual(f.messages.slice(4).map((m) => [m.items.length, m.scanMode]),
+    [[0, "scanning"], [f.messages[3].items.length, "rescanned"]]);
 });
 
 test("places at the playhead in an exact-fit gap using one transaction", async () => {

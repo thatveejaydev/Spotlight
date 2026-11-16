@@ -219,6 +219,12 @@ pub enum IncomingPluginMessage {
         project_id: Option<String>,
         sequence_id: Option<String>,
         items: Vec<ProjectItemEntry>,
+        /// How the plugin produced this list ("rescanned" or "cleared"); diagnostics only.
+        #[serde(default)]
+        scan_mode: Option<String>,
+        /// Time the plugin spent producing this list, in milliseconds; diagnostics only.
+        #[serde(default)]
+        scan_ms: Option<u64>,
     },
     #[serde(rename = "action_ack", rename_all = "camelCase")]
     ActionAck {
@@ -866,6 +872,8 @@ struct Peer {
     tx: PeerSender,
     media: Option<MediaCatalog>,
     requested: u64,
+    /// True from a project-items request until the plugin sends a finished list.
+    scanning: bool,
 }
 
 #[derive(Clone)]
@@ -937,8 +945,14 @@ impl BridgeClients {
             tx: PeerSender::from_sender(tx),
             media: Some(catalog),
             requested: 0,
+            scanning: false,
         });
         rx
+    }
+
+    /// True while any plugin is still building the project list.
+    pub fn project_scan_pending(&self) -> bool {
+        self.peers.lock().unwrap().iter().any(|peer| peer.scanning)
     }
 
     pub fn media_catalog(&self) -> Result<Option<MediaCatalog>, &'static str> {
@@ -956,12 +970,11 @@ impl BridgeClients {
         let msg = OutgoingHelperMessage::RequestProjectItems { request_id };
         let json = serde_json::to_string(&msg).unwrap();
         let mut sent = 0usize;
+        // Keep the last list so the palette shows it while the plugin checks for changes.
         for peer in self.peers.lock().unwrap().iter_mut() {
             peer.requested = request_id;
-            if let Some(media) = &mut peer.media {
-                media.items.clear();
-            }
             if peer.tx.send(json.clone()).is_ok() {
+                peer.scanning = true;
                 sent += 1;
             }
         }
@@ -1266,6 +1279,7 @@ where
                                 tx: peer_tx.clone(),
                                 media: None,
                                 requested: 0,
+                                scanning: false,
                             });
                             debug_log::log_event(
                                 LogKind::Bridge,
@@ -1298,17 +1312,26 @@ where
                                 project_id,
                                 sequence_id,
                                 items,
+                                scan_mode,
+                                scan_ms,
                             } => {
                                 let item_count = items.len();
+                                let scan = match (scan_mode.as_deref(), scan_ms) {
+                                    (Some(mode), Some(ms)) => format!(", {mode} in {ms} ms"),
+                                    (Some(mode), None) => format!(", {mode}"),
+                                    _ => String::new(),
+                                };
                                 let mut peers = bridge.peers.lock().unwrap();
                                 let peer = peers.iter_mut().find(|peer| peer.id == peer_id).unwrap();
                                 if peer.accept_catalog(request_id, project_id, sequence_id, items) {
+                                    // "scanning" is the empty placeholder sent before a full rescan.
+                                    peer.scanning = scan_mode.as_deref() == Some("scanning");
                                     drop(peers);
                                     bridge.finish_request(request_id);
                                     debug_log::log_event(
                                         LogKind::Bridge,
                                         "BRIDGE",
-                                        format!("<- project_items (id={request_id}, {item_count} items)"),
+                                        format!("<- project_items (id={request_id}, {item_count} items{scan})"),
                                     );
                                     cb(BridgeEvent::ProjectItemsChanged);
                                 }
@@ -1455,6 +1478,7 @@ mod tests {
             tx: PeerSender::from_sender(tx),
             media: None,
             requested: 0,
+            scanning: false,
         });
         let effect = EffectEntry {
             name: "Gaussian Blur".into(),
@@ -1482,7 +1506,7 @@ mod tests {
     fn media_placement_is_scoped_to_the_current_catalog_and_peer() {
         let bridge = BridgeClients::new();
         let (tx, rx) = mpsc::channel();
-        let IncomingPluginMessage::ProjectItems { request_id, project_id, sequence_id, items } =
+        let IncomingPluginMessage::ProjectItems { request_id, project_id, sequence_id, items, .. } =
             serde_json::from_str(r#"{"type":"project_items","requestId":3,"projectId":"p","sequenceId":"s","items":[
                 {"itemId":"i","name":"Clip","binPath":"Bin","kind":"media"},
                 {"itemId":"b","name":"Bin","binPath":"Project root","kind":"bin"},
@@ -1498,6 +1522,7 @@ mod tests {
             tx: PeerSender::from_sender(tx),
             media: None,
             requested: request_id,
+            scanning: false,
         };
         assert!(peer.accept_catalog(request_id, project_id, sequence_id, items));
         assert!(!peer.accept_catalog(request_id - 1, None, None, vec![]));
@@ -1536,6 +1561,7 @@ mod tests {
                 items: Vec::new(),
             }),
             requested: 0,
+            scanning: false,
         });
         assert!(bridge.media_catalog().is_err());
         assert!(bridge.place_project_item(&catalog, "i".into()).is_err());
@@ -1546,8 +1572,32 @@ mod tests {
         bridge.request_project_items();
         let message: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
         assert_eq!(message["type"], "request_project_items");
-        assert!(bridge.place_project_item(&catalog, "i".into()).is_err());
-        assert!(rx.try_recv().is_err());
+        assert!(bridge.project_scan_pending());
+        // The last list stays usable while the plugin checks for changes.
+        assert_eq!(bridge.media_catalog().unwrap().unwrap().items.len(), 5);
+        assert!(bridge.place_project_item(&catalog, "i".into()).is_ok());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&rx.try_recv().unwrap()).unwrap()["type"],
+            "place_project_item"
+        );
+    }
+
+    #[test]
+    fn project_items_message_reports_scan_mode() {
+        let IncomingPluginMessage::ProjectItems { scan_mode, scan_ms, .. } = serde_json::from_str(
+            r#"{"type":"project_items","requestId":1,"projectId":null,"sequenceId":null,"items":[],"scanMode":"reused","scanMs":2}"#,
+        )
+        .unwrap() else {
+            panic!("expected a media catalog");
+        };
+        assert_eq!((scan_mode.as_deref(), scan_ms), (Some("reused"), Some(2)));
+        let IncomingPluginMessage::ProjectItems { scan_mode, scan_ms, .. } = serde_json::from_str(
+            r#"{"type":"project_items","requestId":1,"projectId":null,"sequenceId":null,"items":[]}"#,
+        )
+        .unwrap() else {
+            panic!("expected a media catalog");
+        };
+        assert_eq!((scan_mode, scan_ms), (None, None));
     }
 
     #[test]
@@ -1643,11 +1693,32 @@ mod tests {
             .unwrap();
         let msg = ws.read().unwrap();
         let rtt = sent_at.elapsed();
-        assert!(matches!(msg, Message::Text(t) if t.contains("request_project_items")));
+        let Message::Text(text) = msg else { panic!("expected a text command") };
+        assert!(text.contains("request_project_items"));
         assert!(
             rtt < Duration::from_millis(200),
             "expected fast event-driven wakeup, got {rtt:?}"
         );
+
+        // The scan stays pending through the "scanning" placeholder and ends with the full list.
+        assert!(bridge.project_scan_pending());
+        let request_id = serde_json::from_str::<serde_json::Value>(&text).unwrap()["requestId"]
+            .as_u64()
+            .unwrap();
+        let wait_for = |pending: bool| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while bridge.project_scan_pending() != pending {
+                assert!(Instant::now() < deadline, "scan pending never became {pending}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        for (mode, pending) in [("scanning", true), ("rescanned", false)] {
+            ws.send(Message::Text(format!(
+                r#"{{"type":"project_items","requestId":{request_id},"projectId":null,"sequenceId":null,"items":[],"scanMode":"{mode}","scanMs":0}}"#
+            ).into())).unwrap();
+            ws.flush().unwrap();
+            wait_for(pending);
+        }
 
         let _ = ws.close(None);
         server.join().unwrap();
