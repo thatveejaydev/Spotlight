@@ -14,7 +14,7 @@ use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Sender},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -315,12 +315,14 @@ pub enum OutgoingHelperMessage {
     },
 }
 
-fn extract_xml_tag_value(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    Some(xml[start..end].trim().to_string())
+const SHORTCUTS_UNREADABLE: &str = "Could not read Premiere's keyboard shortcuts.";
+
+/// Trimmed text of the first element named `tag` at or below `node`.
+fn xml_text<'a>(node: roxmltree::Node<'a, '_>, tag: &str) -> Option<&'a str> {
+    node.descendants()
+        .find(|child| child.has_tag_name(tag))
+        .and_then(|child| child.text())
+        .map(str::trim)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,14 +416,18 @@ fn default_transition_prefs() -> (TransitionDurationPref, TransitionDurationPref
 
 fn parse_transition_prefs_xml(xml: &str) -> (TransitionDurationPref, TransitionDurationPref) {
     let (mut video_pref, mut audio_pref) = default_transition_prefs();
+    let Ok(document) = roxmltree::Document::parse(xml) else {
+        return (video_pref, audio_pref);
+    };
+    let root = document.root();
 
     // Video Transition Default Duration:
     // BE.Prefs.DefaultVideoTransitionDuration is stored in frames when unit == 0 (or seconds if DefaultVideoTransitionDurationInSeconds is present)
-    let v_unit_code = extract_xml_tag_value(xml, "BE.Prefs.DefaultVideoTransitionDurationUnit")
+    let v_unit_code = xml_text(root, "BE.Prefs.DefaultVideoTransitionDurationUnit")
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(0);
     if v_unit_code == 1 {
-        if let Some(sec) = extract_xml_tag_value(xml, "BE.Prefs.DefaultVideoTransitionDurationInSeconds")
+        if let Some(sec) = xml_text(root, "BE.Prefs.DefaultVideoTransitionDurationInSeconds")
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|v| *v > 0.0)
         {
@@ -429,7 +435,7 @@ fn parse_transition_prefs_xml(xml: &str) -> (TransitionDurationPref, TransitionD
                 value: sec,
                 unit: "seconds".to_string(),
             };
-        } else if let Some(val) = extract_xml_tag_value(xml, "BE.Prefs.DefaultVideoTransitionDuration")
+        } else if let Some(val) = xml_text(root, "BE.Prefs.DefaultVideoTransitionDuration")
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|v| *v > 0.0)
         {
@@ -439,7 +445,7 @@ fn parse_transition_prefs_xml(xml: &str) -> (TransitionDurationPref, TransitionD
                 unit: "frames".to_string(),
             };
         }
-    } else if let Some(frames) = extract_xml_tag_value(xml, "BE.Prefs.DefaultVideoTransitionDuration")
+    } else if let Some(frames) = xml_text(root, "BE.Prefs.DefaultVideoTransitionDuration")
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|v| *v > 0.0)
     {
@@ -452,11 +458,11 @@ fn parse_transition_prefs_xml(xml: &str) -> (TransitionDurationPref, TransitionD
     // Audio Transition Default Duration:
     // Unit == 0 -> BE.Prefs.DefaultAudioTransitionDurationInFrames
     // Unit == 1 -> BE.Prefs.DefaultAudioTransitionDurationInSeconds
-    let a_unit_code = extract_xml_tag_value(xml, "BE.Prefs.DefaultAudioTransitionDurationUnit")
+    let a_unit_code = xml_text(root, "BE.Prefs.DefaultAudioTransitionDurationUnit")
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(0);
     if a_unit_code == 0 {
-        if let Some(frames) = extract_xml_tag_value(xml, "BE.Prefs.DefaultAudioTransitionDurationInFrames")
+        if let Some(frames) = xml_text(root, "BE.Prefs.DefaultAudioTransitionDurationInFrames")
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|v| *v > 0.0)
         {
@@ -465,7 +471,7 @@ fn parse_transition_prefs_xml(xml: &str) -> (TransitionDurationPref, TransitionD
                 unit: "frames".to_string(),
             };
         }
-    } else if let Some(sec) = extract_xml_tag_value(xml, "BE.Prefs.DefaultAudioTransitionDurationInSeconds")
+    } else if let Some(sec) = xml_text(root, "BE.Prefs.DefaultAudioTransitionDurationInSeconds")
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|v| *v > 0.0)
     {
@@ -548,63 +554,52 @@ fn decode_premiere_virtual_key(raw: u32) -> Option<u16> {
 }
 
 fn parse_effect_controls_shortcut_kys(xml: &str) -> Option<EffectControlsShortcut> {
-    parse_shortcut_kys(xml, "context.global", "uif.window.Effect Controls")
+    let document = roxmltree::Document::parse(xml).ok()?;
+    parse_shortcut_kys(&document, "context.global", "uif.window.Effect Controls")
 }
 
-fn parse_shortcut_kys(xml: &str, context: &str, command: &str) -> Option<EffectControlsShortcut> {
-    let open = format!("<{context}");
-    let close = format!("</{context}>");
-    let scope = match xml.find(&open) {
-        Some(start) => match xml[start..].find(&close) {
-            Some(len) => &xml[start..start + len],
-            None => &xml[start..],
-        },
-        None if context == "context.global" => xml,
+/// Finds `command` among the `<item.N>` bindings inside `<context>` of a
+/// Premiere `.kys` file. `context.global` falls back to the whole file when
+/// the element is missing. Prefers a Shift-only binding when there are several.
+///
+/// Premiere 27 profiles split shortcuts into workspace modes, with
+/// `<mode.Color>` before `<mode.Edit>`. Editing happens in Edit mode, so its
+/// bindings win when the file has modes.
+fn parse_shortcut_kys(
+    document: &roxmltree::Document,
+    context: &str,
+    command: &str,
+) -> Option<EffectControlsShortcut> {
+    let root = document
+        .descendants()
+        .find(|node| node.has_tag_name("mode.Edit"))
+        .unwrap_or_else(|| document.root());
+    let scope = match root.descendants().find(|node| node.has_tag_name(context)) {
+        Some(node) => node,
+        None if context == "context.global" => root,
         None => return None,
     };
 
     let mut saw_command = false;
     let mut bindings = Vec::new();
-    let mut cursor = 0;
+    let items = scope
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name().starts_with("item."));
 
-    while let Some(rel_start) = scope[cursor..].find("<item.") {
-        let item_start = cursor + rel_start;
-        let Some(tag_end) = scope[item_start..].find('>') else {
-            break;
-        };
-        let suffix_start = item_start + "<item.".len();
-        let id_part = scope[suffix_start..item_start + tag_end]
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        if id_part.is_empty() {
-            cursor = item_start + tag_end + 1;
-            continue;
-        }
-        let close_tag = format!("</item.{}>", id_part);
-        let Some(rel_close) = scope[item_start + tag_end + 1..].find(&close_tag) else {
-            break;
-        };
-        let body_start = item_start + tag_end + 1;
-        let body_end = body_start + rel_close;
-        let item_body = &scope[body_start..body_end];
-        cursor = body_end + close_tag.len();
-
-        if extract_xml_tag_value(item_body, "commandname").as_deref() != Some(command) {
+    for item in items {
+        if xml_text(item, "commandname") != Some(command) {
             continue;
         }
         saw_command = true;
-        let Some(raw_vk) = extract_xml_tag_value(item_body, "virtualkey")
-            .and_then(|value| value.parse::<u32>().ok())
+        let Some(raw_vk) = xml_text(item, "virtualkey").and_then(|value| value.parse::<u32>().ok())
         else {
             continue;
         };
         let Some(vk) = decode_premiere_virtual_key(raw_vk) else {
             continue;
         };
-        let ctrl = extract_xml_tag_value(item_body, "modifier.ctrl").as_deref() == Some("true");
-        let alt = extract_xml_tag_value(item_body, "modifier.alt").as_deref() == Some("true");
-        let shift = extract_xml_tag_value(item_body, "modifier.shift").as_deref() == Some("true");
+        let flag = |tag| xml_text(item, tag) == Some("true");
+        let (ctrl, alt, shift) = (flag("modifier.ctrl"), flag("modifier.alt"), flag("modifier.shift"));
         bindings.push(ShortcutSpec {
             vk,
             ctrl,
@@ -627,16 +622,17 @@ fn parse_shortcut_kys(xml: &str, context: &str, command: &str) -> Option<EffectC
 
 fn parse_preset_search_shortcuts(xml: &str) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
     use EffectControlsShortcut::Bound;
+    let doc = roxmltree::Document::parse(xml).map_err(|_| SHORTCUTS_UNREADABLE)?;
 
-    let window = parse_shortcut_kys(xml, "context.global", "uif.window.Effects");
+    let window = parse_shortcut_kys(&doc, "context.global", "uif.window.Effects");
     let Some(Bound(effects)) = window
         .filter(|binding| matches!(binding, Bound(_)))
-        .or_else(|| parse_shortcut_kys(xml, "context.global", "cmd.window.effects"))
+        .or_else(|| parse_shortcut_kys(&doc, "context.global", "cmd.window.effects"))
     else {
         return Err("Assign a shortcut to Effects in Premiere Keyboard Shortcuts.");
     };
-    let find_box = parse_shortcut_kys(xml, "context.effects", "cmd.select.find.box")
-        .or_else(|| parse_shortcut_kys(xml, "context.global", "cmd.select.find.box"));
+    let find_box = parse_shortcut_kys(&doc, "context.effects", "cmd.select.find.box")
+        .or_else(|| parse_shortcut_kys(&doc, "context.global", "cmd.select.find.box"));
     let Some(Bound(find_box)) = find_box else {
         return Err("Assign a shortcut to Select Find Box in Premiere Keyboard Shortcuts.");
     };
@@ -657,11 +653,12 @@ pub(crate) fn read_marker_shortcuts(
 
 fn parse_marker_shortcuts(xml: &str) -> Result<(ShortcutSpec, ShortcutSpec), &'static str> {
     use EffectControlsShortcut::Bound;
-    let Some(Bound(timeline)) = parse_shortcut_kys(xml, "context.global", "uif.window.Timelines") else {
+    let doc = roxmltree::Document::parse(xml).map_err(|_| SHORTCUTS_UNREADABLE)?;
+    let Some(Bound(timeline)) = parse_shortcut_kys(&doc, "context.global", "uif.window.Timelines") else {
         return Err("Assign a shortcut to Timeline in Premiere Keyboard Shortcuts.");
     };
-    let add_marker = parse_shortcut_kys(xml, "context.timeline", "cmd.set.marker")
-        .or_else(|| parse_shortcut_kys(xml, "context.global", "cmd.set.marker"));
+    let add_marker = parse_shortcut_kys(&doc, "context.timeline", "cmd.set.marker")
+        .or_else(|| parse_shortcut_kys(&doc, "context.global", "cmd.set.marker"));
     let Some(Bound(add_marker)) = add_marker else {
         return Err("Assign a shortcut to Add Marker in Premiere Keyboard Shortcuts.");
     };
@@ -669,7 +666,7 @@ fn parse_marker_shortcuts(xml: &str) -> Result<(ShortcutSpec, ShortcutSpec), &'s
 }
 
 fn read_premiere_shortcut_profile(premiere_exe: &Path) -> Result<String, &'static str> {
-    const UNREADABLE: &str = "Could not read Premiere's keyboard shortcuts.";
+    const UNREADABLE: &str = SHORTCUTS_UNREADABLE;
     let mut name = None;
     let mut custom_path = None;
     if let Some(prefs) = find_latest_premiere_prefs_file() {
@@ -752,8 +749,12 @@ pub fn read_effect_controls_shortcut() -> EffectControlsShortcut {
         return EffectControlsShortcut::default();
     };
 
-    let kys_path = extract_xml_tag_value(&prefs_xml, "FE.Prefs.Shortcuts.Filename")
+    let kys_path = roxmltree::Document::parse(&prefs_xml)
+        .ok()
+        .and_then(|doc| xml_text(doc.root(), "FE.Prefs.Shortcuts.Filename").map(str::to_owned))
         .filter(|name| !name.is_empty())
+        // A bare file name only, so the prefs file cannot point outside "Win".
+        .filter(|name| Path::new(name).file_name().is_some_and(|file| file == name.as_str()))
         .and_then(|name| prefs_path.parent().map(|dir| dir.join("Win").join(name)))
         .filter(|path| path.is_file());
 
@@ -916,6 +917,13 @@ impl BridgeClients {
         Self::default()
     }
 
+    /// Locks the peer list, recovering it if another thread panicked while
+    /// holding it. Release builds abort on panic, so a poisoned unwrap here
+    /// would close the app with no message.
+    fn peers(&self) -> MutexGuard<'_, Vec<Peer>> {
+        self.peers.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn track_request(&self, request_id: u64, label: &'static str) {
         if let Ok(mut map) = self.in_flight.lock() {
             if map.len() > 256 {
@@ -940,7 +948,7 @@ impl BridgeClients {
     #[cfg(test)]
     pub(crate) fn connect_test_peer(&self, catalog: MediaCatalog) -> mpsc::Receiver<String> {
         let (tx, rx) = mpsc::channel();
-        self.peers.lock().unwrap().push(Peer {
+        self.peers().push(Peer {
             id: catalog.peer_id,
             tx: PeerSender::from_sender(tx),
             media: Some(catalog),
@@ -952,11 +960,11 @@ impl BridgeClients {
 
     /// True while any plugin is still building the project list.
     pub fn project_scan_pending(&self) -> bool {
-        self.peers.lock().unwrap().iter().any(|peer| peer.scanning)
+        self.peers().iter().any(|peer| peer.scanning)
     }
 
     pub fn media_catalog(&self) -> Result<Option<MediaCatalog>, &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let mut catalogs = peers.iter().filter_map(|peer| peer.media.as_ref());
         let first = catalogs.next();
         if catalogs.next().is_some() {
@@ -971,7 +979,7 @@ impl BridgeClients {
         let json = serde_json::to_string(&msg).unwrap();
         let mut sent = 0usize;
         // Keep the last list so the palette shows it while the plugin checks for changes.
-        for peer in self.peers.lock().unwrap().iter_mut() {
+        for peer in self.peers().iter_mut() {
             peer.requested = request_id;
             if peer.tx.send(json.clone()).is_ok() {
                 peer.scanning = true;
@@ -993,7 +1001,7 @@ impl BridgeClients {
         catalog: &MediaCatalog,
         item_id: String,
     ) -> Result<u64, &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let mut media_peers = peers.iter().filter(|peer| peer.media.is_some());
         let Some(peer) = media_peers.next() else {
             return Err("Premiere media bridge disconnected.");
@@ -1045,7 +1053,7 @@ impl BridgeClients {
         catalog: &MediaCatalog,
         item_id: String,
     ) -> Result<u64, &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let (peer, entry, project_id) = project_source(&peers, catalog, &item_id)?;
         if let Some(message) = entry.source_monitor_error() {
             return Err(message);
@@ -1073,7 +1081,7 @@ impl BridgeClients {
         catalog: &MediaCatalog,
         item_id: &str,
     ) -> Result<u64, &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let (peer, entry, project_id) = project_source(&peers, catalog, item_id)?;
         if entry.kind != crate::catalog::ProjectItemKind::Media {
             return Err("Select an audio clip to preview.");
@@ -1095,7 +1103,7 @@ impl BridgeClients {
     }
 
     pub fn marker_peer_id(&self) -> Result<usize, &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         sole_marker_peer(&peers, None).map(|peer| peer.id)
     }
 
@@ -1104,7 +1112,7 @@ impl BridgeClients {
         command: MarkerCommand,
         expected_peer: Option<usize>,
     ) -> Result<MarkerRequest, &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let peer = sole_marker_peer(&peers, expected_peer)?;
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1;
         let message = OutgoingHelperMessage::MarkerCommand { request_id, command };
@@ -1115,7 +1123,7 @@ impl BridgeClients {
     }
 
     pub fn run_action(&self, action: Action) -> Result<(u64, usize), &'static str> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let peer = match peers.as_slice() {
             [peer] => peer,
             [] => return Err("Premiere action bridge disconnected."),
@@ -1158,7 +1166,7 @@ impl BridgeClients {
             return None;
         };
 
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers();
         let recipients: Vec<_> = peers
             .iter()
             .filter(|peer| peer.tx.send(json.clone()).is_ok())
@@ -1274,7 +1282,7 @@ where
                             )
                         {
                             is_plugin_client = true;
-                            bridge.peers.lock().unwrap().push(Peer {
+                            bridge.peers().push(Peer {
                                 id: peer_id,
                                 tx: peer_tx.clone(),
                                 media: None,
@@ -1321,8 +1329,10 @@ where
                                     (Some(mode), None) => format!(", {mode}"),
                                     _ => String::new(),
                                 };
-                                let mut peers = bridge.peers.lock().unwrap();
-                                let peer = peers.iter_mut().find(|peer| peer.id == peer_id).unwrap();
+                                let mut peers = bridge.peers();
+                                let Some(peer) = peers.iter_mut().find(|peer| peer.id == peer_id) else {
+                                    continue;
+                                };
                                 if peer.accept_catalog(request_id, project_id, sequence_id, items) {
                                     // "scanning" is the empty placeholder sent before a full rescan.
                                     peer.scanning = scan_mode.as_deref() == Some("scanning");
@@ -1425,7 +1435,7 @@ where
             "BRIDGE",
             format!("Peer #{peer_id} disconnected"),
         );
-        let mut peers = bridge.peers.lock().unwrap();
+        let mut peers = bridge.peers();
         peers.retain(|peer| peer.id != peer_id);
         cb(BridgeEvent::ProjectItemsChanged);
         if peers.is_empty() {
@@ -1473,7 +1483,7 @@ mod tests {
     fn apply_commands_and_acknowledgments_support_request_ids_and_legacy_replies() {
         let bridge = BridgeClients::new();
         let (tx, rx) = mpsc::channel();
-        bridge.peers.lock().unwrap().push(Peer {
+        bridge.peers().push(Peer {
             id: 7,
             tx: PeerSender::from_sender(tx),
             media: None,
@@ -1526,7 +1536,7 @@ mod tests {
         };
         assert!(peer.accept_catalog(request_id, project_id, sequence_id, items));
         assert!(!peer.accept_catalog(request_id - 1, None, None, vec![]));
-        bridge.peers.lock().unwrap().push(peer);
+        bridge.peers().push(peer);
         let catalog = bridge.media_catalog().unwrap().unwrap();
         for (item_id, message) in [
             ("b", "Bins can't be placed on the timeline. Bins are search only."),
@@ -1551,7 +1561,7 @@ mod tests {
         );
 
         let (tx, other_rx) = mpsc::channel();
-        bridge.peers.lock().unwrap().push(Peer {
+        bridge.peers().push(Peer {
             id: 43,
             tx: PeerSender::from_sender(tx),
             media: Some(MediaCatalog {
@@ -1567,7 +1577,7 @@ mod tests {
         assert!(bridge.place_project_item(&catalog, "i".into()).is_err());
         assert!(rx.try_recv().is_err());
         assert!(other_rx.try_recv().is_err());
-        bridge.peers.lock().unwrap().pop();
+        bridge.peers().pop();
 
         bridge.request_project_items();
         let message: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
@@ -1735,9 +1745,9 @@ mod tests {
         assert!(timeline.shift);
         assert_eq!(add.vk, u16::from(b'M'));
 
-        let custom = format!(r#"{profile}<context.timeline>
+        let custom = format!(r#"<PremiereData>{profile}<context.timeline>
           <item.3><commandname>cmd.set.marker</commandname><modifier.alt>true</modifier.alt><virtualkey>2147483726</virtualkey></item.3>
-        </context.timeline>"#);
+        </context.timeline></PremiereData>"#);
         let (_, add) = parse_marker_shortcuts(&custom).unwrap();
         assert_eq!(add.vk, u16::from(b'N'));
         assert!(add.alt);
@@ -1815,8 +1825,81 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_parser_handles_xml_the_old_string_search_missed() {
+        // A comment that mentions the command, a self-closing modifier tag,
+        // an escaped character, and attributes on every element.
+        let kys = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <PremiereData Version="3">
+          <!-- <item.1><commandname>uif.window.Timelines</commandname></item.1> -->
+          <context.global Version="1">
+            <item.5 Version="1"><commandname>cmd.a&amp;b</commandname><virtualkey>2147483713</virtualkey></item.5>
+            <item.7 Version="1">
+              <commandname Type="s">uif.window.Timelines</commandname>
+              <modifier.ctrl/>
+              <modifier.shift Type="b">true</modifier.shift>
+              <virtualkey Type="u">2147483699</virtualkey>
+            </item.7>
+          </context.global>
+        </PremiereData>"#;
+        let doc = roxmltree::Document::parse(kys).unwrap();
+        assert_eq!(
+            parse_shortcut_kys(&doc, "context.global", "uif.window.Timelines"),
+            Some(EffectControlsShortcut::Bound(ShortcutSpec {
+                vk: u16::from(b'3'),
+                ctrl: false,
+                alt: false,
+                shift: true,
+            }))
+        );
+        assert!(matches!(
+            parse_shortcut_kys(&doc, "context.global", "cmd.a&b"),
+            Some(EffectControlsShortcut::Bound(ShortcutSpec { vk, .. })) if vk == u16::from(b'A')
+        ));
+        assert_eq!(parse_marker_shortcuts("<context.global>").unwrap_err(), SHORTCUTS_UNREADABLE);
+    }
+
+    #[test]
+    fn premiere_27_profiles_use_edit_mode_bindings() {
+        // Color mode comes first in the file and leaves Find Box unbound.
+        let kys = r#"<PremiereData Version="3"><shortcuts Version="6">
+          <mode.Color Version="1">
+            <context.global Version="1">
+              <item.1><commandname>cmd.select.find.box</commandname></item.1>
+            </context.global>
+          </mode.Color>
+          <mode.Edit Version="1">
+            <context.global Version="1">
+              <item.2><commandname>cmd.select.find.box</commandname><modifier.shift>true</modifier.shift><virtualkey>2147483718</virtualkey></item.2>
+            </context.global>
+          </mode.Edit>
+        </shortcuts></PremiereData>"#;
+        let doc = roxmltree::Document::parse(kys).unwrap();
+        assert!(matches!(
+            parse_shortcut_kys(&doc, "context.global", "cmd.select.find.box"),
+            Some(EffectControlsShortcut::Bound(ShortcutSpec { vk, shift: true, .. })) if vk == u16::from(b'F')
+        ));
+    }
+
+    #[test]
+    fn reads_transition_prefs_with_the_xml_parser() {
+        let prefs = r#"<PremiereData>
+          <BE.Prefs.DefaultVideoTransitionDurationUnit Type="i">1</BE.Prefs.DefaultVideoTransitionDurationUnit>
+          <BE.Prefs.DefaultVideoTransitionDurationInSeconds Type="f">1.5</BE.Prefs.DefaultVideoTransitionDurationInSeconds>
+          <BE.Prefs.DefaultAudioTransitionDurationUnit>0</BE.Prefs.DefaultAudioTransitionDurationUnit>
+          <BE.Prefs.DefaultAudioTransitionDurationInFrames>12</BE.Prefs.DefaultAudioTransitionDurationInFrames>
+        </PremiereData>"#;
+        let (video, audio) = parse_transition_prefs_xml(prefs);
+        assert_eq!((video.value, video.unit.as_str()), (1.5, "seconds"));
+        assert_eq!((audio.value, audio.unit.as_str()), (12.0, "frames"));
+
+        let (video, audio) = parse_transition_prefs_xml("<broken");
+        let (default_video, default_audio) = default_transition_prefs();
+        assert_eq!((video.value, audio.value), (default_video.value, default_audio.value));
+    }
+
+    #[test]
     fn uses_premiere_bindings_for_effects_and_the_find_box() {
-        let shortcuts = r#"
+        let shortcuts = r#"<PremiereData Version="3">
         <context.global Version="1">
           <item.10 Version="1">
             <commandname>uif.window.Effects</commandname>
@@ -1835,7 +1918,7 @@ mod tests {
             <virtualkey>2147483731</virtualkey>
             <modifier.alt>true</modifier.alt>
           </item.0>
-        </context.effects>"#;
+        </context.effects></PremiereData>"#;
         let (effects, find_box) = parse_preset_search_shortcuts(shortcuts).unwrap();
         assert_eq!(
             effects,

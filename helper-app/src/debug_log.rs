@@ -95,6 +95,35 @@ fn append_log_file(line: &str) {
     }
 }
 
+/// Release builds use `panic = "abort"`, so a panic closes the app at once.
+/// This hook appends the panic message and location to `crash.log` next to
+/// the config file first, so the crash leaves a trace.
+pub fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let line = format!(
+            "[{}] [PANIC] thread '{}': {}",
+            format_timestamp(),
+            thread.name().unwrap_or("<unnamed>"),
+            info
+        );
+        append_log_file(&line);
+        if let Some(dir) = crate::settings::config_path().parent() {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(dir);
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                let _ = writeln!(file, "{line}");
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 pub fn record_ui_timer_tick() {
     UI_TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
 }
