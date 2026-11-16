@@ -45,11 +45,19 @@ pub(crate) fn virtual_key(code: Code) -> Option<u16> {
     {
         return Some(0x6f + number); // VK_F1 through VK_F24
     }
+    if let Some(number) = name
+        .strip_prefix("Numpad")
+        .and_then(|key| key.parse::<u16>().ok())
+        .filter(|&n| n <= 9)
+    {
+        return Some(0x60 + number); // VK_NUMPAD0 through VK_NUMPAD9
+    }
     // Windows virtual key codes for the remaining keys supported by the recorder.
     Some(match code {
         Code::Backspace => 0x08,
         Code::Tab => 0x09,
         Code::Enter => 0x0d,
+        Code::CapsLock => 0x14,
         Code::Pause => 0x13,
         Code::Space => 0x20,
         Code::PageUp => 0x21,
@@ -60,8 +68,10 @@ pub(crate) fn virtual_key(code: Code) -> Option<u16> {
         Code::ArrowUp => 0x26,
         Code::ArrowRight => 0x27,
         Code::ArrowDown => 0x28,
+        Code::PrintScreen => 0x2c,
         Code::Insert => 0x2d,
         Code::Delete => 0x2e,
+        Code::NumLock => 0x90,
         Code::ScrollLock => 0x91,
         Code::Semicolon => 0xba,
         Code::Equal => 0xbb,
@@ -113,6 +123,16 @@ impl Binding {
 }
 
 #[cfg(windows)]
+pub(crate) fn supports_launch_hotkey(hotkey: HotKey) -> bool {
+    virtual_key(hotkey.key).is_some()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn supports_launch_hotkey(_hotkey: global_hotkey::hotkey::HotKey) -> bool {
+    false
+}
+
+#[cfg(windows)]
 pub(crate) use windows::{foreground_changed, release_active_hold, update_bindings, ActionHotkeyHook};
 
 #[cfg(not(windows))]
@@ -131,6 +151,7 @@ pub(crate) struct ActionHotkeyHook;
 impl ActionHotkeyHook {
     pub fn install(
         _dispatch: impl Fn(Binding, isize) -> bool + Send + 'static,
+        _launch_dispatch: impl Fn() -> bool + Send + 'static,
     ) -> Result<Self, String> {
         Err("Action hotkeys outside Spotlight require Windows.".into())
     }
@@ -167,7 +188,8 @@ fn hold_releases_on_key_up(
 #[cfg(windows)]
 mod windows {
     use super::{
-        hold_releases_on_key_up, virtual_key, Action, AppSettings, Binding, KeyPress, Modifiers,
+        hold_releases_on_key_up, virtual_key, Action, AppSettings, Binding, HotKey, KeyPress,
+        Modifiers,
     };
     use crate::{
         cursor_lock,
@@ -196,12 +218,31 @@ mod windows {
         },
     };
 
+    #[derive(Clone, Copy)]
+    pub(super) struct LaunchBinding {
+        pub(super) hotkey: HotKey,
+        pub(super) key: u16,
+    }
+
+    pub(super) fn should_trigger_launch(
+        launch: LaunchBinding,
+        key: u16,
+        mods: Modifiers,
+        is_palette_fg: bool,
+        is_premiere_fg: bool,
+    ) -> bool {
+        launch.key == key && launch.hotkey.mods == mods && (is_palette_fg || is_premiere_fg)
+    }
+
     static BINDINGS: RwLock<Vec<Binding>> = RwLock::new(Vec::new());
+    pub(super) static LAUNCH_HOTKEY: RwLock<Option<LaunchBinding>> = RwLock::new(None);
     static ACTIVE_HOLD: Mutex<Option<Binding>> = Mutex::new(None);
     type Dispatch = Box<dyn Fn(Binding, isize) -> bool + Send>;
+    type LaunchDispatch = Box<dyn Fn() -> bool + Send>;
 
     thread_local! {
         static DISPATCH: RefCell<Option<Dispatch>> = const { RefCell::new(None) };
+        static LAUNCH_DISPATCH: RefCell<Option<LaunchDispatch>> = const { RefCell::new(None) };
         static KEYS: [Cell<KeyPress>; 256] = const { [const { Cell::new(KeyPress::Up) }; 256] };
     }
 
@@ -223,6 +264,17 @@ mod windows {
 
     pub(crate) fn update_bindings(settings: &AppSettings) {
         release_active_hold();
+        let launch = settings::parse_hotkey_spec(&settings.hotkey)
+            .ok()
+            .and_then(|(hotkey, _)| {
+                Some(LaunchBinding {
+                    hotkey,
+                    key: virtual_key(hotkey.key)?,
+                })
+            });
+        if let Ok(mut slot) = LAUNCH_HOTKEY.write() {
+            *slot = launch;
+        }
         let bindings = Action::ALL.into_iter().filter_map(|action| {
             let spec = settings.action_hotkeys.get(action.id())?;
             let (hotkey, _) = settings::parse_palette_hotkey_spec(spec).ok()?;
@@ -250,12 +302,15 @@ mod windows {
     impl ActionHotkeyHook {
         pub fn install(
             dispatch: impl Fn(Binding, isize) -> bool + Send + 'static,
+            launch_dispatch: impl Fn() -> bool + Send + 'static,
         ) -> Result<Self, String> {
             let (ready, started) = mpsc::sync_channel(1);
             let worker = thread::Builder::new()
                 .name("spotlight-action-hotkeys".into())
                 .spawn(move || unsafe {
                     DISPATCH.with(|slot| *slot.borrow_mut() = Some(Box::new(dispatch)));
+                    LAUNCH_DISPATCH
+                        .with(|slot| *slot.borrow_mut() = Some(Box::new(launch_dispatch)));
                     let mut message: MSG = std::mem::zeroed();
                     PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
                     let hook = SetWindowsHookExW(
@@ -372,15 +427,47 @@ mod windows {
     }
 
     fn dispatch_key(key: u16) -> bool {
+        let mut sampled_mods = None;
+        let mut mods = || *sampled_mods.get_or_insert_with(held_modifiers);
+
+        let launch_match = LAUNCH_HOTKEY
+            .try_read()
+            .ok()
+            .and_then(|guard| *guard)
+            .filter(|launch| launch.key == key);
+        if let Some(launch) = launch_match {
+            if launch.hotkey.mods == mods() {
+                let foreground = win_focus::get_foreground_hwnd();
+                let palette_hwnd = win_focus::palette_hwnd();
+                let is_palette_fg =
+                    palette_hwnd != 0 && win_focus::is_palette_open_and_active(palette_hwnd);
+                if should_trigger_launch(
+                    launch,
+                    key,
+                    mods(),
+                    is_palette_fg,
+                    win_focus::is_premiere_active_and_unminimized(foreground),
+                ) {
+                    win_focus::allow_current_process_foreground();
+                    return LAUNCH_DISPATCH.with(|slot| {
+                        slot.borrow()
+                            .as_ref()
+                            .is_some_and(|dispatch| dispatch())
+                    });
+                }
+                return false;
+            }
+        }
+
         let binding = BINDINGS.try_read().ok().and_then(|bindings| {
             if !bindings.iter().any(|binding| binding.key == key) {
                 return None;
             }
-            let mods = held_modifiers();
+            let current_mods = mods();
             bindings
                 .iter()
                 .copied()
-                .find(|binding| binding.key == key && binding.hotkey.mods == mods)
+                .find(|binding| binding.key == key && binding.hotkey.mods == current_mods)
         });
         let Some(binding) = binding else { return false };
         let foreground = win_focus::get_foreground_hwnd();
@@ -453,5 +540,37 @@ mod tests {
         assert!(hold_releases_on_key_up(key_h, mods, 0xA4)); // VK_LMENU
         assert!(hold_releases_on_key_up(key_h, mods, 0xA1)); // VK_RSHIFT
         assert!(!hold_releases_on_key_up(key_h, mods, 0xA2)); // unrelated Ctrl up
+    }
+
+    #[test]
+    fn launch_hotkey_supports_ctrl_space_and_scopes_to_premiere_or_palette() {
+        let (ctrl_space, _) = crate::settings::parse_hotkey_spec("Ctrl+Space").unwrap();
+        assert!(supports_launch_hotkey(ctrl_space));
+        assert_eq!(virtual_key(Code::Space), Some(0x20));
+        assert_eq!(virtual_key(Code::Numpad5), Some(0x65));
+
+        #[cfg(windows)]
+        {
+            let mut settings = crate::settings::AppSettings::default();
+            settings.hotkey = "Ctrl+Space".into();
+            update_bindings(&settings);
+            let stored = windows::LAUNCH_HOTKEY.read().unwrap().unwrap();
+            assert_eq!(stored.key, 0x20);
+            assert_eq!(stored.hotkey, ctrl_space);
+
+            // Pressing Ctrl+Space outside Premiere and outside the palette must not match.
+            assert!(!windows::should_trigger_launch(stored, 0x20, ctrl_space.mods, false, false));
+            // Inside Premiere or inside the palette, it triggers.
+            assert!(windows::should_trigger_launch(stored, 0x20, ctrl_space.mods, false, true));
+            assert!(windows::should_trigger_launch(stored, 0x20, ctrl_space.mods, true, false));
+            // Wrong modifier does not trigger.
+            assert!(!windows::should_trigger_launch(
+                stored,
+                0x20,
+                Modifiers::ALT,
+                false,
+                true
+            ));
+        }
     }
 }

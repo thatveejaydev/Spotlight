@@ -490,6 +490,7 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     state.saw_foreground = false;
 
     let our_hwnd = extract_window_hwnd(ui);
+    win_focus::set_palette_hwnd(our_hwnd);
     if our_hwnd != our_hwnd_before {
         win_focus::center_palette(our_hwnd, state.previous_hwnd);
     }
@@ -1079,6 +1080,16 @@ fn acquire_instance_mutex() -> Option<InstanceMutexGuard> {
         )
     };
     if handle.is_null() {
+        return None;
+    }
+    let already_exists = unsafe {
+        windows_sys::Win32::Foundation::GetLastError()
+            == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
+    };
+    if already_exists {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
         None
     } else {
         Some(InstanceMutexGuard(handle))
@@ -1098,16 +1109,23 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
 
-    // 1. Auto-install / enable the UXP bridge plugin in Premiere Pro & register Windows Startup (--watch)
+    // 1. Auto-install / enable the UXP bridge plugin in Premiere Pro and clean up legacy Startup entries
     installer::ensure_installed();
 
-    // 2. Single-instance check: if Premiere Spotlight is already running in the System Tray, wake it (unless --watch) and exit
+    // 2. Spotlight only runs while Adobe Premiere Pro is open
+    if !win_focus::is_premiere_running() {
+        return Ok(());
+    }
+
+    // 3. Single-instance check: if Premiere Spotlight is already running in the System Tray, wake it (unless --watch) and exit
     if bridge::check_or_wake_existing_instance(!has_flag("--watch")) {
         return Ok(());
     }
 
     #[cfg(windows)]
-    let _instance_mutex = acquire_instance_mutex();
+    let Some(_instance_mutex) = acquire_instance_mutex() else {
+        return Ok(());
+    };
 
     #[cfg(windows)]
     {
@@ -1571,10 +1589,11 @@ fn main() -> Result<(), slint::PlatformError> {
         registered: Option<(HotKey, String)>,
         active_id: Arc<AtomicU32>,
         available: bool,
+        hook_active: bool,
     }
 
     impl HotkeyController {
-        fn new(initial_spec: &str) -> (Self, Option<String>) {
+        fn new(initial_spec: &str, hook_active: bool) -> (Self, Option<String>) {
             let manager =
                 GlobalHotKeyManager::new().expect("Failed to initialize GlobalHotKeyManager");
             let mut ctrl = Self {
@@ -1582,12 +1601,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 registered: None,
                 active_id: Arc::new(AtomicU32::new(NO_HOTKEY_ID)),
                 available: false,
+                hook_active,
             };
             let err = match settings::parse_hotkey_spec(initial_spec) {
                 Ok((hotkey, label)) => match ctrl.apply(hotkey, label.clone()) {
                     Ok(()) => None,
                     Err(msg) => {
-                        eprintln!("Could not register {label}: {msg}");
+                        debug_log::log_event(LogKind::Error, "HOTKEY", &msg);
                         Some(msg)
                     }
                 },
@@ -1596,7 +1616,22 @@ fn main() -> Result<(), slint::PlatformError> {
             (ctrl, err)
         }
 
+        fn unregister(&mut self) {
+            if let Some((old_hk, _)) = self.registered.take() {
+                if self.available {
+                    let _ = self.manager.unregister(old_hk);
+                }
+            }
+            self.active_id.store(NO_HOTKEY_ID, Ordering::Release);
+            self.available = false;
+        }
+
         fn apply(&mut self, hotkey: HotKey, label: String) -> Result<(), String> {
+            if self.hook_active && action_hotkeys::supports_launch_hotkey(hotkey) {
+                self.unregister();
+                return Ok(());
+            }
+
             if self.available
                 && self
                     .registered
@@ -1876,10 +1911,80 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
-    let (hotkey_ctrl_raw, initial_hotkey_err) = HotkeyController::new(&initial_settings.hotkey);
+    let recording_hotkey_flag = Arc::new(AtomicBool::new(false));
+    let hotkey_pending = Arc::new(AtomicBool::new(false));
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge_ref = bridge.clone();
+        let pending_flag = hotkey_pending.clone();
+        HOTKEY_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                if !pending_flag.swap(false, Ordering::AcqRel) {
+                    return;
+                }
+                if let Some(ui) = ui_weak.upgrade() {
+                    let mut st = state_ref.borrow_mut();
+                    toggle_palette_from_hotkey(&ui, &mut st, &bridge_ref);
+                }
+            }));
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
+        let bridge = bridge.clone();
+        let toast = error_toast.clone();
+        ACTION_HOTKEY_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |binding, hwnd| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let mut state = state_ref.borrow_mut();
+                if binding.is_current(&state.settings) {
+                    dispatch_action_hotkey(binding.action, &ui, &mut state, &bridge, &toast, Some(hwnd));
+                }
+            }));
+        });
+    }
+    let rec_flag = recording_hotkey_flag.clone();
+    let rec_flag_launch = recording_hotkey_flag.clone();
+    let launch_pending = hotkey_pending.clone();
+    let _action_hotkey_hook = match action_hotkeys::ActionHotkeyHook::install(
+        move |binding, hwnd| {
+            !rec_flag.load(Ordering::Acquire)
+                && slint::invoke_from_event_loop(move || {
+                    ACTION_HOTKEY_DISPATCH.with(|slot| {
+                        if let Some(dispatch) = slot.borrow().as_ref() {
+                            dispatch(binding, hwnd);
+                        }
+                    });
+                })
+                .is_ok()
+        },
+        move || {
+            if rec_flag_launch.load(Ordering::Acquire) {
+                return false;
+            }
+            launch_pending.store(true, Ordering::Release);
+            slint::invoke_from_event_loop(|| {
+                HOTKEY_DISPATCH.with(|slot| {
+                    if let Some(callback) = slot.borrow_mut().as_mut() {
+                        callback();
+                    }
+                });
+            })
+            .is_ok()
+        },
+    ) {
+        Ok(hook) => Some(hook),
+        Err(message) => {
+            ui.set_action_hotkeys_warning(message.into());
+            None
+        }
+    };
+    let (hotkey_ctrl_raw, initial_hotkey_err) =
+        HotkeyController::new(&initial_settings.hotkey, _action_hotkey_hook.is_some());
     let hotkey_id_ref = hotkey_ctrl_raw.active_id.clone();
     let hotkey_ctrl = Rc::new(RefCell::new(hotkey_ctrl_raw));
-    let recording_hotkey_flag = Arc::new(AtomicBool::new(false));
     {
         let st = state.borrow();
         sync_settings_ui(&ui, &st.settings);
@@ -2163,24 +2268,6 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    let hotkey_pending = Arc::new(AtomicBool::new(false));
-    {
-        let ui_weak = ui.as_weak();
-        let state_ref = state.clone();
-        let bridge_ref = bridge.clone();
-        let pending_flag = hotkey_pending.clone();
-        HOTKEY_DISPATCH.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
-                if !pending_flag.swap(false, Ordering::AcqRel) {
-                    return;
-                }
-                if let Some(ui) = ui_weak.upgrade() {
-                    let mut st = state_ref.borrow_mut();
-                    toggle_palette_from_hotkey(&ui, &mut st, &bridge_ref);
-                }
-            }));
-        });
-    }
     {
         let pending_flag = hotkey_pending.clone();
         let rec_flag = recording_hotkey_flag.clone();
@@ -2215,37 +2302,6 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         }));
     }
-    {
-        let ui_weak = ui.as_weak();
-        let state_ref = state.clone();
-        let bridge = bridge.clone();
-        let toast = error_toast.clone();
-        ACTION_HOTKEY_DISPATCH.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move |binding, hwnd| {
-                let Some(ui) = ui_weak.upgrade() else { return };
-                let mut state = state_ref.borrow_mut();
-                if binding.is_current(&state.settings) {
-                    dispatch_action_hotkey(binding.action, &ui, &mut state, &bridge, &toast, Some(hwnd));
-                }
-            }));
-        });
-    }
-    let rec_flag = recording_hotkey_flag.clone();
-    let _action_hotkey_hook = match action_hotkeys::ActionHotkeyHook::install(move |binding, hwnd| {
-        !rec_flag.load(Ordering::Acquire) && slint::invoke_from_event_loop(move || {
-            ACTION_HOTKEY_DISPATCH.with(|slot| {
-                if let Some(dispatch) = slot.borrow().as_ref() {
-                    dispatch(binding, hwnd);
-                }
-            });
-        }).is_ok()
-    }) {
-        Ok(hook) => Some(hook),
-        Err(message) => {
-            ui.set_action_hotkeys_warning(message.into());
-            None
-        }
-    };
     let foreground_hook_active = Rc::new(std::cell::Cell::new(false));
     let sync_palette_focus = {
         let state_ref = state.clone();
@@ -2305,12 +2361,43 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     foreground_hook_active.set(foreground_hook.is_active());
 
-    {
+    let quit_app: Rc<dyn Fn()> = {
         let ui_weak = ui.as_weak();
         let state_ref = state.clone();
         let tray_ref = tray.clone();
+        Rc::new(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state_ref.borrow_mut();
+                hide_palette(&ui, &mut st);
+            }
+            if let Some(ref mut t) = *tray_ref.borrow_mut() {
+                t.remove();
+            }
+            let _ = slint::quit_event_loop();
+        })
+    };
+    {
+        let quit_on_premiere_exit = quit_app.clone();
+        PREMIERE_EXIT_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || quit_on_premiere_exit()));
+        });
+    }
+    win_focus::spawn_premiere_exit_watcher(|| {
+        let _ = slint::invoke_from_event_loop(|| {
+            PREMIERE_EXIT_DISPATCH.with(|slot| {
+                if let Some(mut callback) = slot.borrow_mut().take() {
+                    callback();
+                }
+            });
+        });
+    });
+
+    {
+        let ui_weak = ui.as_weak();
+        let state_ref = state.clone();
         let bridge_ref = bridge.clone();
         let rec_flag = recording_hotkey_flag.clone();
+        let quit_on_tray = quit_app.clone();
         tray::set_action_handler(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -2337,10 +2424,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         show_palette(&ui, &mut st);
                     }
                     TrayAction::Quit => {
-                        if let Some(ref mut t) = *tray_ref.borrow_mut() {
-                            t.remove();
-                        }
-                        std::process::exit(0);
+                        quit_on_tray();
                     }
                 }
             }
@@ -2442,6 +2526,7 @@ thread_local! {
         const { RefCell::new(None) };
     static SYNC_FOCUS_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static DEADLINE_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    static PREMIERE_EXIT_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     static FOCUS_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
     static DEADLINE_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
 }

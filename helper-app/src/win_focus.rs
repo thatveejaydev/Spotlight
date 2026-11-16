@@ -1,6 +1,6 @@
 #[cfg(windows)]
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{CloseHandle, BOOL, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
         DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -9,9 +9,14 @@ use windows_sys::Win32::{
         CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MonitorFromWindow, SetWindowRgn,
         MONITORINFO, MONITOR_DEFAULTTONEAREST,
     },
+    System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    },
     System::Threading::{
         AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
-        QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW, WaitForMultipleObjects, INFINITE,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     },
     UI::{
         Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
@@ -169,6 +174,86 @@ pub fn query_premiere_window_state() -> (bool, isize) {
 pub fn query_premiere_window_state() -> (bool, isize) {
     (true, 1)
 }
+
+#[cfg(windows)]
+pub fn find_premiere_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+            return pids;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if exe.eq_ignore_ascii_case("adobe premiere pro.exe") && entry.th32ProcessID != 0 {
+                    pids.push(entry.th32ProcessID);
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+    pids
+}
+
+#[cfg(windows)]
+pub fn is_premiere_running() -> bool {
+    !find_premiere_pids().is_empty()
+}
+
+#[cfg(not(windows))]
+pub fn is_premiere_running() -> bool {
+    true
+}
+
+#[cfg(windows)]
+pub fn spawn_premiere_exit_watcher<F: FnOnce() + Send + 'static>(on_exit: F) {
+    let _ = std::thread::Builder::new()
+        .name("premiere-exit-watcher".into())
+        .spawn(move || loop {
+            let pids = find_premiere_pids();
+            if pids.is_empty() {
+                on_exit();
+                return;
+            }
+            let handles: Vec<_> = pids
+                .into_iter()
+                .take(64)
+                .filter_map(|pid| {
+                    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                    (!handle.is_null()).then_some(handle)
+                })
+                .collect();
+            if handles.is_empty() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+            let wait_result = unsafe {
+                WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
+            };
+            unsafe {
+                for handle in handles {
+                    CloseHandle(handle);
+                }
+            }
+            if wait_result == u32::MAX {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+}
+
+#[cfg(not(windows))]
+pub fn spawn_premiere_exit_watcher<F: FnOnce() + Send + 'static>(_on_exit: F) {}
 
 #[cfg(windows)]
 pub fn allow_current_process_foreground() {
@@ -603,6 +688,7 @@ pub fn init_palette_window(hwnd: isize) {
     if hwnd == 0 {
         return;
     }
+    set_palette_hwnd(hwnd);
     unsafe {
         configure_palette_frame(hwnd as HWND);
     }
@@ -660,9 +746,21 @@ const FRAMELESS_STRIP_MASK: u32 =
 
 static PALETTE_VISIBLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static PALETTE_HWND: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
 
 pub fn set_palette_visible(visible: bool) {
     PALETTE_VISIBLE.store(visible, std::sync::atomic::Ordering::Release);
+}
+
+pub fn set_palette_hwnd(hwnd: isize) {
+    if hwnd != 0 {
+        PALETTE_HWND.store(hwnd, std::sync::atomic::Ordering::Release);
+    }
+}
+
+pub fn palette_hwnd() -> isize {
+    PALETTE_HWND.load(std::sync::atomic::Ordering::Acquire)
 }
 
 #[cfg(windows)]
@@ -998,4 +1096,28 @@ pub fn window_hwnd(_window: &slint::Window) -> isize {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_hwnd_ignores_zero_and_stores_nonzero() {
+        PALETTE_HWND.store(0, std::sync::atomic::Ordering::Release);
+        set_palette_hwnd(0);
+        assert_eq!(palette_hwnd(), 0);
+        set_palette_hwnd(0x1234);
+        assert_eq!(palette_hwnd(), 0x1234);
+        set_palette_hwnd(0);
+        assert_eq!(palette_hwnd(), 0x1234);
+        PALETTE_HWND.store(0, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_premiere_pids_excludes_spotlight_process() {
+        let self_pid = unsafe { GetCurrentProcessId() };
+        assert!(!find_premiere_pids().contains(&self_pid));
+    }
 }

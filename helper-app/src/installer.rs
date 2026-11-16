@@ -112,29 +112,32 @@ pub fn ensure_installed() {
     let appdata_path = Path::new(&appdata);
     let plugin_dir = write_uxp_plugin_and_register(&exe_path, appdata_path);
 
-    // 3. Ensure Windows Startup registration (--watch) and optional UPIA install in background
+    // 3. Spotlight is launched on-demand by Premiere's UXP plugin; remove any legacy Startup entry.
     let marker_path = plugin_dir.join(".installed_exe_path");
-    let auto_startup_disabled = plugin_dir.join(NO_AUTO_STARTUP_MARKER).exists();
+    let no_startup_marker = plugin_dir.join(NO_AUTO_STARTUP_MARKER);
     let startup_lnk = startup_shortcut_path(appdata_path);
 
     let exe_str = exe_path.to_string_lossy().to_string();
     let prev_marker = fs::read_to_string(&marker_path).unwrap_or_default();
     let path_changed = prev_marker.trim() != exe_str;
-    let needs_startup_sync = !auto_startup_disabled && (path_changed || !startup_lnk.exists());
+    let needs_startup_cleanup = !no_startup_marker.exists() || startup_lnk.exists();
 
-    if path_changed || needs_startup_sync {
+    if path_changed || needs_startup_cleanup {
         let _ = fs::write(&marker_path, &exe_str);
+        let _ = fs::write(&no_startup_marker, b"1");
         thread::spawn(move || {
-            if !auto_startup_disabled {
-                register_windows_startup(&exe_path, &startup_lnk);
+            if needs_startup_cleanup {
+                unregister_windows_startup(&startup_lnk);
             }
-            try_upia_install(&exe_path);
+            if path_changed {
+                try_upia_install(&exe_path);
+            }
         });
     }
 }
 
-/// Synchronously installs/registers the UXP plugin and Windows Startup for the dedicated installer.
-pub fn install_for_setup(register_startup: bool) {
+/// Synchronously installs/registers the UXP plugin for the dedicated installer.
+pub fn install_for_setup(_register_startup: bool) {
     let Some(exe_path) = resolve_canonical_exe_path() else {
         return;
     };
@@ -148,14 +151,8 @@ pub fn install_for_setup(register_startup: bool) {
     let no_startup_marker = plugin_dir.join(NO_AUTO_STARTUP_MARKER);
     let marker_path = plugin_dir.join(".installed_exe_path");
     let _ = fs::write(&marker_path, exe_path.to_string_lossy().as_bytes());
-
-    if register_startup {
-        let _ = fs::remove_file(&no_startup_marker);
-        register_windows_startup(&exe_path, &startup_lnk);
-    } else {
-        let _ = fs::write(&no_startup_marker, b"1");
-        unregister_windows_startup(&startup_lnk);
-    }
+    let _ = fs::write(&no_startup_marker, b"1");
+    unregister_windows_startup(&startup_lnk);
 
     try_upia_install(&exe_path);
 }
@@ -266,59 +263,6 @@ fn remove_from_premiere_plugins_info(json_path: &Path) {
             let _ = fs::write(json_path, serialized);
         }
     }
-}
-
-fn register_windows_startup(exe_path: &Path, startup_lnk: &Path) {
-    let exe_str = exe_path.to_string_lossy();
-    let work_dir = exe_path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // 1. Register HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-    let run_val = format!("\"{}\" --watch", exe_str);
-    let mut reg_cmd = Command::new("reg");
-    reg_cmd.args([
-        "add",
-        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-        "/v",
-        STARTUP_REG_NAME,
-        "/t",
-        "REG_SZ",
-        "/d",
-        &run_val,
-        "/f",
-    ]);
-    #[cfg(windows)]
-    reg_cmd.creation_flags(CREATE_NO_WINDOW);
-    let _ = reg_cmd.status();
-
-    // 2. Create Startup Folder .lnk shortcut (same mechanism as Cockpit's register-helper.ps1)
-    let ps_script = format!(
-        "$ws = New-Object -ComObject WScript.Shell; \
-         $s = $ws.CreateShortcut('{}'); \
-         $s.TargetPath = '{}'; \
-         $s.Arguments = '--watch'; \
-         $s.WorkingDirectory = '{}'; \
-         $s.Description = 'Premiere Spotlight Helper'; \
-         $s.Save()",
-        startup_lnk.to_string_lossy().replace('\'', "''"),
-        exe_str.replace('\'', "''"),
-        work_dir.replace('\'', "''"),
-    );
-
-    let mut ps_cmd = Command::new("powershell");
-    ps_cmd.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        &ps_script,
-    ]);
-    #[cfg(windows)]
-    ps_cmd.creation_flags(CREATE_NO_WINDOW);
-    let _ = ps_cmd.status();
 }
 
 fn unregister_windows_startup(startup_lnk: &Path) {
