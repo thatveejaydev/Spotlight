@@ -339,3 +339,51 @@ test("keeps a short layer in place if the extension would overlap a new transiti
   assert.equal(f.attempts.length, 1);
   assert.ok(!f.labels.includes("Extend Adjustment Layer"));
 });
+
+test("places an adjustment layer over text and generated clips without a project item", async () => {
+  for (const getProjectItem of [
+    () => null,
+    () => ({ getId: () => "" }),
+    () => { throw new Error("No project item"); }
+  ]) {
+    const f = fixture();
+    await f.register();
+    const textLayer = {
+      ...span(100n, 220n),
+      getTrackIndex: () => 0,
+      getProjectItem,
+      isAdjustmentLayer: () => false
+    };
+    f.sequence.selected = [textLayer];
+    f.sequence.video = [track({ clips: [textLayer] }), track()];
+
+    const reply = await f.add();
+    assert.equal(reply.ok, true);
+    assert.match(reply.message, /on V2/);
+    assert.deepEqual(f.placed, [[1, 100n, 220n]]);
+  }
+});
+
+test("detects selection replacement and still rejects invalid clip track bounds", async () => {
+  const f = fixture();
+  await f.register();
+  const textLayer = {
+    ...span(100n, 200n),
+    getTrackIndex: () => 0,
+    getProjectItem: () => null,
+    isAdjustmentLayer: () => false
+  };
+  f.sequence.selected = [textLayer];
+  f.hooks.marksChanged = () => { f.sequence.selected = [videoClip(0, 100n, 200n)]; };
+  assert.match((await f.add()).message, /timeline changed/);
+  assert.deepEqual(f.attempts, []);
+
+  f.hooks.marksChanged = null;
+  f.sequence.selected = [{
+    ...span(100n, 200n),
+    getTrackIndex: () => -1,
+    getProjectItem: () => null,
+    isAdjustmentLayer: () => false
+  }];
+  assert.match((await f.add()).message, /Premiere could not verify the selected video clips/);
+});

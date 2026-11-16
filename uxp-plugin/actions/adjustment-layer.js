@@ -50,16 +50,24 @@ async function registerAdjustmentLayer(ppro, isCurrent, { storage, findSource })
   return "Registered the adjustment layer for this project.";
 }
 
+async function optionalProjectItemId(item) {
+  try {
+    const projectItem = await item.getProjectItem?.();
+    return (await projectItem?.getId?.()) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function selectedVideoRanges(ppro, sequence, readItemRange) {
   const items = await selectionItems(sequence);
   const ranges = await Promise.all(items.map(async (item) => {
     if (typeof item?.isAdjustmentLayer !== "function" ||
         (item.getType && await item.getType() !== ppro.Constants.TrackItemType.CLIP)) return null;
-    const [trackIndex, [start, end], projectItem] = await Promise.all([
-      item.getTrackIndex(), readItemRange(item), item.getProjectItem()
+    const [trackIndex, [start, end], itemId] = await Promise.all([
+      item.getTrackIndex(), readItemRange(item), optionalProjectItemId(item)
     ]);
-    const itemId = projectItem?.getId();
-    if (!Number.isSafeInteger(trackIndex) || trackIndex < 0 || start < 0n || end <= start || !itemId) {
+    if (!Number.isSafeInteger(trackIndex) || trackIndex < 0 || start < 0n || end <= start) {
       throw new Error("Premiere could not verify the selected video clips.");
     }
     return { trackIndex, start, end, itemId };
