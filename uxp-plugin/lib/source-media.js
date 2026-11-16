@@ -3,6 +3,7 @@
 // Opens project items in the Source Monitor and resolves audio preview sources.
 
 const { guid } = require("./util.js");
+const { isAudioFileName } = require("./media.js");
 
 // `findProjectEntry(project, projectId, itemId)` resolves a project item, using the scan cache.
 module.exports = function createSourceMedia(ppro, { findProjectEntry }) {
@@ -54,9 +55,8 @@ module.exports = function createSourceMedia(ppro, { findProjectEntry }) {
       componentChain(mediaTypes.AUDIO),
       componentChain(mediaTypes.VIDEO)
     ]);
-    const audioExtension = /\.(?:wav|wave|bwf|aif|aiff|aifc|flac|mp3|aac|m4a|alac)$/i;
     const audioOnly = audio && video === null;
-    const standaloneAudio = audioExtension.test(path || source.item.name);
+    const standaloneAudio = isAudioFileName(path || source.item.name);
     if (video || (!audioOnly && !standaloneAudio)) {
       return null;
     }

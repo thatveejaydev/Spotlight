@@ -1,10 +1,6 @@
 pub mod markers;
 
 use serde::Serialize;
-use std::time::{Duration, Instant};
-
-/// How long Spotlight waits for Premiere to answer a command.
-pub const ACTION_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,34 +70,5 @@ impl Action {
         } else {
             ""
         }
-    }
-}
-
-pub struct ActionResult {
-    pub peer_id: usize,
-    pub request_id: u64,
-    pub ok: bool,
-    pub message: String,
-}
-
-pub struct PendingAction {
-    pub peer_id: usize,
-    pub request_id: u64,
-    pub deadline: Instant,
-}
-
-impl PendingAction {
-    pub fn outcome(&self, result: Option<ActionResult>) -> Option<Result<String, String>> {
-        if let Some(result) = result {
-            if result.peer_id == self.peer_id && result.request_id == self.request_id {
-                return Some(if result.ok {
-                    Ok(result.message)
-                } else {
-                    Err(result.message)
-                });
-            }
-        }
-        (Instant::now() >= self.deadline)
-            .then(|| Err("Premiere did not report the action outcome. Check the timeline.".into()))
     }
 }

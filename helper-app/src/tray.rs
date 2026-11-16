@@ -97,6 +97,7 @@ impl SystemTray {
     pub fn new() -> Option<Self> {
         unsafe {
             let hinstance = GetModuleHandleW(std::ptr::null());
+            // installer/premiere-spotlight.iss finds this class (MyTrayWndClass) to close Spotlight.
             let class_name = to_wide("PremiereSpotlightTrayWndClass");
 
             let wc = WNDCLASSW {

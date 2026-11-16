@@ -288,9 +288,10 @@ test("audio-only media uses the first gap that fits even when later tracks overl
   assert.equal(f.commits[0].action.audio, 1);
 });
 
-test("WAV with unavailable source bounds uses A1 when all its clips end before the playhead", async () => {
+for (const file of ["sting.wav", "voice.m4a", "loop.ALAC"])
+test(`${file} with unavailable source bounds uses A1 when all its clips end before the playhead`, async () => {
   const f = fixture();
-  f.clip.getMediaFilePath = () => "C:\\Media\\sting.wav";
+  f.clip.getMediaFilePath = () => `C:\\Media\\${file}`;
   // A missing video component chain can reject instead of returning null.
   f.clip.getComponentChain = (type) => {
     if (type === "video") throw new Error("No video component chain");

@@ -3,6 +3,7 @@
 //! activation; [`startup`] wires them to the window, bridge and hooks.
 
 mod activation;
+mod dispatch;
 mod palette;
 mod requests;
 mod results;
@@ -13,6 +14,7 @@ mod tests;
 pub(crate) use startup::run;
 
 use activation::*;
+use dispatch::{post, UiSlot};
 use palette::*;
 use requests::*;
 use results::*;
@@ -21,17 +23,16 @@ use crate::{
     action_hotkeys,
     actions::{
         markers::{MarkerDialog, MarkerEvent, MarkerPicker},
-        Action, ActionResult, PendingAction, ACTION_TIMEOUT,
+        Action,
     },
     audio_preview::AudioPreview,
-    bridge::{
-        self, ApplyResult, BridgeClients, BridgeEvent, EffectControlsShortcut, MediaCatalog,
-        PlacementResult,
-    },
-    catalog::{Catalog, CatalogStore, EffectEntry, ProjectItemEntry, ProjectItemKind, SearchResult},
+    bridge::{ApplyResult, BridgeClients, BridgeEvent, MediaCatalog},
+    catalog::{Catalog, CatalogStore, EffectEntry, EffectType, ProjectItemEntry, ProjectItemKind, SearchResult},
     debug_log::{self, DebugLogController, LogKind},
     error_toast::{self, ErrorToast},
+    premiere_prefs::{self, ShortcutBinding},
     presets::{self, PresetHandoff},
+    request::{CommandReply, PendingRequest, ACTION_TIMEOUT},
     settings::{
         self, AlternateModifier, AppSettings, PaletteShortcut, PaletteShortcutAction, PaletteTheme,
     },
@@ -39,7 +40,7 @@ use crate::{
     win_focus, ActionHotkeyUI, EffectItemUI, SpotlightWindow,
 };
 #[cfg(test)]
-use crate::{actions, catalog};
+use crate::{actions, bridge, catalog};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
@@ -65,8 +66,8 @@ struct AppState {
     pending_effects: HashMap<u64, PendingEffect>,
     media_catalog: Option<MediaCatalog>,
     pending_placement: Option<PendingPlacement>,
-    pending_source_open: Option<PendingSourceOpen>,
-    pending_action: Option<PendingAction>,
+    pending_source_open: Option<PendingRequest>,
+    pending_action: Option<PendingRequest>,
     marker_picker: Option<MarkerPicker>,
     marker_dialog: Option<MarkerDialog>,
     audio_preview: AudioPreview,
@@ -82,6 +83,34 @@ struct AppState {
     previous_hwnd: isize,
 }
 
+impl AppState {
+    fn new(settings: AppSettings) -> Self {
+        Self {
+            catalog: CatalogStore::new_with_defaults(),
+            matched_items: Vec::new(),
+            recent_items: Vec::new(),
+            pending_effects: HashMap::new(),
+            media_catalog: None,
+            pending_placement: None,
+            pending_source_open: None,
+            pending_action: None,
+            marker_picker: None,
+            marker_dialog: None,
+            audio_preview: AudioPreview::default(),
+            active_bin_path: None,
+            settings,
+            selected_abs_index: 0,
+            scroll_offset: 0,
+            rendered_scroll_offset: None,
+            results_dirty: true,
+            is_visible: false,
+            shown_at: None,
+            saw_foreground: false,
+            previous_hwnd: 0,
+        }
+    }
+}
+
 struct PendingEffect {
     entry: Arc<EffectEntry>,
     recipients: Vec<usize>,
@@ -90,9 +119,8 @@ struct PendingEffect {
 }
 
 struct PendingPlacement {
-    peer_id: usize,
-    request_id: u64,
-    deadline: Instant,
+    request: PendingRequest,
+    /// Added to the recent items once Premiere confirms the placement.
     recent: RecentItem,
 }
 
@@ -101,23 +129,13 @@ struct RecentItem {
     project_id: Option<String>,
 }
 
-struct PendingSourceOpen {
-    peer_id: usize,
-    request_id: u64,
-    deadline: Instant,
-}
-
 fn start_focus_grace_timer() {
     FOCUS_TIMER.with(|slot| {
         let mut guard = slot.borrow_mut();
         let timer = guard.get_or_insert_with(Timer::default);
         timer.start(TimerMode::Repeated, Duration::from_millis(20), || {
             debug_log::record_ui_timer_tick();
-            SYNC_FOCUS_DISPATCH.with(|dispatch| {
-                if let Some(callback) = dispatch.borrow_mut().as_mut() {
-                    callback();
-                }
-            });
+            SYNC_FOCUS_DISPATCH.with(|slot| slot.call(()));
         });
     });
 }
@@ -132,7 +150,7 @@ fn stop_focus_grace_timer() {
 
 fn schedule_action_deadlines(state: &AppState) {
     let earliest = [
-        state.pending_placement.as_ref().map(|p| p.deadline),
+        state.pending_placement.as_ref().map(|p| p.request.deadline),
         state.pending_source_open.as_ref().map(|p| p.deadline),
         state.pending_action.as_ref().map(|p| p.deadline),
         state.marker_picker.as_ref().and_then(MarkerPicker::deadline),
@@ -149,11 +167,7 @@ fn schedule_action_deadlines(state: &AppState) {
             let mut guard = slot.borrow_mut();
             let timer = guard.get_or_insert_with(Timer::default);
             timer.start(TimerMode::SingleShot, delay, || {
-                DEADLINE_DISPATCH.with(|dispatch| {
-                    if let Some(callback) = dispatch.borrow_mut().as_mut() {
-                        callback();
-                    }
-                });
+                DEADLINE_DISPATCH.with(|slot| slot.call(()));
             });
         } else if let Some(timer) = slot.borrow().as_ref() {
             timer.stop();
@@ -162,14 +176,13 @@ fn schedule_action_deadlines(state: &AppState) {
 }
 
 thread_local! {
-    static BRIDGE_DISPATCH: RefCell<Option<Box<dyn FnMut(BridgeEvent)>>> = const { RefCell::new(None) };
-    static PRESET_CATALOG_DISPATCH: RefCell<Option<Box<dyn FnMut(Vec<EffectEntry>)>>> = const { RefCell::new(None) };
-    static HOTKEY_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
-    static ACTION_HOTKEY_DISPATCH: RefCell<Option<Box<dyn Fn(action_hotkeys::Binding, isize)>>> =
-        const { RefCell::new(None) };
-    static SYNC_FOCUS_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
-    static DEADLINE_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
-    static PREMIERE_EXIT_DISPATCH: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    static BRIDGE_DISPATCH: UiSlot<BridgeEvent> = const { UiSlot::new() };
+    static PRESET_CATALOG_DISPATCH: UiSlot<Vec<EffectEntry>> = const { UiSlot::new() };
+    static HOTKEY_DISPATCH: UiSlot<()> = const { UiSlot::new() };
+    static ACTION_HOTKEY_DISPATCH: UiSlot<(action_hotkeys::Binding, isize)> = const { UiSlot::new() };
+    static SYNC_FOCUS_DISPATCH: UiSlot<()> = const { UiSlot::new() };
+    static DEADLINE_DISPATCH: UiSlot<()> = const { UiSlot::new() };
+    static PREMIERE_EXIT_DISPATCH: UiSlot<()> = const { UiSlot::new() };
     static FOCUS_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
     static DEADLINE_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
 }

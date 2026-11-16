@@ -12,6 +12,20 @@ use std::time::{Duration, Instant};
 const AUTOPLAY_DELAY: Duration = Duration::from_millis(250);
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// Extensions the bridge treats as standalone audio files. Must match
+/// `AUDIO_FILE_EXTENSIONS` in `uxp-plugin/lib/media.js`; a test compares them.
+const AUDIO_FILE_EXTENSIONS: [&str; 11] =
+    ["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "aac", "m4a", "alac"];
+
+fn is_audio_file_name(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            AUDIO_FILE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
 #[derive(PartialEq, Eq)]
 struct Selection {
     peer_id: usize,
@@ -76,26 +90,7 @@ impl AudioPreview {
                 project_id: catalog.project_id.clone()?,
                 item_id: item.item_id.clone(),
                 offline: item.offline,
-                // Match the bridge's fallback for standalone audio filenames.
-                audio_name: std::path::Path::new(&item.name)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        matches!(
-                            extension.to_ascii_lowercase().as_str(),
-                            "wav"
-                                | "wave"
-                                | "bwf"
-                                | "aif"
-                                | "aiff"
-                                | "aifc"
-                                | "flac"
-                                | "mp3"
-                                | "aac"
-                                | "m4a"
-                                | "alac"
-                        )
-                    }),
+                audio_name: is_audio_file_name(&item.name),
             })
         });
         if self.selection == selection {
@@ -361,5 +356,31 @@ fn format_time(duration: Duration, show_tenths: bool) -> String {
         format!("{hours}:{:02}:{:02}", seconds / 60 % 60, seconds % 60)
     } else {
         format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_extensions_match_the_bridge_plugin() {
+        let source = include_str!("../../uxp-plugin/lib/media.js");
+        let list = source
+            .split("const AUDIO_FILE_EXTENSIONS = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("media.js declares AUDIO_FILE_EXTENSIONS");
+        let plugin: Vec<&str> = list
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('"'))
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        assert_eq!(plugin, AUDIO_FILE_EXTENSIONS);
+
+        assert!(is_audio_file_name("Theme.M4A"));
+        assert!(is_audio_file_name("sting.wav"));
+        assert!(!is_audio_file_name("Take.mov"));
+        assert!(!is_audio_file_name("wav"));
     }
 }

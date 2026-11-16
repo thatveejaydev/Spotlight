@@ -30,6 +30,7 @@ pub(crate) fn run() -> Result<(), slint::PlatformError> {
     select_backend()?;
     let ui = SpotlightWindow::new()?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    ui.set_default_hotkey(settings::DEFAULT_HOTKEY.into());
     let error_toast = Rc::new(ErrorToast::default());
     let debug_log_ctrl = Rc::new(DebugLogController::default());
     win_focus::init_palette_window(extract_window_hwnd(&ui));
@@ -40,7 +41,7 @@ pub(crate) fn run() -> Result<(), slint::PlatformError> {
     // Create native Windows System Tray icon (no taskbar icon)
     let tray = Rc::new(RefCell::new(SystemTray::new()));
 
-    let state = Rc::new(RefCell::new(initial_state(initial_settings.clone())));
+    let state = Rc::new(RefCell::new(AppState::new(initial_settings.clone())));
     refresh_results_ui(&ui, &mut state.borrow_mut());
 
     let ctx = AppCtx {
@@ -133,32 +134,6 @@ fn load_initial_settings(error_toast: &Rc<ErrorToast>) -> AppSettings {
     initial_settings
 }
 
-fn initial_state(settings: AppSettings) -> AppState {
-    AppState {
-        catalog: CatalogStore::new_with_defaults(),
-        matched_items: Vec::new(),
-        recent_items: Vec::new(),
-        pending_effects: HashMap::new(),
-        media_catalog: None,
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
-        settings,
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
-        is_visible: false,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Presets, audio preview, and the Premiere bridge
 // ---------------------------------------------------------------------------
@@ -166,23 +141,14 @@ fn initial_state(settings: AppSettings) -> AppState {
 fn wire_preset_library(ctx: &AppCtx) {
     let ctx = ctx.clone();
     PRESET_CATALOG_DISPATCH.with(|slot| {
-        *slot.borrow_mut() = Some(Box::new(move |presets| {
+        slot.set(move |presets| {
             ctx.with_state(|ui, st| {
                 st.catalog.set_presets(presets);
                 refresh_catalog_ui(ui, st, true);
             });
-        }));
+        });
     });
-    presets::watch_library(|presets| {
-        slint::invoke_from_event_loop(move || {
-            PRESET_CATALOG_DISPATCH.with(|slot| {
-                if let Some(callback) = slot.borrow_mut().as_mut() {
-                    callback(presets);
-                }
-            });
-        })
-        .is_ok()
-    });
+    presets::watch_library(|presets| post(&PRESET_CATALOG_DISPATCH, presets));
 }
 
 fn wire_audio_preview_poll(ctx: &AppCtx) {
@@ -202,21 +168,15 @@ fn wire_bridge(ctx: &AppCtx) {
     {
         let ctx = ctx.clone();
         BRIDGE_DISPATCH.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move |event: BridgeEvent| {
+            slot.set(move |event: BridgeEvent| {
                 if let Some(ui) = ctx.ui.upgrade() {
                     handle_bridge_event(&ui, &ctx, event);
                 }
-            }));
+            });
         });
     }
     ctx.bridge.start_server(move |event| {
-        let _ = slint::invoke_from_event_loop(move || {
-            BRIDGE_DISPATCH.with(|slot| {
-                if let Some(callback) = slot.borrow_mut().as_mut() {
-                    callback(event);
-                }
-            });
-        });
+        post(&BRIDGE_DISPATCH, event);
     });
 }
 
@@ -277,7 +237,7 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
         }
         BridgeEvent::PlacementResult(result) => {
             let mut st = ctx.state.borrow_mut();
-            if let Some(message) = update_placement(ui, &mut st, vec![result]) {
+            if let Some(message) = update_placement(ui, &mut st, Some(result)) {
                 debug_log::log_event(LogKind::Error, "PLACE", message.as_str());
                 ctx.toast.show(message, st.previous_hwnd);
             }
@@ -285,7 +245,7 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
         }
         BridgeEvent::SourceMonitorResult(result) => {
             let mut st = ctx.state.borrow_mut();
-            if let Some(message) = update_source_open(ui, &mut st, vec![result]) {
+            if let Some(message) = update_source_open(ui, &mut st, Some(result)) {
                 debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
                 ctx.toast.show(message, st.previous_hwnd);
             }
@@ -314,8 +274,8 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
 }
 
 fn open_effect_controls_after_apply(st: &AppState, toast: &Rc<ErrorToast>) {
-    match bridge::read_effect_controls_shortcut() {
-        EffectControlsShortcut::Bound(shortcut) => {
+    match premiere_prefs::read_effect_controls_shortcut() {
+        ShortcutBinding::Bound(shortcut) => {
             if win_focus::open_effect_controls(st.previous_hwnd, shortcut) {
                 debug_log::log_event(
                     LogKind::Focus,
@@ -330,7 +290,7 @@ fn open_effect_controls_after_apply(st: &AppState, toast: &Rc<ErrorToast>) {
                 );
             }
         }
-        EffectControlsShortcut::Unbound => {
+        ShortcutBinding::Unbound => {
             let message: SharedString =
                 "Effect applied, but no shortcut is bound to Effect Controls in Premiere Pro."
                     .into();
@@ -598,20 +558,12 @@ fn wire_launch_dispatch(ctx: &AppCtx, pending: &Arc<AtomicBool>) {
     let ctx = ctx.clone();
     let pending_flag = pending.clone();
     HOTKEY_DISPATCH.with(|slot| {
-        *slot.borrow_mut() = Some(Box::new(move || {
+        slot.set(move |()| {
             if !pending_flag.swap(false, Ordering::AcqRel) {
                 return;
             }
             ctx.with_state(|ui, st| toggle_palette_from_hotkey(ui, st, &ctx.bridge));
-        }));
-    });
-}
-
-fn run_launch_dispatch() {
-    HOTKEY_DISPATCH.with(|slot| {
-        if let Some(callback) = slot.borrow_mut().as_mut() {
-            callback();
-        }
+        });
     });
 }
 
@@ -623,7 +575,7 @@ fn install_action_hotkey_hook(
     {
         let ctx = ctx.clone();
         ACTION_HOTKEY_DISPATCH.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move |binding, hwnd| {
+            slot.set(move |(binding, hwnd): (action_hotkeys::Binding, isize)| {
                 ctx.with_state(|ui, state| {
                     if binding.is_current(&state.settings) {
                         dispatch_action_hotkey(
@@ -631,7 +583,7 @@ fn install_action_hotkey_hook(
                         );
                     }
                 });
-            }));
+            });
         });
     }
     let rec_flag = ctx.recording.clone();
@@ -639,22 +591,14 @@ fn install_action_hotkey_hook(
     let launch_pending = launch_pending.clone();
     match action_hotkeys::ActionHotkeyHook::install(
         move |binding, hwnd| {
-            !rec_flag.load(Ordering::Acquire)
-                && slint::invoke_from_event_loop(move || {
-                    ACTION_HOTKEY_DISPATCH.with(|slot| {
-                        if let Some(dispatch) = slot.borrow().as_ref() {
-                            dispatch(binding, hwnd);
-                        }
-                    });
-                })
-                .is_ok()
+            !rec_flag.load(Ordering::Acquire) && post(&ACTION_HOTKEY_DISPATCH, (binding, hwnd))
         },
         move || {
             if rec_flag_launch.load(Ordering::Acquire) {
                 return false;
             }
             launch_pending.store(true, Ordering::Release);
-            slint::invoke_from_event_loop(run_launch_dispatch).is_ok()
+            post(&HOTKEY_DISPATCH, ())
         },
     ) {
         Ok(hook) => Some(hook),
@@ -709,7 +653,7 @@ fn wire_registered_hotkey_events(
         // Capture WM_HOTKEY foreground rights immediately and wake the event loop without timer lag.
         win_focus::allow_current_process_foreground();
         pending_flag.store(true, Ordering::Release);
-        let _ = slint::invoke_from_event_loop(run_launch_dispatch);
+        post(&HOTKEY_DISPATCH, ());
     }));
 }
 
@@ -1162,21 +1106,23 @@ fn wire_focus_tracking(ctx: &AppCtx) -> win_focus::ForegroundHook {
         let ctx = ctx.clone();
         let hook_active = hook_active.clone();
         SYNC_FOCUS_DISPATCH.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
+            slot.set(move |()| {
                 if let Some(ui) = ctx.ui.upgrade() {
                     sync_palette_focus(&ui, &ctx, hook_active.get());
                 }
-            }));
-        });
-    }
-    let foreground_hook = win_focus::ForegroundHook::install(|| {
-        let _ = slint::invoke_from_event_loop(|| {
-            SYNC_FOCUS_DISPATCH.with(|slot| {
-                if let Some(callback) = slot.borrow_mut().as_mut() {
-                    callback();
-                }
             });
         });
+    }
+    // Features that react to Premiere losing the foreground or minimizing.
+    #[cfg(windows)]
+    {
+        win_focus::on_foreground_change(|hwnd, _| presets::foreground_changed(hwnd));
+        win_focus::on_foreground_change(crate::actions::markers::foreground_changed);
+    }
+    win_focus::on_foreground_change(|hwnd, _| action_hotkeys::foreground_changed(hwnd));
+    win_focus::on_premiere_minimize(action_hotkeys::release_active_hold);
+    let foreground_hook = win_focus::ForegroundHook::install(|| {
+        post(&SYNC_FOCUS_DISPATCH, ());
     });
     hook_active.set(foreground_hook.is_active());
     foreground_hook
@@ -1236,16 +1182,11 @@ fn make_quit_app(ctx: &AppCtx, tray: Rc<RefCell<Option<SystemTray>>>) -> Rc<dyn 
 
 fn wire_premiere_exit(quit_app: Rc<dyn Fn()>) {
     PREMIERE_EXIT_DISPATCH.with(|slot| {
-        *slot.borrow_mut() = Some(Box::new(move || quit_app()));
+        slot.set(move |()| quit_app());
     });
     win_focus::spawn_premiere_exit_watcher(|| {
-        let _ = slint::invoke_from_event_loop(|| {
-            PREMIERE_EXIT_DISPATCH.with(|slot| {
-                if let Some(mut callback) = slot.borrow_mut().take() {
-                    callback();
-                }
-            });
-        });
+        // Quit once, even if the watcher reports the exit again.
+        let _ = slint::invoke_from_event_loop(|| PREMIERE_EXIT_DISPATCH.with(|slot| slot.call_once(())));
     });
 }
 
@@ -1285,15 +1226,15 @@ fn wire_tray(ctx: &AppCtx, quit_app: Rc<dyn Fn()>) {
 fn wire_deadlines(ctx: &AppCtx) {
     let ctx = ctx.clone();
     DEADLINE_DISPATCH.with(|slot| {
-        *slot.borrow_mut() = Some(Box::new(move || {
+        slot.set(move |()| {
             ctx.with_state(|ui, st| {
                 st.pending_effects
                     .retain(|_, pending| Instant::now() < pending.deadline);
-                if let Some(message) = update_placement(ui, st, vec![]) {
+                if let Some(message) = update_placement(ui, st, None) {
                     debug_log::log_event(LogKind::Error, "PLACE", message.as_str());
                     ctx.toast.show(message, st.previous_hwnd);
                 }
-                if let Some(message) = update_source_open(ui, st, vec![]) {
+                if let Some(message) = update_source_open(ui, st, None) {
                     debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
                     ctx.toast.show(message, st.previous_hwnd);
                 }
@@ -1301,6 +1242,6 @@ fn wire_deadlines(ctx: &AppCtx) {
                 poll_markers(ui, st, &ctx.bridge, &ctx.toast);
                 schedule_action_deadlines(st);
             });
-        }));
+        });
     });
 }

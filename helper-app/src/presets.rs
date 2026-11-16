@@ -1,5 +1,5 @@
 use crate::{
-    bridge::{find_latest_premiere_prefs_file, read_preset_search_shortcuts, ShortcutSpec},
+    premiere_prefs::{find_latest_premiere_prefs_file, read_preset_search_shortcuts, ShortcutSpec},
     catalog::{EffectEntry, EffectType, BIN_PATH_SEPARATOR},
     error_toast::ErrorToast,
     win_focus,

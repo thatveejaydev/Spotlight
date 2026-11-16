@@ -407,27 +407,9 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         items: vec![item.clone()],
     };
     let mut state = AppState {
-        catalog: CatalogStore::new_with_defaults(),
         matched_items: vec![effect, SearchResult::ProjectItem(Arc::new(item))],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
         media_catalog: Some(catalog.clone()),
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
-        settings: AppSettings::default(),
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
-        is_visible: false,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     };
     show_palette(&ui, &mut state);
     for index in [0, 1] {
@@ -456,7 +438,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
     assert_eq!(command["requestId"], request_id);
     let toast = Rc::new(ErrorToast::default());
     for peer_id in [8, 7] {
-        finish_action(&ui, &mut state, Some(ActionResult {
+        finish_action(&ui, &mut state, Some(CommandReply {
             peer_id, request_id, ok: true, message: "Removed effects".into(),
         }), &toast);
         assert_eq!(state.pending_action.is_some(), peer_id == 8);
@@ -481,7 +463,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         assert_eq!(command["action"], wire_name);
         assert_eq!(command["requestId"], pending.request_id);
         let request_id = pending.request_id;
-        finish_action(&ui, &mut state, Some(ActionResult {
+        finish_action(&ui, &mut state, Some(CommandReply {
             peer_id: 7, request_id, ok: true, message: "Done".into(),
         }), &toast);
     }
@@ -582,7 +564,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
         assert!(!state.is_visible);
         assert!(requests.try_recv().unwrap().contains("place_project_item"));
-        let request_id = state.pending_placement.as_ref().unwrap().request_id;
+        let request_id = state.pending_placement.as_ref().unwrap().request.request_id;
         if success {
             // A success reply must leave a manually reopened palette alone.
             show_palette(&ui, &mut state);
@@ -590,12 +572,12 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         let error = update_placement(
             &ui,
             &mut state,
-            vec![PlacementResult {
+            Some(CommandReply {
                 peer_id: 7,
                 request_id,
                 ok: success,
                 message: if success { "Placed Clip" } else { "Timeline changed" }.into(),
-            }],
+            }),
         );
         assert_eq!(state.is_visible, success);
         assert_eq!(
@@ -689,31 +671,13 @@ fn shift_activate_handles_effects_and_project_items() {
         items: vec![item("clip", ProjectItemKind::Media), item("bin", ProjectItemKind::Bin)],
     };
     let mut state = AppState {
-        catalog: CatalogStore::new_with_defaults(),
         matched_items: vec![
             effect,
             SearchResult::ProjectItem(Arc::new(catalog.items[0].clone())),
             SearchResult::ProjectItem(Arc::new(catalog.items[1].clone())),
         ],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
         media_catalog: Some(catalog.clone()),
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
-        settings: AppSettings::default(),
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
-        is_visible: false,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     };
     sync_viewport_slice(&ui, &mut state);
 
@@ -799,12 +763,12 @@ fn shift_activate_handles_effects_and_project_items() {
         assert!(!state.is_visible);
         assert!(requests.try_recv().unwrap().contains("open_in_source_monitor"));
         let request_id = state.pending_source_open.as_ref().unwrap().request_id;
-        let error = update_source_open(&ui, &mut state, vec![PlacementResult {
+        let error = update_source_open(&ui, &mut state, Some(CommandReply {
             peer_id: 7,
             request_id,
             ok: success,
             message: if success { "Opened clip" } else { "Too old" }.into(),
-        }]);
+        }));
         assert_eq!(error.as_deref(), if success { None } else { Some("Too old") });
         assert!(state.pending_source_open.is_none());
         assert!(state.pending_placement.is_none());
@@ -812,7 +776,7 @@ fn shift_activate_handles_effects_and_project_items() {
 
     shift_activate_at(1, &ui, &mut state, &bridge).unwrap();
     state.pending_source_open.as_mut().unwrap().deadline = Instant::now();
-    assert!(update_source_open(&ui, &mut state, vec![]).unwrap().contains("didn't respond"));
+    assert!(update_source_open(&ui, &mut state, None).unwrap().contains("didn't respond"));
 }
 
 #[test]
@@ -886,27 +850,8 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
     assert_eq!(ui.get_active_catalog().as_str(), "project");
     assert_eq!(ui.get_search_text().as_str(), "Take");
     let mut state = AppState {
-        catalog: CatalogStore::new_with_defaults(),
-        matched_items: vec![],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
-        media_catalog: None,
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
-        settings: AppSettings::default(),
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
         is_visible: true,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     };
     let effect = Arc::new(EffectEntry {
         name: "Gaussian Blur".into(),
@@ -1180,26 +1125,7 @@ fn moving_selection_inside_visible_window_reuses_results_model() {
     );
     let mut state = AppState {
         catalog: store,
-        matched_items: vec![],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
-        media_catalog: None,
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
-        settings: AppSettings::default(),
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
-        is_visible: false,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     };
     use slint::Model;
     let model_ptr = |ui: &SpotlightWindow| -> *const VecModel<EffectItemUI> {
@@ -1256,26 +1182,8 @@ fn bin_drill_down_enters_and_steps_out_without_hiding() {
     store.set_project_items(items);
     let mut state = AppState {
         catalog: store,
-        matched_items: vec![],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
         media_catalog: Some(catalog),
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
-        settings: AppSettings::default(),
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
-        is_visible: false,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     };
 
     show_palette(&ui, &mut state);
@@ -1475,31 +1383,14 @@ fn default_effect_controls_setting_swaps_enter_and_shift_enter_for_effects() {
     let bridge = BridgeClients::new();
     let requests = bridge.connect_test_peer(catalog.clone());
     let mut state = AppState {
-        catalog: CatalogStore::new_with_defaults(),
         matched_items: vec![effect, SearchResult::ProjectItem(Arc::new(clip))],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
         media_catalog: Some(catalog),
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
-        active_bin_path: None,
         settings: AppSettings {
             hotkey: "Alt+Space".into(),
             open_effect_controls_by_default: true,
             ..AppSettings::default()
         },
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
-        is_visible: false,
-        shown_at: None,
-        saw_foreground: false,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     };
 
     show_palette(&ui, &mut state);
@@ -1666,31 +1557,17 @@ fn configurable_modifier_settings_hotkey_and_catalog_shortcuts_work() {
         offline: false,
     };
     let state = Rc::new(RefCell::new(AppState {
-        catalog: CatalogStore::new_with_defaults(),
         matched_items: vec![SearchResult::ProjectItem(Arc::new(clip))],
-        recent_items: vec![],
-        pending_effects: HashMap::new(),
-        media_catalog: None,
-        pending_placement: None,
-        pending_source_open: None,
-        pending_action: None,
-        marker_picker: None,
-        marker_dialog: None,
-        audio_preview: AudioPreview::default(),
         active_bin_path: Some("01_Footage".into()),
         settings: AppSettings {
             settings_hotkey: "Ctrl+,".into(),
             catalog_effects_hotkey: "Ctrl+2".into(),
             ..AppSettings::default()
         },
-        selected_abs_index: 0,
-        scroll_offset: 0,
-        rendered_scroll_offset: None,
-        results_dirty: true,
         is_visible: true,
         shown_at: Some(Instant::now()),
         saw_foreground: true,
-        previous_hwnd: 0,
+        ..AppState::new(AppSettings::default())
     }));
     {
         let mut st = state.borrow_mut();

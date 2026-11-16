@@ -76,9 +76,7 @@ pub(super) fn apply_entry_with_options(
                 .map_err(SharedString::from)?;
             ui.set_status_message(format!("Placing {}…", entry.name).into());
             state.pending_placement = Some(PendingPlacement {
-                peer_id: catalog.peer_id,
-                request_id,
-                deadline: Instant::now() + ACTION_TIMEOUT,
+                request: PendingRequest::new(catalog.peer_id, request_id),
                 recent: RecentItem {
                     item: SearchResult::ProjectItem(entry),
                     project_id: catalog.project_id.clone(),
@@ -148,11 +146,7 @@ pub(super) fn activate_action(
                 return Err("A Premiere action is already in progress.".into());
             }
             let (request_id, peer_id) = bridge.run_action(action).map_err(SharedString::from)?;
-            state.pending_action = Some(PendingAction {
-                request_id,
-                peer_id,
-                deadline: Instant::now() + ACTION_TIMEOUT,
-            });
+            state.pending_action = Some(PendingRequest::new(peer_id, request_id));
         }
     }
     if action != Action::GoToMarker && action != Action::LockHorizontalAxis && state.is_visible {
@@ -214,11 +208,7 @@ pub(super) fn shift_activate_at(
                 .open_in_source_monitor(catalog, entry.item_id.clone())
                 .map_err(SharedString::from)?;
             ui.set_status_message(format!("Opening {}…", entry.name).into());
-            state.pending_source_open = Some(PendingSourceOpen {
-                peer_id: catalog.peer_id,
-                request_id,
-                deadline: Instant::now() + ACTION_TIMEOUT,
-            });
+            state.pending_source_open = Some(PendingRequest::new(catalog.peer_id, request_id));
             schedule_action_deadlines(state);
             hide_palette(ui, state);
             restore_premiere_focus(state.previous_hwnd);

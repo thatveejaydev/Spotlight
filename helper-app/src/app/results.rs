@@ -2,45 +2,34 @@
 
 use super::*;
 
-pub(super) fn badge_colors(effect_type: &str) -> (Color, Color) {
-    match effect_type {
-        "videoEffect" => (
-            Color::from_argb_u8(45, 99, 102, 241),
-            Color::from_rgb_u8(165, 180, 252),
-        ),
-        "audioEffect" => (
-            Color::from_argb_u8(45, 16, 185, 129),
-            Color::from_rgb_u8(110, 231, 183),
-        ),
-        "videoTransition" => (
-            Color::from_argb_u8(45, 245, 158, 11),
-            Color::from_rgb_u8(252, 211, 77),
-        ),
-        "audioTransition" => (
-            Color::from_argb_u8(45, 236, 72, 153),
-            Color::from_rgb_u8(249, 168, 212),
-        ),
-        "preset" => (
-            Color::from_argb_u8(68, 248, 78, 66),
-            Color::from_rgb_u8(255, 174, 162),
-        ),
-        "media" => (
-            Color::from_argb_u8(52, 56, 189, 248),
-            Color::from_rgb_u8(125, 211, 252),
-        ),
-        "sequence" => (
-            Color::from_argb_u8(52, 168, 85, 247),
-            Color::from_rgb_u8(216, 180, 254),
-        ),
-        "bin" => (
-            Color::from_argb_u8(52, 245, 158, 11),
-            Color::from_rgb_u8(253, 224, 131),
-        ),
-        _ => (
-            Color::from_argb_u8(45, 148, 163, 184),
-            Color::from_rgb_u8(203, 213, 225),
-        ),
-    }
+/// What a result row's badge shows; each kind has its own color.
+#[derive(Clone, Copy)]
+pub(super) enum BadgeKind {
+    Effect(EffectType),
+    Media,
+    Sequence,
+    Bin,
+    /// Actions, markers and project items Spotlight can't place.
+    Neutral,
+}
+
+/// Background and text color of a badge, before the theme adjusts them.
+pub(super) fn badge_colors(kind: BadgeKind) -> (Color, Color) {
+    let (background, text) = match kind {
+        BadgeKind::Effect(EffectType::VideoEffect) => ((45, 99, 102, 241), (165, 180, 252)),
+        BadgeKind::Effect(EffectType::AudioEffect) => ((45, 16, 185, 129), (110, 231, 183)),
+        BadgeKind::Effect(EffectType::VideoTransition) => ((45, 245, 158, 11), (252, 211, 77)),
+        BadgeKind::Effect(EffectType::AudioTransition) => ((45, 236, 72, 153), (249, 168, 212)),
+        BadgeKind::Effect(EffectType::Preset) => ((68, 248, 78, 66), (255, 174, 162)),
+        BadgeKind::Media => ((52, 56, 189, 248), (125, 211, 252)),
+        BadgeKind::Sequence => ((52, 168, 85, 247), (216, 180, 254)),
+        BadgeKind::Bin => ((52, 245, 158, 11), (253, 224, 131)),
+        BadgeKind::Effect(EffectType::Unknown) | BadgeKind::Neutral => {
+            ((45, 148, 163, 184), (203, 213, 225))
+        }
+    };
+    let ((alpha, red, green, blue), (r, g, b)) = (background, text);
+    (Color::from_argb_u8(alpha, red, green, blue), Color::from_rgb_u8(r, g, b))
 }
 
 pub(super) fn remember_item(state: &mut AppState, recent: RecentItem) {
@@ -247,13 +236,13 @@ pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
             let (name, category, folder, colors) = match entry {
                 SearchResult::Marker(marker) => {
                     position = marker.position();
-                    (marker.title(), position.as_str(), marker.sequence_name.as_str(), badge_colors("action"))
+                    (marker.title(), position.as_str(), marker.sequence_name.as_str(), badge_colors(BadgeKind::Neutral))
                 }
                 SearchResult::Action(action) => (
                     action.name(),
                     "Action",
                     action.description(),
-                    badge_colors("action"),
+                    badge_colors(BadgeKind::Neutral),
                 ),
                 SearchResult::Effect(entry) => (
                     entry.name.as_str(),
@@ -263,17 +252,17 @@ pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
                     } else {
                         ""
                     },
-                    badge_colors(entry.effect_type.id()),
+                    badge_colors(BadgeKind::Effect(entry.effect_type)),
                 ),
                 SearchResult::ProjectItem(entry) => (
                     entry.name.as_str(),
                     entry.kind.label(),
                     entry.bin_path.as_str(),
                     badge_colors(match entry.kind {
-                        ProjectItemKind::Media => "media",
-                        ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => "sequence",
-                        ProjectItemKind::Bin => "bin",
-                        ProjectItemKind::Other => "other",
+                        ProjectItemKind::Media => BadgeKind::Media,
+                        ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => BadgeKind::Sequence,
+                        ProjectItemKind::Bin => BadgeKind::Bin,
+                        ProjectItemKind::Other => BadgeKind::Neutral,
                     }),
                 ),
             };

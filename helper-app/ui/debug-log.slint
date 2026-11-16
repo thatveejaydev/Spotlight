@@ -1,0 +1,268 @@
+// The F12 diagnostics window: recent log lines and timing metrics.
+
+export struct DebugLogEntryUI {
+    text: string,
+    color: color,
+}
+
+component DebugMetric inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <color> accent;
+
+    background: #1a1c28;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: #25283a;
+
+    VerticalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        spacing: 2px;
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: "Consolas";
+            color: root.accent;
+            overflow: elide;
+        }
+        Text {
+            text: root.hint;
+            font-size: 9.5px;
+            color: #8b90aa;
+            overflow: elide;
+        }
+    }
+}
+
+export component DebugLogWindow inherits Window {
+    title: "Premiere Spotlight Debug Log";
+    no-frame: true;
+    always-on-top: true;
+    width: panel-width;
+    height: panel-height;
+    background: #12131a;
+
+    out property <length> panel-width: 560px;
+    out property <length> panel-height: 410px;
+    in property <string> ui-timer-rate: "0/s";
+    in property <string> ws-poll-rate: "0/s";
+    in property <string> fg-hook-rate: "0/s";
+    in property <string> last-search-text: "—";
+    in property <string> last-rtt-text: "—";
+    in property <bool> paused: false;
+    in property <[DebugLogEntryUI]> log-entries: [];
+
+    callback clear-requested();
+    callback toggle-pause();
+    callback close-requested();
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #12131a;
+        border-width: 1px;
+        border-color: #363952;
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // Header bar
+            Rectangle {
+                height: 38px;
+                background: #171822;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    alignment: stretch;
+
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Spotlight Debug & Performance Log";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #f3f4f8;
+                        }
+                    }
+
+                    // Pause / Resume button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 60px;
+                            height: 22px;
+                            border-radius: 4px;
+                            background: pause-touch.has-hover ? #282b3d : #1f2130;
+                            border-width: 1px;
+                            border-color: root.paused ? #f59e0b88 : #363952;
+                            Text {
+                                text: root.paused ? "Resume" : "Pause";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: root.paused ? #fcd34d : #cbd5e1;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            pause-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-pause(); }
+                            }
+                        }
+                    }
+
+                    // Clear button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 4px;
+                            background: clear-touch.has-hover ? #282b3d : #1f2130;
+                            border-width: 1px;
+                            border-color: #363952;
+                            Text {
+                                text: "Clear";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: #cbd5e1;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            clear-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.clear-requested(); }
+                            }
+                        }
+                    }
+
+                    // Close button
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 4px;
+                            background: close-touch.has-hover ? #452730 : #1f2130;
+                            border-width: 1px;
+                            border-color: close-touch.has-hover ? #ca7c85 : #363952;
+                            Text {
+                                text: "Close";
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: #f8fafc;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            close-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.close-requested(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: #26283a; }
+
+            // Live metrics bar
+            Rectangle {
+                background: #151620;
+
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "UI Timer: " + root.ui-timer-rate;
+                            hint: "Idle UI wakeups (0/s best)";
+                            accent: #fbbf24;
+                        }
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "WS Polls: " + root.ws-poll-rate;
+                            hint: "Empty bridge checks (0/s best)";
+                            accent: #fbbf24;
+                        }
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "FG Hooks: " + root.fg-hook-rate;
+                            hint: "App focus switches (0/s hidden)";
+                            accent: #93c5fd;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "Last Search: " + root.last-search-text;
+                            hint: "Filter speed (matches / total items)";
+                            accent: #c4b5fd;
+                        }
+                        DebugMetric {
+                            horizontal-stretch: 1;
+                            label: "Bridge RTT: " + root.last-rtt-text;
+                            hint: "Premiere action round-trip time";
+                            accent: #6ee7b7;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: #26283a; }
+
+            // Scrollable log list
+            Rectangle {
+                vertical-stretch: 1;
+                background: #0f1017;
+                clip: true;
+
+                if root.log-entries.length == 0 : VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "No debug events recorded yet";
+                        font-size: 11px;
+                        font-family: "Consolas";
+                        color: #6b708b;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                Flickable {
+                    width: 100%;
+                    height: 100%;
+                    content-height: log-list.preferred-height;
+                    interactive: true;
+
+                    log-list := VerticalLayout {
+                        width: 100%;
+                        padding: 8px;
+                        spacing: 3px;
+                        alignment: start;
+
+                        for entry in root.log-entries : Text {
+                            text: entry.text;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            color: entry.color;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

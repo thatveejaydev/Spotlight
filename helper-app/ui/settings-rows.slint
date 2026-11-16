@@ -1,0 +1,133 @@
+// Rows used by the settings view.
+
+import { PaletteThemeColors as Theme } from "palette-theme.slint";
+
+export component ShortcutRecorderRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> hint: "";
+    in property <string> shortcut-text;
+    in property <string> empty-text: "Not set";
+    in property <bool> recording: false;
+    in property <bool> show-clear: true;
+    callback toggle-record();
+    callback clear-clicked();
+
+    spacing: 10px;
+    alignment: stretch;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: root.label;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: Theme.primary-text;
+        }
+        if root.hint != "" : Text {
+            text: root.hint;
+            font-size: 11px;
+            color: Theme.muted-text;
+            overflow: elide;
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: center;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                min-width: 112px;
+                height: 26px;
+                border-radius: 6px;
+                background: root.recording ? Theme.accent-tint : (slot-touch.has-hover ? Theme.shortcut-hover : Theme.shortcut-background);
+                border-width: 1px;
+                border-color: root.recording ? Theme.focus-outline : Theme.shortcut-border;
+                accessible-role: button;
+                accessible-label: root.label;
+                accessible-action-default => { root.toggle-record(); }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+                    Text {
+                        text: root.recording ? "Press keys…"
+                            : (root.shortcut-text != "" ? root.shortcut-text : root.empty-text);
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: root.recording ? Theme.accent-text
+                            : (root.shortcut-text != "" ? Theme.shortcut-text : Theme.subtle-text);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                slot-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-record(); }
+                }
+            }
+        }
+
+        if root.show-clear && root.shortcut-text != "" : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 6px;
+                background: clear-touch.has-hover ? Theme.danger-hover : Theme.control-background;
+                border-width: 1px;
+                border-color: clear-touch.has-hover ? Theme.danger-outline : Theme.outline;
+                accessible-role: button;
+                accessible-label: "Clear " + root.label;
+                accessible-action-default => { root.clear-clicked(); }
+                Text {
+                    text: "×";
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: Theme.control-text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                clear-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.clear-clicked(); }
+                }
+            }
+        }
+    }
+}
+
+export component SettingsToggle inherits Rectangle {
+    in property <bool> checked;
+    in property <string> label;
+    callback toggled();
+
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: checked ? Theme.accent : Theme.switch-off;
+    border-width: 1px;
+    border-color: checked ? Theme.focus-outline : Theme.shortcut-border;
+    accessible-role: checkbox;
+    accessible-label: label;
+    accessible-checked: checked;
+    accessible-action-default => { root.toggled(); }
+
+    Rectangle {
+        x: root.checked ? 20px : 3px;
+        y: 3px;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: Theme.switch-knob;
+        animate x { duration: 120ms; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
+    }
+}
+

@@ -1,0 +1,43 @@
+// The small notification Spotlight shows over Premiere when a command fails.
+
+export component ErrorToastWindow inherits Window {
+    title: "Premiere Spotlight error";
+    no-frame: true;
+    always-on-top: true;
+    width: 304px;
+    height: toast-height;
+    background: #242427;
+
+    out property <length> toast-height: 54px;
+    in property <string> message;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-width: 1px;
+        border-color: #604249;
+
+        Rectangle {
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: #ca7c85;
+        }
+
+        Text {
+            x: 26px;
+            y: 4px;
+            width: parent.width - 38px;
+            height: parent.height - 8px;
+            text: root.message;
+            font-size: 13px;
+            color: #e2e2e5;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+}
+

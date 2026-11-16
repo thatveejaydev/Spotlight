@@ -3,6 +3,7 @@
 // Places a project item at the playhead on the first verified free tracks.
 
 const { mapWithConcurrency, guid } = require("./util.js");
+const { isAudioFileName } = require("./media.js");
 
 // `findProjectEntry(project, projectId, itemId)` resolves a project item, using the scan cache.
 module.exports = function createPlacement(ppro, { findProjectEntry }) {
@@ -28,7 +29,7 @@ module.exports = function createPlacement(ppro, { findProjectEntry }) {
       // Some project items do not expose their media path.
     }
     // Recognize audio-only sources by their project filename if the media path is unavailable.
-    const audioOnly = /\.(?:wav|wave|bwf|aif|aiff|aifc|flac|mp3|aac)$/i.test(path || item.name);
+    const audioOnly = isAudioFileName(path || item.name);
     let mediaDuration = null;
     try {
       const media = await clip.getMedia?.();

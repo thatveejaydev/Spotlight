@@ -1,5 +1,7 @@
 use crate::{
-    bridge::{read_marker_shortcuts, BridgeClients, MediaCatalog, ShortcutSpec},
+    bridge::{BridgeClients, MediaCatalog},
+    premiere_prefs::{read_marker_shortcuts, ShortcutSpec},
+    request::PendingRequest,
     win_focus,
 };
 use serde::{Deserialize, Serialize};
@@ -101,23 +103,9 @@ pub struct MarkerEvent {
     pub message: String,
 }
 
-pub struct MarkerRequest {
-    peer_id: usize,
-    request_id: u64,
-    deadline: Instant,
-}
-
-impl MarkerRequest {
-    pub fn new(peer_id: usize, request_id: u64) -> Self {
-        Self {
-            peer_id,
-            request_id,
-            deadline: Instant::now() + super::ACTION_TIMEOUT,
-        }
-    }
-
-    pub fn matches(&self, event: &MarkerEvent) -> bool {
-        self.peer_id == event.peer_id && self.request_id == event.request_id
+impl MarkerEvent {
+    fn answers(&self, request: &PendingRequest) -> bool {
+        request.is_answered_by(self.peer_id, self.request_id)
     }
 }
 
@@ -125,7 +113,7 @@ pub struct MarkerPicker {
     pub previous_query: slint::SharedString,
     pub context_label: String,
     list: Option<(usize, String, Vec<Arc<SequenceMarker>>)>,
-    request: Option<MarkerRequest>,
+    request: Option<PendingRequest>,
     error: Option<String>,
 }
 
@@ -203,7 +191,7 @@ impl MarkerPicker {
     pub fn accepts(&self, event: &MarkerEvent) -> bool {
         self.request
             .as_ref()
-            .is_some_and(|request| request.matches(event))
+            .is_some_and(|request| event.answers(request))
     }
 
     pub fn receive(&mut self, event: MarkerEvent) -> bool {
@@ -292,8 +280,8 @@ enum DialogStep {
         poll_at: Instant,
     },
     PrepareAt(Instant),
-    Preparing(MarkerRequest),
-    Confirming(MarkerRequest),
+    Preparing(PendingRequest),
+    Confirming(PendingRequest),
     Verify {
         owner: isize,
         until: Instant,
@@ -343,7 +331,7 @@ impl MarkerDialog {
     pub fn accepts(&self, event: &MarkerEvent) -> bool {
         match &self.step {
             DialogStep::Preparing(request) | DialogStep::Confirming(request) => {
-                request.matches(event)
+                event.answers(request)
             }
             _ => false,
         }

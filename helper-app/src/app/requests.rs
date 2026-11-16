@@ -52,15 +52,13 @@ pub(super) fn complete_effect(state: &mut AppState, result: &ApplyResult) -> Opt
 pub(super) fn update_placement(
     ui: &SpotlightWindow,
     state: &mut AppState,
-    results: Vec<PlacementResult>,
+    reply: Option<CommandReply>,
 ) -> Option<SharedString> {
     let pending = state.pending_placement.as_ref()?;
-    if let Some(result) = results.into_iter().find(|result| {
-        result.peer_id == pending.peer_id && result.request_id == pending.request_id
-    }) {
+    if let Some(result) = reply.filter(|reply| reply.answers(&pending.request)) {
         let pending = state.pending_placement.take().unwrap();
         if result.ok {
-            if Instant::now() < pending.deadline {
+            if !pending.request.expired() {
                 remember_item(state, pending.recent);
                 refresh_catalog_ui(ui, state, true);
             }
@@ -72,7 +70,7 @@ pub(super) fn update_placement(
                 result.message.into()
             });
         }
-    } else if Instant::now() >= pending.deadline {
+    } else if pending.request.expired() {
         state.pending_placement = None;
         return Some("Placement outcome unknown. Check the timeline before retrying.".into());
     }
@@ -153,11 +151,19 @@ pub(super) fn poll_markers(ui: &SpotlightWindow, state: &mut AppState, bridge: &
 pub(super) fn finish_action(
     ui: &SpotlightWindow,
     state: &mut AppState,
-    result: Option<ActionResult>,
+    reply: Option<CommandReply>,
     toast: &Rc<ErrorToast>,
 ) {
-    let Some(outcome) = state.pending_action.as_ref().and_then(|pending| pending.outcome(result)) else {
+    let Some(pending) = &state.pending_action else {
         return;
+    };
+    let outcome = match reply.filter(|reply| reply.answers(pending)) {
+        Some(reply) if reply.ok => Ok(reply.message),
+        Some(reply) => Err(reply.message),
+        None if pending.expired() => {
+            Err("Premiere did not report the action outcome. Check the timeline.".to_string())
+        }
+        None => return,
     };
     state.pending_action = None;
     match outcome {
@@ -175,12 +181,10 @@ pub(super) fn finish_action(
 pub(super) fn update_source_open(
     ui: &SpotlightWindow,
     state: &mut AppState,
-    results: Vec<PlacementResult>,
+    reply: Option<CommandReply>,
 ) -> Option<SharedString> {
     let pending = state.pending_source_open.as_ref()?;
-    if let Some(result) = results.into_iter().find(|result| {
-        result.peer_id == pending.peer_id && result.request_id == pending.request_id
-    }) {
+    if let Some(result) = reply.filter(|reply| reply.answers(pending)) {
         state.pending_source_open = None;
         if result.ok {
             ui.set_status_message(result.message.into());
@@ -191,7 +195,7 @@ pub(super) fn update_source_open(
                 result.message.into()
             });
         }
-    } else if Instant::now() >= pending.deadline {
+    } else if pending.expired() {
         state.pending_source_open = None;
         return Some("Source Monitor didn't respond. Check Premiere.".into());
     }

@@ -10,7 +10,9 @@ mod cursor_lock;
 mod debug_log;
 mod error_toast;
 mod installer;
+mod premiere_prefs;
 mod presets;
+mod request;
 mod safe_file;
 mod settings;
 mod tray;
@@ -34,6 +36,7 @@ impl Drop for InstanceMutexGuard {
 
 #[cfg(windows)]
 fn acquire_instance_mutex() -> Option<InstanceMutexGuard> {
+    // installer/premiere-spotlight.iss waits on this name (MyAppMutex) before upgrading.
     let name: Vec<u16> = "PremiereSpotlightInstanceMutex\0".encode_utf16().collect();
     let handle = unsafe {
         windows_sys::Win32::System::Threading::CreateMutexW(

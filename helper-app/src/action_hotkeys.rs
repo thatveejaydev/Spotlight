@@ -1,4 +1,8 @@
-use crate::{actions::Action, settings::AppSettings};
+use crate::{
+    actions::Action,
+    settings::{virtual_key, AppSettings},
+};
+#[cfg(test)]
 use global_hotkey::hotkey::Code;
 #[cfg(windows)]
 use global_hotkey::hotkey::{HotKey, Modifiers};
@@ -29,63 +33,6 @@ impl KeyPress {
         }
         matches!(self, Self::Consumed)
     }
-}
-
-pub(crate) fn virtual_key(code: Code) -> Option<u16> {
-    let name = code.to_string();
-    let letter_or_digit = name
-        .strip_prefix("Key")
-        .or_else(|| name.strip_prefix("Digit"));
-    if let Some([key]) = letter_or_digit.map(str::as_bytes) {
-        return Some(u16::from(*key));
-    }
-    if let Some(number) = name
-        .strip_prefix('F')
-        .and_then(|key| key.parse::<u16>().ok())
-    {
-        return Some(0x6f + number); // VK_F1 through VK_F24
-    }
-    if let Some(number) = name
-        .strip_prefix("Numpad")
-        .and_then(|key| key.parse::<u16>().ok())
-        .filter(|&n| n <= 9)
-    {
-        return Some(0x60 + number); // VK_NUMPAD0 through VK_NUMPAD9
-    }
-    // Windows virtual key codes for the remaining keys supported by the recorder.
-    Some(match code {
-        Code::Backspace => 0x08,
-        Code::Tab => 0x09,
-        Code::Enter => 0x0d,
-        Code::CapsLock => 0x14,
-        Code::Pause => 0x13,
-        Code::Space => 0x20,
-        Code::PageUp => 0x21,
-        Code::PageDown => 0x22,
-        Code::End => 0x23,
-        Code::Home => 0x24,
-        Code::ArrowLeft => 0x25,
-        Code::ArrowUp => 0x26,
-        Code::ArrowRight => 0x27,
-        Code::ArrowDown => 0x28,
-        Code::PrintScreen => 0x2c,
-        Code::Insert => 0x2d,
-        Code::Delete => 0x2e,
-        Code::NumLock => 0x90,
-        Code::ScrollLock => 0x91,
-        Code::Semicolon => 0xba,
-        Code::Equal => 0xbb,
-        Code::Comma => 0xbc,
-        Code::Minus => 0xbd,
-        Code::Period => 0xbe,
-        Code::Slash => 0xbf,
-        Code::Backquote => 0xc0,
-        Code::BracketLeft => 0xdb,
-        Code::Backslash => 0xdc,
-        Code::BracketRight => 0xdd,
-        Code::Quote => 0xde,
-        _ => return None,
-    })
 }
 
 #[cfg(windows)]
