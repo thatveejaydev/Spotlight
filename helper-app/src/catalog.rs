@@ -6,13 +6,105 @@ use nucleo_matcher::{
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
+/// Bin name the plugin reports for items at the top of the Project panel.
+/// Must match `PROJECT_ROOT_BIN` in `uxp-plugin/index.js`.
+pub const PROJECT_ROOT_BIN: &str = "Project root";
+/// Joins nested bin and preset folder names. Must match `BIN_PATH_SEPARATOR`
+/// in `uxp-plugin/index.js`.
+pub const BIN_PATH_SEPARATOR: &str = " / ";
+
+/// A search scope: one of the tabs below the search field. The ids are the
+/// values the Slint `active-catalog` property uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Catalog {
+    All,
+    Effects,
+    Project,
+    Actions,
+}
+
+impl Catalog {
+    pub const ALL: [Self; 4] = [Self::All, Self::Effects, Self::Project, Self::Actions];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Effects => "effects",
+            Self::Project => "project",
+            Self::Actions => "actions",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|catalog| catalog.id() == id)
+    }
+
+    fn includes_effects(self) -> bool {
+        matches!(self, Self::All | Self::Effects)
+    }
+
+    fn includes_project(self) -> bool {
+        matches!(self, Self::All | Self::Project)
+    }
+
+    fn includes_actions(self) -> bool {
+        matches!(self, Self::All | Self::Actions)
+    }
+}
+
+/// The kind of an effect entry. Serialized with the same camelCase names the
+/// UXP plugin uses for `effectType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EffectType {
+    VideoEffect,
+    AudioEffect,
+    VideoTransition,
+    AudioTransition,
+    Preset,
+    /// A type a newer plugin may send. It is kept out of search results.
+    #[serde(other)]
+    Unknown,
+}
+
+impl EffectType {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::VideoEffect => "videoEffect",
+            Self::AudioEffect => "audioEffect",
+            Self::VideoTransition => "videoTransition",
+            Self::AudioTransition => "audioTransition",
+            Self::Preset => "preset",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_transition(self) -> bool {
+        matches!(self, Self::VideoTransition | Self::AudioTransition)
+    }
+}
+
+impl From<&str> for EffectType {
+    fn from(id: &str) -> Self {
+        [
+            Self::VideoEffect,
+            Self::AudioEffect,
+            Self::VideoTransition,
+            Self::AudioTransition,
+            Self::Preset,
+        ]
+        .into_iter()
+        .find(|kind| kind.id() == id)
+        .unwrap_or(Self::Unknown)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EffectEntry {
     pub name: String,
     pub match_name: String,
-    /// "videoEffect" | "audioEffect" | "videoTransition" | "audioTransition" | "preset"
-    pub effect_type: String,
+    pub effect_type: EffectType,
     #[serde(default)]
     pub folder: String,
 }
@@ -54,19 +146,24 @@ impl ProjectItemEntry {
         if self.kind != ProjectItemKind::Bin {
             return None;
         }
-        Some(if self.bin_path == "Project root" {
+        Some(if self.bin_path == PROJECT_ROOT_BIN {
             self.name.clone()
         } else {
-            format!("{} / {}", self.bin_path, self.name)
+            format!("{}{BIN_PATH_SEPARATOR}{}", self.bin_path, self.name)
         })
     }
+}
+
+/// The bin path one level above `bin_path`, or `None` at the top level.
+pub fn parent_bin_path(bin_path: &str) -> Option<&str> {
+    bin_path.rsplit_once(BIN_PATH_SEPARATOR).map(|(parent, _)| parent)
 }
 
 fn in_bin_scope(item_bin_path: &str, scope: &str) -> bool {
     item_bin_path == scope
         || item_bin_path
             .strip_prefix(scope)
-            .is_some_and(|rest| rest.starts_with(" / "))
+            .is_some_and(|rest| rest.starts_with(BIN_PATH_SEPARATOR))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -202,24 +299,24 @@ impl CatalogEntry<'_> {
 
 impl EffectEntry {
     pub fn is_preset(&self) -> bool {
-        self.effect_type == "preset"
+        self.effect_type == EffectType::Preset
     }
 
     pub fn category_short(&self) -> &'static str {
-        match self.effect_type.as_str() {
-            "videoEffect" => "Video FX",
-            "audioEffect" => "Audio FX",
-            "videoTransition" => "Video Trans",
-            "audioTransition" => "Audio Transition",
-            "preset" => "Preset",
-            _ => "Effect",
+        match self.effect_type {
+            EffectType::VideoEffect => "Video FX",
+            EffectType::AudioEffect => "Audio FX",
+            EffectType::VideoTransition => "Video Trans",
+            EffectType::AudioTransition => "Audio Transition",
+            EffectType::Preset => "Preset",
+            EffectType::Unknown => "Effect",
         }
     }
 
     fn is_supported(&self) -> bool {
         matches!(
-            self.effect_type.as_str(),
-            "videoEffect" | "audioEffect" | "videoTransition" | "preset"
+            self.effect_type,
+            EffectType::VideoEffect | EffectType::AudioEffect | EffectType::VideoTransition | EffectType::Preset
         )
     }
 }
@@ -295,6 +392,7 @@ impl CatalogStore {
 
     #[cfg(test)]
     pub fn search(&mut self, query: &str, catalog: &str) -> Vec<SearchResult> {
+        let catalog = Catalog::from_id(catalog).expect("a catalog id");
         self.search_in_bin(query, catalog, None)
     }
 
@@ -317,18 +415,18 @@ impl CatalogStore {
     pub fn search_in_bin(
         &mut self,
         query: &str,
-        catalog: &str,
+        catalog: Catalog,
         bin_scope: Option<&str>,
     ) -> Vec<SearchResult> {
         let trimmed = query.trim();
-        let include_effects = matches!(catalog, "all" | "effects") && bin_scope.is_none();
+        let include_effects = catalog.includes_effects() && bin_scope.is_none();
         let effects = self
             .items
             .iter()
             .chain(&self.presets)
             .filter(move |item| include_effects && item.supported)
             .map(CatalogEntry::Effect);
-        let include_project = matches!(catalog, "all" | "project");
+        let include_project = catalog.includes_project();
         let project_items = self
             .project_items
             .iter()
@@ -339,7 +437,7 @@ impl CatalogStore {
             .map(CatalogEntry::ProjectItem);
         let actions = Action::ALL
             .into_iter()
-            .filter(|_| matches!(catalog, "all" | "actions") && bin_scope.is_none())
+            .filter(|_| catalog.includes_actions() && bin_scope.is_none())
             .map(CatalogEntry::Action);
         let entries = effects.chain(project_items).chain(actions);
         let usage = |item: &CatalogEntry| match item {
@@ -474,7 +572,7 @@ fn default_premiere_effects() -> Vec<EffectEntry> {
         .map(|(name, match_name, effect_type, folder)| EffectEntry {
             name: name.to_string(),
             match_name: match_name.to_string(),
-            effect_type: effect_type.to_string(),
+            effect_type: effect_type.into(),
             folder: folder.to_string(),
         })
         .collect()
@@ -522,7 +620,7 @@ mod tests {
         let effects = store.search("", "effects");
         for effect_type in ["videoEffect", "audioEffect", "videoTransition"] {
             assert!(effects.iter().any(|item| {
-                matches!(item, SearchResult::Effect(entry) if entry.effect_type == effect_type)
+                matches!(item, SearchResult::Effect(entry) if entry.effect_type.id() == effect_type)
             }));
         }
         assert!(matches!(
@@ -550,6 +648,38 @@ mod tests {
         }
         store.set_project_items(Vec::new());
         assert!(store.search("", "project").is_empty());
+    }
+
+    #[test]
+    fn effect_types_and_catalog_ids_keep_their_wire_names() {
+        for (json, expected) in [
+            ("videoEffect", EffectType::VideoEffect),
+            ("audioEffect", EffectType::AudioEffect),
+            ("videoTransition", EffectType::VideoTransition),
+            ("audioTransition", EffectType::AudioTransition),
+            ("preset", EffectType::Preset),
+            ("somethingNew", EffectType::Unknown),
+        ] {
+            let entry: EffectEntry = serde_json::from_value(serde_json::json!({
+                "name": "Blur", "matchName": "blur", "effectType": json
+            }))
+            .unwrap();
+            assert_eq!(entry.effect_type, expected);
+            assert_eq!(EffectType::from(json), expected);
+            if expected != EffectType::Unknown {
+                assert_eq!(serde_json::to_value(expected).unwrap(), json);
+                assert_eq!(expected.id(), json);
+            }
+        }
+        for catalog in Catalog::ALL {
+            assert_eq!(Catalog::from_id(catalog.id()), Some(catalog));
+        }
+        assert_eq!(
+            Catalog::ALL.map(Catalog::id),
+            ["all", "effects", "project", "actions"]
+        );
+        assert_eq!(parent_bin_path("Footage / B-Roll"), Some("Footage"));
+        assert_eq!(parent_bin_path("Footage"), None);
     }
 
     #[test]
@@ -595,7 +725,7 @@ mod tests {
         assert!(store.contains_bin_path("Footage / B-Roll"));
         assert!(!store.contains_bin_path("Missing"));
 
-        let in_footage = store.search_in_bin("", "project", Some("Footage"));
+        let in_footage = store.search_in_bin("", Catalog::Project, Some("Footage"));
         let names: Vec<_> = in_footage
             .iter()
             .map(|r| match r {
@@ -607,7 +737,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["B-Roll", "A-Cam.mov", "Street.mov"]);
 
-        let filtered = store.search_in_bin("street", "project", Some("Footage"));
+        let filtered = store.search_in_bin("street", Catalog::Project, Some("Footage"));
         assert!(matches!(
             filtered.as_slice(),
             [SearchResult::ProjectItem(item)] if item.item_id == "c2"

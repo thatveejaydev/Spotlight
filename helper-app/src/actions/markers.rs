@@ -112,7 +112,7 @@ impl MarkerRequest {
         Self {
             peer_id,
             request_id,
-            deadline: Instant::now() + crate::ACTION_TIMEOUT,
+            deadline: Instant::now() + super::ACTION_TIMEOUT,
         }
     }
 

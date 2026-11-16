@@ -6,7 +6,6 @@ target/
 
 # Packaged binaries & archives
 dist/
-installer/
 *.exe
 *.ccx
 *.zip

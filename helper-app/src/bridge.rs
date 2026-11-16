@@ -2,7 +2,7 @@ use crate::actions::{
     markers::{MarkerCommand, MarkerEvent, MarkerReply, MarkerRequest},
     Action, ActionResult,
 };
-use crate::catalog::{EffectEntry, ProjectItemEntry};
+use crate::catalog::{EffectEntry, EffectType, ProjectItemEntry};
 use crate::debug_log::{self, LogKind};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,7 +19,34 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime},
 };
-use tungstenite::{accept, client, Message};
+use tungstenite::{
+    accept_hdr, client,
+    handshake::server::{ErrorResponse, Request, Response},
+    Message,
+};
+
+/// Browsers attach an `http(s)` Origin to every WebSocket handshake, so a web page
+/// could otherwise connect to the bridge. Premiere's UXP plugin and a second
+/// Spotlight instance send no Origin or a non-web one, and local pages stay allowed.
+fn origin_allowed(origin: Option<&str>) -> bool {
+    let Some(origin) = origin.map(str::trim).filter(|origin| !origin.is_empty()) else {
+        return true;
+    };
+    let lower = origin.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        // Non-web schemes (and the opaque "null") are kept so a UXP host origin can never lock the plugin out.
+        return true;
+    };
+    let host = if let Some(bracketed) = rest.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or_default()
+    } else {
+        rest.split([':', '/']).next().unwrap_or_default()
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
 
 #[cfg(windows)]
 mod ws_wait {
@@ -307,7 +334,7 @@ pub enum OutgoingHelperMessage {
         #[serde(rename = "matchName")]
         match_name: String,
         #[serde(rename = "effectType")]
-        effect_type: String,
+        effect_type: EffectType,
         #[serde(rename = "videoTransitionDuration")]
         video_transition_duration: TransitionDurationPref,
         #[serde(rename = "audioTransitionDuration")]
@@ -1147,7 +1174,7 @@ impl BridgeClients {
             return None;
         }
         let (video_transition_duration, audio_transition_duration) =
-            if entry.effect_type == "videoTransition" || entry.effect_type == "audioTransition" {
+            if entry.effect_type.is_transition() {
                 read_premiere_transition_prefs()
             } else {
                 default_transition_prefs()
@@ -1158,7 +1185,7 @@ impl BridgeClients {
             request_id,
             name: entry.name.clone(),
             match_name: entry.match_name.clone(),
-            effect_type: entry.effect_type.clone(),
+            effect_type: entry.effect_type,
             video_transition_duration,
             audio_transition_duration,
         };
@@ -1226,7 +1253,25 @@ where
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 
-    let Ok(mut ws) = accept(stream) else {
+    #[allow(clippy::result_large_err)] // tungstenite fixes the callback signature.
+    let check_origin = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+        let origin = request
+            .headers()
+            .get("origin")
+            .map(|value| value.to_str().unwrap_or("<invalid>"));
+        if origin_allowed(origin) {
+            return Ok(response);
+        }
+        debug_log::log_event(
+            LogKind::Error,
+            "BRIDGE",
+            format!("Rejected WebSocket client from origin {}", origin.unwrap_or_default()),
+        );
+        let mut rejection = ErrorResponse::new(Some("Origin not allowed".into()));
+        *rejection.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
+        Err(rejection)
+    };
+    let Ok(mut ws) = accept_hdr(stream, check_origin) else {
         return;
     };
 
@@ -1500,6 +1545,7 @@ mod tests {
         assert_eq!(recipients, [7]);
         let command: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
         assert_eq!(command["requestId"], id);
+        assert_eq!(command["effectType"], "videoEffect");
         for request_id in [Some(id), None] {
             let mut reply = serde_json::json!({"type":"ack","ok":true,"message":"Applied effect"});
             if let Some(id) = request_id {
@@ -1732,6 +1778,32 @@ mod tests {
 
         let _ = ws.close(None);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn bridge_rejects_web_page_origins_but_keeps_local_and_plugin_clients() {
+        for origin in [None, Some(""), Some("null"), Some("uxp://plugin"), Some("file://"),
+            Some("http://localhost:8080"), Some("https://127.0.0.1"), Some("http://[::1]:3000/")]
+        {
+            assert!(origin_allowed(origin), "{origin:?} should be allowed");
+        }
+        for origin in ["https://example.com", "http://localhost.example.com", "HTTP://evil.test:3847"] {
+            assert!(!origin_allowed(Some(origin)), "{origin} should be rejected");
+        }
+
+        use tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bridge = BridgeClients::new();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_client(stream, bridge.clone(), Arc::new(|_event: BridgeEvent| {}));
+            bridge.peers().len()
+        });
+        let mut request = format!("ws://{addr}").into_client_request().unwrap();
+        request.headers_mut().insert("Origin", "https://example.com".parse().unwrap());
+        assert!(client(request, TcpStream::connect(addr).unwrap()).is_err());
+        assert_eq!(server.join().unwrap(), 0);
     }
 
     #[test]

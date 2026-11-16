@@ -1,6 +1,6 @@
 use crate::{
     bridge::{find_latest_premiere_prefs_file, read_preset_search_shortcuts, ShortcutSpec},
-    catalog::EffectEntry,
+    catalog::{EffectEntry, EffectType, BIN_PATH_SEPARATOR},
     error_toast::ErrorToast,
     win_focus,
 };
@@ -75,7 +75,7 @@ fn parse_library(xml: &str) -> Option<Vec<EffectEntry>> {
                 continue;
             };
             if item.has_tag_name("BinTreeItem") {
-                stack.push((id, format!("{folder} / {name}")));
+                stack.push((id, format!("{folder}{BIN_PATH_SEPARATOR}{name}")));
                 continue;
             }
             let is_preset = child(base, "Data")
@@ -93,7 +93,7 @@ fn parse_library(xml: &str) -> Option<Vec<EffectEntry>> {
             presets.push(EffectEntry {
                 name: name.to_owned(),
                 match_name: format!("preset:{}:{folder}{name}", folder.len()),
-                effect_type: "preset".to_owned(),
+                effect_type: EffectType::Preset,
                 folder: folder.clone(),
             });
         }

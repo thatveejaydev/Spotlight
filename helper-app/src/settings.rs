@@ -1,4 +1,4 @@
-use crate::actions::Action;
+use crate::{actions::Action, catalog::Catalog};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use serde::{Deserialize, Serialize};
 use slint::platform::Key;
@@ -11,6 +11,8 @@ use std::{
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Space";
 pub const DEFAULT_SETTINGS_HOTKEY: &str = "Ctrl+,";
 pub const DEFAULT_AUDIO_PREVIEW_HOTKEY: &str = "Ctrl+P";
+/// The id the settings view records the global launch hotkey under.
+pub const LAUNCH_SHORTCUT_ID: &str = "launch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -113,9 +115,116 @@ impl Default for AppSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteShortcutAction {
     ToggleSettings,
-    SelectCatalog(&'static str),
+    SelectCatalog(Catalog),
     PreviewAudio,
     RunAction(Action),
+}
+
+/// The configurable in-palette shortcuts. Each one is a field of [`AppSettings`],
+/// a row in the settings view and an entry in conflict checks. Add a slot here,
+/// then the compiler points at every match that needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteShortcut {
+    Settings,
+    CatalogAll,
+    CatalogEffects,
+    CatalogProject,
+    CatalogActions,
+    AudioPreview,
+}
+
+impl PaletteShortcut {
+    /// In conflict-check and matching order.
+    pub const ALL: [Self; 6] = [
+        Self::Settings,
+        Self::CatalogAll,
+        Self::CatalogEffects,
+        Self::CatalogProject,
+        Self::CatalogActions,
+        Self::AudioPreview,
+    ];
+
+    /// The id the settings view records and clears this shortcut under.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Settings => "settings",
+            Self::CatalogAll => "catalog_all",
+            Self::CatalogEffects => "catalog_effects",
+            Self::CatalogProject => "catalog_project",
+            Self::CatalogActions => "catalog_actions",
+            Self::AudioPreview => "audio_preview",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|slot| slot.id() == id)
+    }
+
+    /// Name used in "… is already assigned to <name>." messages.
+    pub fn conflict_name(self) -> &'static str {
+        match self {
+            Self::Settings => "Open Settings",
+            Self::CatalogAll => "All Catalog",
+            Self::CatalogEffects => "Effects Catalog",
+            Self::CatalogProject => "Project Catalog",
+            Self::CatalogActions => "Actions Catalog",
+            Self::AudioPreview => "Preview Audio",
+        }
+    }
+
+    /// Name used in "Cleared <name>." messages.
+    pub fn field_name(self) -> &'static str {
+        match self {
+            Self::Settings => "Open Settings shortcut",
+            Self::CatalogAll => "All catalog shortcut",
+            Self::CatalogEffects => "Effects catalog shortcut",
+            Self::CatalogProject => "Project catalog shortcut",
+            Self::CatalogActions => "Actions catalog shortcut",
+            Self::AudioPreview => "Preview audio shortcut",
+        }
+    }
+
+    /// The default binding, also used when a saved binding can't be parsed.
+    pub fn default_spec(self) -> &'static str {
+        match self {
+            Self::Settings => DEFAULT_SETTINGS_HOTKEY,
+            Self::AudioPreview => DEFAULT_AUDIO_PREVIEW_HOTKEY,
+            Self::CatalogAll | Self::CatalogEffects | Self::CatalogProject | Self::CatalogActions => "",
+        }
+    }
+
+    pub fn action(self) -> PaletteShortcutAction {
+        match self {
+            Self::Settings => PaletteShortcutAction::ToggleSettings,
+            Self::CatalogAll => PaletteShortcutAction::SelectCatalog(Catalog::All),
+            Self::CatalogEffects => PaletteShortcutAction::SelectCatalog(Catalog::Effects),
+            Self::CatalogProject => PaletteShortcutAction::SelectCatalog(Catalog::Project),
+            Self::CatalogActions => PaletteShortcutAction::SelectCatalog(Catalog::Actions),
+            Self::AudioPreview => PaletteShortcutAction::PreviewAudio,
+        }
+    }
+
+    pub fn get(self, settings: &AppSettings) -> &String {
+        match self {
+            Self::Settings => &settings.settings_hotkey,
+            Self::CatalogAll => &settings.catalog_all_hotkey,
+            Self::CatalogEffects => &settings.catalog_effects_hotkey,
+            Self::CatalogProject => &settings.catalog_project_hotkey,
+            Self::CatalogActions => &settings.catalog_actions_hotkey,
+            Self::AudioPreview => &settings.audio_preview_hotkey,
+        }
+    }
+
+    pub fn get_mut(self, settings: &mut AppSettings) -> &mut String {
+        match self {
+            Self::Settings => &mut settings.settings_hotkey,
+            Self::CatalogAll => &mut settings.catalog_all_hotkey,
+            Self::CatalogEffects => &mut settings.catalog_effects_hotkey,
+            Self::CatalogProject => &mut settings.catalog_project_hotkey,
+            Self::CatalogActions => &mut settings.catalog_actions_hotkey,
+            Self::AudioPreview => &mut settings.audio_preview_hotkey,
+        }
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -145,20 +254,12 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.hotkey = parse_hotkey_spec(&settings.hotkey)
         .map(|(_, canonical)| canonical)
         .unwrap_or_else(|_| DEFAULT_HOTKEY.to_string());
-    settings.settings_hotkey = normalize_optional_hotkey(
-        &settings.settings_hotkey,
-        DEFAULT_SETTINGS_HOTKEY,
-    );
-    settings.catalog_all_hotkey = normalize_optional_hotkey(&settings.catalog_all_hotkey, "");
-    settings.catalog_effects_hotkey =
-        normalize_optional_hotkey(&settings.catalog_effects_hotkey, "");
-    settings.catalog_project_hotkey =
-        normalize_optional_hotkey(&settings.catalog_project_hotkey, "");
-    settings.catalog_actions_hotkey =
-        normalize_optional_hotkey(&settings.catalog_actions_hotkey, "");
-    settings.audio_preview_hotkey =
-        normalize_optional_hotkey(&settings.audio_preview_hotkey, DEFAULT_AUDIO_PREVIEW_HOTKEY);
-    if shortcut_conflict("audio_preview", &settings.audio_preview_hotkey, &settings).is_some() {
+    for slot in PaletteShortcut::ALL {
+        let normalized = normalize_optional_hotkey(slot.get(&settings), slot.default_spec());
+        *slot.get_mut(&mut settings) = normalized;
+    }
+    let audio_preview = PaletteShortcut::AudioPreview;
+    if shortcut_conflict(audio_preview.id(), &settings.audio_preview_hotkey, &settings).is_some() {
         settings.audio_preview_hotkey.clear();
     }
     settings
@@ -526,24 +627,14 @@ pub fn match_palette_shortcut(
                 .ok()
                 .is_some_and(|(hk, _)| hk.id() == pressed.id())
     };
-    if matches_spec(&settings.settings_hotkey) {
-        return Some(PaletteShortcutAction::ToggleSettings);
-    }
-    if settings_open {
-        return None;
-    }
-    for (spec, catalog) in [
-        (&settings.catalog_all_hotkey, "all"),
-        (&settings.catalog_effects_hotkey, "effects"),
-        (&settings.catalog_project_hotkey, "project"),
-        (&settings.catalog_actions_hotkey, "actions"),
-    ] {
-        if matches_spec(spec) {
-            return Some(PaletteShortcutAction::SelectCatalog(catalog));
+    for slot in PaletteShortcut::ALL {
+        // Only the Open Settings shortcut works while the settings view is open.
+        if settings_open && slot != PaletteShortcut::Settings {
+            return None;
         }
-    }
-    if matches_spec(&settings.audio_preview_hotkey) {
-        return Some(PaletteShortcutAction::PreviewAudio);
+        if matches_spec(slot.get(settings)) {
+            return Some(slot.action());
+        }
     }
     Action::ALL.into_iter().find(|action| {
         !action.is_hold()
@@ -552,7 +643,7 @@ pub fn match_palette_shortcut(
 }
 
 pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> Option<String> {
-    if target == "audio_preview"
+    if target == PaletteShortcut::AudioPreview.id()
         && parse_palette_hotkey_spec(label).is_ok_and(|(hotkey, _)| {
             matches!(
                 hotkey.key,
@@ -562,28 +653,11 @@ pub fn shortcut_conflict(target: &str, label: &str, settings: &AppSettings) -> O
     {
         return Some("That key is reserved for palette navigation or actions.".into());
     }
-    let slots = [
-        ("launch", "Launch Hotkey", settings.hotkey.as_str()),
-        ("settings", "Open Settings", settings.settings_hotkey.as_str()),
-        ("catalog_all", "All Catalog", settings.catalog_all_hotkey.as_str()),
-        (
-            "catalog_effects",
-            "Effects Catalog",
-            settings.catalog_effects_hotkey.as_str(),
-        ),
-        (
-            "catalog_project",
-            "Project Catalog",
-            settings.catalog_project_hotkey.as_str(),
-        ),
-        (
-            "catalog_actions",
-            "Actions Catalog",
-            settings.catalog_actions_hotkey.as_str(),
-        ),
-        ("audio_preview", "Preview Audio", settings.audio_preview_hotkey.as_str()),
-    ];
-    for (slot, name, existing) in slots {
+    let launch = (LAUNCH_SHORTCUT_ID, "Launch Hotkey", settings.hotkey.as_str());
+    let palette = PaletteShortcut::ALL
+        .into_iter()
+        .map(|slot| (slot.id(), slot.conflict_name(), slot.get(settings).as_str()));
+    for (slot, name, existing) in std::iter::once(launch).chain(palette) {
         if slot != target && !existing.is_empty() && existing.eq_ignore_ascii_case(label) {
             return Some(format!("{label} is already assigned to {name}."));
         }
@@ -986,19 +1060,19 @@ mod tests {
         settings.catalog_actions_hotkey = "Ctrl+4".into();
         assert_eq!(
             match_palette_shortcut(&settings, false, "1", true, false, false, false),
-            Some(PaletteShortcutAction::SelectCatalog("all"))
+            Some(PaletteShortcutAction::SelectCatalog(Catalog::All))
         );
         assert_eq!(
             match_palette_shortcut(&settings, false, "2", true, false, false, false),
-            Some(PaletteShortcutAction::SelectCatalog("effects"))
+            Some(PaletteShortcutAction::SelectCatalog(Catalog::Effects))
         );
         assert_eq!(
             match_palette_shortcut(&settings, false, "3", true, false, false, false),
-            Some(PaletteShortcutAction::SelectCatalog("project"))
+            Some(PaletteShortcutAction::SelectCatalog(Catalog::Project))
         );
         assert_eq!(
             match_palette_shortcut(&settings, false, "4", true, false, false, false),
-            Some(PaletteShortcutAction::SelectCatalog("actions"))
+            Some(PaletteShortcutAction::SelectCatalog(Catalog::Actions))
         );
         assert!(shortcut_conflict("catalog_project", "Ctrl+4", &settings).is_some());
         // Catalog shortcuts stay inactive while Settings is open.
@@ -1057,5 +1131,25 @@ mod tests {
         assert!(resolve_open_effect_controls(false, true));
         assert!(resolve_open_effect_controls(true, false));
         assert!(!resolve_open_effect_controls(true, true));
+    }
+
+    #[test]
+    fn palette_shortcut_table_matches_settings_fields_and_defaults() {
+        let defaults = AppSettings::default();
+        let mut ids = std::collections::HashSet::new();
+        for slot in PaletteShortcut::ALL {
+            assert!(ids.insert(slot.id()), "duplicate id {}", slot.id());
+            assert_ne!(slot.id(), LAUNCH_SHORTCUT_ID);
+            assert_eq!(PaletteShortcut::from_id(slot.id()), Some(slot));
+            assert_eq!(slot.get(&defaults), slot.default_spec());
+            let mut settings = AppSettings::default();
+            *slot.get_mut(&mut settings) = "F9".into();
+            let changed: Vec<_> = PaletteShortcut::ALL
+                .into_iter()
+                .filter(|other| other.get(&settings) == "F9")
+                .collect();
+            assert_eq!(changed, [slot], "{slot:?} must own exactly one settings field");
+        }
+        assert_eq!(PaletteShortcut::from_id("launch"), None);
     }
 }

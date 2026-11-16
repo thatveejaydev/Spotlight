@@ -434,7 +434,7 @@ fn wire_palette(ui: &SpotlightWindow, ctx: &AppCtx, debug_log_ctrl: &Rc<DebugLog
     ui.on_catalog_changed(move || {
         c.with_state(|ui, st| {
             clear_marker_picker(ui, st);
-            if ui.get_active_catalog().as_str() != "project" {
+            if current_catalog(ui) != Catalog::Project {
                 clear_bin_scope(ui, st);
             }
             st.selected_abs_index = 0;
@@ -697,7 +697,7 @@ fn wire_registered_hotkey_events(
         if rec_flag.load(Ordering::Acquire) {
             // Windows delivers the registered launch chord here instead of to the recorder.
             let _ = ui_weak.upgrade_in_event_loop(|ui| {
-                if ui.get_recording_hotkey() && ui.get_recording_target() != "launch" {
+                if ui.get_recording_hotkey() && ui.get_recording_target() != settings::LAUNCH_SHORTCUT_ID {
                     ui.set_settings_feedback_error(true);
                     ui.set_settings_feedback(format!(
                         "{} is already assigned to Launch Hotkey.", ui.get_hotkey_label(),
@@ -725,38 +725,22 @@ fn modifier_label(modifier: AlternateModifier) -> &'static str {
     }
 }
 
-fn palette_shortcut_slot_mut<'a>(
-    settings: &'a mut AppSettings,
-    target: &str,
-) -> Option<(&'static str, &'a mut String)> {
-    match target {
-        "settings" => Some(("Open Settings shortcut", &mut settings.settings_hotkey)),
-        "catalog_all" => Some(("All catalog shortcut", &mut settings.catalog_all_hotkey)),
-        "catalog_effects" => {
-            Some(("Effects catalog shortcut", &mut settings.catalog_effects_hotkey))
-        }
-        "catalog_project" => {
-            Some(("Project catalog shortcut", &mut settings.catalog_project_hotkey))
-        }
-        "catalog_actions" => {
-            Some(("Actions catalog shortcut", &mut settings.catalog_actions_hotkey))
-        }
-        "audio_preview" => Some(("Preview audio shortcut", &mut settings.audio_preview_hotkey)),
-        _ => None,
-    }
-}
-
 fn sync_settings_ui(ui: &SpotlightWindow, settings: &AppSettings) {
     apply_palette_theme(ui, settings.theme);
     ui.set_hotkey_label(settings.hotkey.clone().into());
     ui.set_open_effect_controls_default(settings.open_effect_controls_by_default);
     ui.set_alternate_modifier(settings.alternate_modifier.as_str().into());
-    ui.set_settings_hotkey_label(settings.settings_hotkey.clone().into());
-    ui.set_catalog_all_hotkey_label(settings.catalog_all_hotkey.clone().into());
-    ui.set_catalog_effects_hotkey_label(settings.catalog_effects_hotkey.clone().into());
-    ui.set_catalog_project_hotkey_label(settings.catalog_project_hotkey.clone().into());
-    ui.set_catalog_actions_hotkey_label(settings.catalog_actions_hotkey.clone().into());
-    ui.set_audio_preview_hotkey_label(settings.audio_preview_hotkey.clone().into());
+    for slot in PaletteShortcut::ALL {
+        let label = SharedString::from(slot.get(settings).as_str());
+        match slot {
+            PaletteShortcut::Settings => ui.set_settings_hotkey_label(label),
+            PaletteShortcut::CatalogAll => ui.set_catalog_all_hotkey_label(label),
+            PaletteShortcut::CatalogEffects => ui.set_catalog_effects_hotkey_label(label),
+            PaletteShortcut::CatalogProject => ui.set_catalog_project_hotkey_label(label),
+            PaletteShortcut::CatalogActions => ui.set_catalog_actions_hotkey_label(label),
+            PaletteShortcut::AudioPreview => ui.set_audio_preview_hotkey_label(label),
+        }
+    }
     ui.set_action_hotkeys(ModelRc::new(VecModel::from(Action::ALL.map(|action| ActionHotkeyUI {
         id: action.id().into(),
         label: action.name().into(),
@@ -803,7 +787,7 @@ fn apply_hotkey_update(
     hotkey: HotKey,
     label: String,
 ) -> Result<(), String> {
-    if let Some(conflict) = settings::shortcut_conflict("launch", &label, &state.settings) {
+    if let Some(conflict) = settings::shortcut_conflict(settings::LAUNCH_SHORTCUT_ID, &label, &state.settings) {
         show_settings_error(ui, conflict.clone());
         sync_settings_ui(ui, &state.settings);
         return Err(conflict);
@@ -882,7 +866,7 @@ fn reload_settings_live(
     state: &mut AppState,
     hotkey_ctrl: &Rc<RefCell<HotkeyController>>,
 ) {
-    let (loaded, mut feedback, file_warning) = settings::load_settings_with_feedback();
+    let (mut loaded, mut feedback, file_warning) = settings::load_settings_with_feedback();
     if file_warning.is_some() {
         // Keep the working settings instead of swapping in defaults from an unreadable file.
         show_settings_error(
@@ -891,21 +875,15 @@ fn reload_settings_live(
         );
         return;
     }
-    state.settings.theme = loaded.theme;
-    state.settings.open_effect_controls_by_default = loaded.open_effect_controls_by_default;
-    state.settings.alternate_modifier = loaded.alternate_modifier;
-    state.settings.settings_hotkey = loaded.settings_hotkey;
-    state.settings.catalog_all_hotkey = loaded.catalog_all_hotkey;
-    state.settings.catalog_effects_hotkey = loaded.catalog_effects_hotkey;
-    state.settings.catalog_project_hotkey = loaded.catalog_project_hotkey;
-    state.settings.catalog_actions_hotkey = loaded.catalog_actions_hotkey;
-    state.settings.audio_preview_hotkey = loaded.audio_preview_hotkey;
-    state.settings.auto_preview_audio = loaded.auto_preview_audio;
-    state.settings.action_hotkeys.clear();
+    // Every setting comes straight from the file except two: the launch hotkey
+    // stays until the new one registers, and action hotkeys are re-validated below.
+    let loaded_hotkey = std::mem::replace(&mut loaded.hotkey, std::mem::take(&mut state.settings.hotkey));
+    let loaded_action_hotkeys = std::mem::take(&mut loaded.action_hotkeys);
+    state.settings = loaded;
 
     let mut error_msg = None;
-    if let Ok((hotkey, label)) = settings::parse_hotkey_spec(&loaded.hotkey) {
-        if let Some(conflict) = settings::shortcut_conflict("launch", &label, &state.settings) {
+    if let Ok((hotkey, label)) = settings::parse_hotkey_spec(&loaded_hotkey) {
+        if let Some(conflict) = settings::shortcut_conflict(settings::LAUNCH_SHORTCUT_ID, &label, &state.settings) {
             error_msg = Some(conflict);
         } else if let Err(err) = hotkey_ctrl.borrow_mut().apply(hotkey, label.clone()) {
             error_msg = Some(err);
@@ -914,12 +892,13 @@ fn reload_settings_live(
         }
     }
     if let Some(err) = error_msg {
-        if settings::shortcut_conflict("audio_preview", &state.settings.audio_preview_hotkey, &state.settings).is_some() {
-            state.settings.audio_preview_hotkey.clear();
+        let audio_preview = PaletteShortcut::AudioPreview;
+        if settings::shortcut_conflict(audio_preview.id(), audio_preview.get(&state.settings), &state.settings).is_some() {
+            audio_preview.get_mut(&mut state.settings).clear();
         }
         feedback.push(err);
     }
-    state.settings.action_hotkeys = loaded.action_hotkeys;
+    state.settings.action_hotkeys = loaded_action_hotkeys;
     feedback.extend(settings::normalize_action_hotkeys(&mut state.settings));
     if feedback.is_empty() {
         ui.set_settings_feedback_error(false);
@@ -944,13 +923,13 @@ fn toggle_settings_view(ui: &SpotlightWindow, state: &mut AppState, rec_flag: &A
     }
 }
 
-fn jump_to_catalog(ui: &SpotlightWindow, state: &mut AppState, target: &str) {
-    if ui.get_active_catalog().as_str() == target {
+fn jump_to_catalog(ui: &SpotlightWindow, state: &mut AppState, target: Catalog) {
+    if current_catalog(ui) == target {
         return;
     }
     clear_marker_picker(ui, state);
-    ui.set_active_catalog(target.into());
-    if target != "project" {
+    set_catalog(ui, target);
+    if target != Catalog::Project {
         clear_bin_scope(ui, state);
     }
     state.selected_abs_index = 0;
@@ -984,7 +963,7 @@ fn capture_shortcut(
     event: (&str, bool, bool, bool, bool),
 ) {
     let (text, ctrl, alt, shift, meta) = event;
-    if target == "launch" {
+    if target == settings::LAUNCH_SHORTCUT_ID {
         match settings::hotkey_from_slint_event(text, ctrl, alt, shift, meta) {
             Ok(None) => {}
             Ok(Some((hotkey, label))) => {
@@ -1009,8 +988,8 @@ fn capture_shortcut(
                 show_settings_error(ui, conflict);
                 return;
             }
-            if let Some((_, slot)) = palette_shortcut_slot_mut(&mut st.settings, target) {
-                *slot = label.clone();
+            if let Some(slot) = PaletteShortcut::from_id(target) {
+                *slot.get_mut(&mut st.settings) = label.clone();
                 let _ = save_and_sync_settings(ui, &st.settings, format!("Saved shortcut: {label}"));
             }
         }
@@ -1025,9 +1004,9 @@ fn clear_shortcut(ctx: &AppCtx, ui: &SpotlightWindow, target: &str) {
         update_action_hotkey(ui, &mut st, action, None);
         return;
     }
-    if let Some((slot_name, slot)) = palette_shortcut_slot_mut(&mut st.settings, target) {
-        slot.clear();
-        let _ = save_and_sync_settings(ui, &st.settings, format!("Cleared {slot_name}."));
+    if let Some(slot) = PaletteShortcut::from_id(target) {
+        slot.get_mut(&mut st.settings).clear();
+        let _ = save_and_sync_settings(ui, &st.settings, format!("Cleared {}.", slot.field_name()));
     }
 }
 

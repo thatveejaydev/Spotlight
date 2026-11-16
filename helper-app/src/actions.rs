@@ -1,7 +1,10 @@
 pub mod markers;
 
 use serde::Serialize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long Spotlight waits for Premiere to answer a command.
+pub const ACTION_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
