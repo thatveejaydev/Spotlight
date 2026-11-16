@@ -1,107 +1,15 @@
 use crate::{
-    bridge::{BridgeClients, MediaCatalog},
+    bridge::{BridgeClients, MarkerEvent, MediaCatalog},
     premiere_prefs::{read_marker_shortcuts, ShortcutSpec},
+    protocol::{MarkerCommand, MarkerReply, SequenceMarker},
     request::PendingRequest,
     win_focus,
 };
-use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
     sync::Arc,
     time::{Duration, Instant},
 };
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SequenceRef {
-    project_id: String,
-    sequence_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SequenceMarker {
-    sequence_id: String,
-    pub sequence_name: String,
-    pub name: String,
-    pub comments: String,
-    ticks: String,
-}
-
-impl SequenceMarker {
-    pub fn title(&self) -> &str {
-        if self.name.trim().is_empty() {
-            "Unnamed marker"
-        } else {
-            &self.name
-        }
-    }
-
-    fn ticks(&self) -> i128 {
-        self.ticks.parse().unwrap_or_default()
-    }
-
-    pub fn position(&self) -> String {
-        const TICKS_PER_MILLISECOND: u128 = 254_016_000;
-        let ticks = self.ticks();
-        let millis = ticks.unsigned_abs() / TICKS_PER_MILLISECOND;
-        let seconds = millis / 1000;
-        let sign = if ticks < 0 { "-" } else { "" };
-        format!(
-            "{sign}{:02}:{:02}:{:02}.{:03}",
-            seconds / 3600,
-            seconds / 60 % 60,
-            seconds % 60,
-            millis % 1000
-        )
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MarkerLocation {
-    sequence: SequenceRef,
-    ticks: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
-pub enum MarkerCommand {
-    List,
-    Seek {
-        #[serde(rename = "projectId")]
-        project_id: String,
-        marker: SequenceMarker,
-    },
-    Prepare,
-    Confirm {
-        location: MarkerLocation,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MarkerReply {
-    List {
-        #[serde(rename = "projectId")]
-        project_id: String,
-        #[serde(default, rename = "projectName")]
-        project_name: String,
-        markers: Vec<SequenceMarker>,
-    },
-    Sought,
-    Prepared {
-        location: MarkerLocation,
-        created: bool,
-    },
-    Confirmed,
-}
-
-pub struct MarkerEvent {
-    pub peer_id: usize,
-    pub request_id: u64,
-    pub result: Option<MarkerReply>,
-    pub message: String,
-}
 
 impl MarkerEvent {
     fn answers(&self, request: &PendingRequest) -> bool {

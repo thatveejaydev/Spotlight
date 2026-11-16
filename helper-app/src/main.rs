@@ -12,6 +12,7 @@ mod error_toast;
 mod installer;
 mod premiere_prefs;
 mod presets;
+mod protocol;
 mod request;
 mod safe_file;
 mod settings;

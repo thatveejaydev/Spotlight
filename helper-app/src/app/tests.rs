@@ -228,7 +228,7 @@ fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies()
     preview.resolved(&ui, bridge::AudioPreviewResult {
         peer_id: 7,
         request_id: request["requestId"].as_u64().unwrap(),
-        source: Some(bridge::AudioPreviewSource {
+        source: Some(crate::protocol::AudioPreviewSource {
             path: "stale.wav".into(),
             in_seconds: None,
             out_seconds: None,
@@ -256,7 +256,7 @@ fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies()
     preview.resolved(&ui, bridge::AudioPreviewResult {
         peer_id: 7,
         request_id: identify["requestId"].as_u64().unwrap(),
-        source: Some(bridge::AudioPreviewSource {
+        source: Some(crate::protocol::AudioPreviewSource {
             path: "renamed.wav".into(),
             in_seconds: None,
             out_seconds: None,
@@ -519,7 +519,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
             },
             "message": ""
         });
-        let bridge::IncomingPluginMessage::MarkerAck { request_id, result, message } =
+        let crate::protocol::IncomingPluginMessage::MarkerAck { request_id, result, message } =
             serde_json::from_value(json).unwrap()
         else { panic!("Expected a marker reply") };
         MarkerEvent { peer_id: 7, request_id, result, message }
@@ -557,7 +557,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
     receive_marker(&ui, &mut state, &bridge, MarkerEvent {
         peer_id: 7,
         request_id: seek["requestId"].as_u64().unwrap(),
-        result: Some(actions::markers::MarkerReply::Sought),
+        result: Some(crate::protocol::MarkerReply::Sought),
         message: String::new(),
     }, &toast);
     assert!(!state.is_visible && !ui.get_marker_picker());

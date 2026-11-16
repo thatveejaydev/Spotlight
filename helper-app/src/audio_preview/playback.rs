@@ -1,4 +1,4 @@
-use crate::bridge::AudioPreviewSource;
+use crate::protocol::AudioPreviewSource;
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},

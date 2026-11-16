@@ -1,14 +1,11 @@
-use crate::actions::{
-    markers::{MarkerCommand, MarkerEvent, MarkerReply},
-    Action,
-};
-use crate::catalog::{EffectEntry, EffectType, ProjectItemEntry};
+use crate::actions::Action;
+use crate::catalog::{EffectEntry, ProjectItemEntry};
 use crate::debug_log::{self, LogKind};
-use crate::premiere_prefs::{
-    default_transition_prefs, read_premiere_transition_prefs, TransitionDurationPref,
+use crate::premiere_prefs::{default_transition_prefs, read_premiere_transition_prefs};
+use crate::protocol::{
+    AudioPreviewSource, IncomingPluginMessage, MarkerCommand, MarkerReply, OutgoingHelperMessage,
 };
 use crate::request::{CommandReply, PendingRequest};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::ErrorKind,
@@ -229,114 +226,6 @@ impl PeerSender {
 
 pub const BRIDGE_ADDRS: [&str; 2] = ["127.0.0.1:3847", "[::1]:3847"];
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum IncomingPluginMessage {
-    #[serde(rename = "catalog")]
-    Catalog { effects: Vec<EffectEntry> },
-    #[serde(rename = "ack")]
-    Ack {
-        ok: bool,
-        #[serde(rename = "requestId", default)]
-        request_id: Option<u64>,
-        #[serde(default)]
-        message: String,
-    },
-    #[serde(rename = "project_items", rename_all = "camelCase")]
-    ProjectItems {
-        request_id: u64,
-        project_id: Option<String>,
-        sequence_id: Option<String>,
-        items: Vec<ProjectItemEntry>,
-        /// How the plugin produced this list ("rescanned" or "cleared"); diagnostics only.
-        #[serde(default)]
-        scan_mode: Option<String>,
-        /// Time the plugin spent producing this list, in milliseconds; diagnostics only.
-        #[serde(default)]
-        scan_ms: Option<u64>,
-    },
-    #[serde(rename = "action_ack", rename_all = "camelCase")]
-    ActionAck {
-        request_id: u64,
-        ok: bool,
-        message: String,
-    },
-    #[serde(rename = "marker_ack", rename_all = "camelCase")]
-    MarkerAck { request_id: u64, result: Option<MarkerReply>, message: String },
-    #[serde(rename = "placement_ack", rename_all = "camelCase")]
-    PlacementAck {
-        request_id: u64,
-        ok: bool,
-        message: String,
-    },
-    #[serde(rename = "source_monitor_ack", rename_all = "camelCase")]
-    SourceMonitorAck {
-        request_id: u64,
-        ok: bool,
-        #[serde(default)]
-        message: String,
-    },
-    #[serde(rename = "audio_preview_ack", rename_all = "camelCase")]
-    AudioPreviewAck {
-        request_id: u64,
-        source: Option<AudioPreviewSource>,
-        #[serde(default)]
-        message: String,
-    },
-    #[serde(rename = "ping")]
-    Ping,
-    #[serde(rename = "show_window")]
-    ShowWindow,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum OutgoingHelperMessage {
-    #[serde(rename = "request_project_items", rename_all = "camelCase")]
-    RequestProjectItems { request_id: u64 },
-    #[serde(rename = "place_project_item", rename_all = "camelCase")]
-    PlaceProjectItem {
-        request_id: u64,
-        project_id: String,
-        sequence_id: String,
-        item_id: String,
-    },
-    #[serde(rename = "open_in_source_monitor", rename_all = "camelCase")]
-    OpenInSourceMonitor {
-        request_id: u64,
-        project_id: String,
-        item_id: String,
-    },
-    #[serde(rename = "request_audio_preview", rename_all = "camelCase")]
-    RequestAudioPreview {
-        request_id: u64,
-        project_id: String,
-        item_id: String,
-    },
-    #[serde(rename = "marker_command", rename_all = "camelCase")]
-    MarkerCommand {
-        request_id: u64,
-        #[serde(flatten)]
-        command: MarkerCommand,
-    },
-    #[serde(rename = "run_action", rename_all = "camelCase")]
-    RunAction { request_id: u64, action: Action },
-    #[serde(rename = "apply_effect")]
-    ApplyEffect {
-        #[serde(rename = "requestId")]
-        request_id: u64,
-        name: String,
-        #[serde(rename = "matchName")]
-        match_name: String,
-        #[serde(rename = "effectType")]
-        effect_type: EffectType,
-        #[serde(rename = "videoTransitionDuration")]
-        video_transition_duration: TransitionDurationPref,
-        #[serde(rename = "audioTransitionDuration")]
-        audio_transition_duration: TransitionDurationPref,
-    },
-}
-
 pub enum BridgeEvent {
     ClientConnected,
     ClientDisconnected,
@@ -358,18 +247,18 @@ pub struct ApplyResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioPreviewSource {
-    pub path: std::path::PathBuf,
-    pub in_seconds: Option<f64>,
-    pub out_seconds: Option<f64>,
-}
-
 pub struct AudioPreviewResult {
     pub peer_id: usize,
     pub request_id: u64,
     pub source: Option<AudioPreviewSource>,
+    pub message: String,
+}
+
+/// The plugin's reply to a marker command.
+pub struct MarkerEvent {
+    pub peer_id: usize,
+    pub request_id: u64,
+    pub result: Option<MarkerReply>,
     pub message: String,
 }
 

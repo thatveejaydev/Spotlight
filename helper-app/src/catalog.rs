@@ -1,4 +1,4 @@
-use crate::actions::{markers::SequenceMarker, Action};
+use crate::{actions::Action, protocol::SequenceMarker};
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,

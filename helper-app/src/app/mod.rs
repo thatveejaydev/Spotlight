@@ -22,11 +22,11 @@ use results::*;
 use crate::{
     action_hotkeys,
     actions::{
-        markers::{MarkerDialog, MarkerEvent, MarkerPicker},
+        markers::{MarkerDialog, MarkerPicker},
         Action,
     },
     audio_preview::AudioPreview,
-    bridge::{ApplyResult, BridgeClients, BridgeEvent, MediaCatalog},
+    bridge::{ApplyResult, BridgeClients, BridgeEvent, MarkerEvent, MediaCatalog},
     catalog::{Catalog, CatalogStore, EffectEntry, EffectType, ProjectItemEntry, ProjectItemKind, SearchResult},
     debug_log::{self, DebugLogController, LogKind},
     error_toast::{self, ErrorToast},
@@ -40,7 +40,7 @@ use crate::{
     win_focus, ActionHotkeyUI, EffectItemUI, SpotlightWindow,
 };
 #[cfg(test)]
-use crate::{actions, bridge, catalog};
+use crate::{bridge, catalog};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
