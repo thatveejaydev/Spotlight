@@ -41,7 +41,8 @@ This builds `helper-app` in release mode and outputs `dist\PremiereSpotlightSetu
 ### Project layout
 - `helper-app/src/main.rs`: command-line flags, the single-instance check and startup.
 - `helper-app/src/app/`: the palette app. `startup.rs` wires the window, bridge and hooks to the shared state; `results`, `palette`, `activation` and `requests` hold the search list, window, result activation and Premiere replies.
-- `helper-app/src/bridge.rs`: the WebSocket server and the messages exchanged with the plugin.
+- `helper-app/src/bridge.rs`: the WebSocket server and the connected plugins.
+- `helper-app/src/protocol.rs`: the JSON messages exchanged with the plugin.
 - `helper-app/src/premiere_prefs.rs`: reads Premiere's preferences and keyboard shortcut profiles.
 - `helper-app/src/win_focus/`: Windows integration (processes, foreground, synthetic input, window style and placement).
 - `helper-app/ui/`: Slint windows. `spotlight.slint` is the file `build.rs` compiles.
