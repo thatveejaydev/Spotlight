@@ -400,6 +400,16 @@ mod windows {
                 if KEYS.with(|keys| {
                     let state = &keys[usize::from(key)];
                     let mut press = state.get();
+                    // The hook can miss key-ups (e.g. none arrive while the palette has focus).
+                    // Before this event the async state still shows the key's previous state, so a
+                    // "repeat" for a key that is not down is really a fresh press after a lost key-up.
+                    if !injected
+                        && !up
+                        && !matches!(press, KeyPress::Up)
+                        && GetAsyncKeyState(i32::from(key)) >= 0
+                    {
+                        press = KeyPress::Up;
+                    }
                     let handled = press.handle(injected, up, || dispatch_key(key));
                     state.set(press);
                     handled

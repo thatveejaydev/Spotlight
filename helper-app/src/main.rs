@@ -497,6 +497,15 @@ fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     update_palette_caption(ui, our_hwnd);
     win_focus::ensure_palette_topmost(our_hwnd);
     win_focus::force_foreground(our_hwnd);
+    debug_log::log_event(
+        LogKind::Focus,
+        "SHOW",
+        format!(
+            "palette={our_hwnd:#x} fg_after_force={:#x} prev={:#x}",
+            win_focus::get_foreground_hwnd(),
+            state.previous_hwnd
+        ),
+    );
     win_focus::set_palette_visible(true);
     start_focus_grace_timer();
     if !ui.get_settings_open() {
@@ -2329,10 +2338,19 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
                 FocusOutcome::RetryForeground => {
+                    debug_log::log_event(
+                        LogKind::Focus,
+                        "FOCUS",
+                        format!("retry foreground (fg={:#x})", win_focus::get_foreground_hwnd()),
+                    );
                     win_focus::force_foreground(our_hwnd);
                 }
                 FocusOutcome::HideLostFocus => {
-                    debug_log::log_event(LogKind::Focus, "FOCUS", "Lost focus -> hide palette");
+                    debug_log::log_event(
+                        LogKind::Focus,
+                        "FOCUS",
+                        format!("Lost focus -> hide palette (fg={:#x})", win_focus::get_foreground_hwnd()),
+                    );
                     stop_shortcut_recording(&ui, Some(&rec_flag));
                     hide_palette(ui, &mut state_ref.borrow_mut());
                 }

@@ -83,6 +83,18 @@ fn kind_color(kind: LogKind) -> Color {
     }
 }
 
+/// Appends log lines to the file named by `PREMIERE_SPOTLIGHT_LOG`, when set (diagnostics only).
+fn append_log_file(line: &str) {
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var_os("PREMIERE_SPOTLIGHT_LOG").map(Into::into)) else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 pub fn record_ui_timer_tick() {
     UI_TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
 }
@@ -97,6 +109,7 @@ pub fn record_fg_hook_event() {
 
 pub fn log_event(kind: LogKind, tag: &str, message: impl AsRef<str>) {
     let line = format!("[{}] [{}] {}", format_timestamp(), tag, message.as_ref());
+    append_log_file(&line);
     if let Ok(mut guard) = shared().lock() {
         if guard.entries.len() >= MAX_LOG_ENTRIES {
             guard.entries.pop_back();
