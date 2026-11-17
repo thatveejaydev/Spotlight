@@ -185,30 +185,22 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
         BridgeEvent::ClientConnected => {
             let hotkey = ctx.state.borrow().settings.hotkey.clone();
             ui.set_bridge_connected(true);
-            ui.set_status_message(SharedString::from(format!(
-                "Connected to Premiere Pro · {hotkey}"
-            )));
+            show_status(ui, format!("Connected to Premiere Pro · {hotkey} opens Spotlight"));
         }
         BridgeEvent::ClientDisconnected => {
             let mut st = ctx.state.borrow_mut();
             st.premiere_context = None;
             st.context_request = None;
-            ui.set_context_summary("".into());
             st.results_dirty = true;
             sync_viewport_slice(ui, &mut st);
             drop(st);
             ui.set_bridge_connected(false);
-            ui.set_status_message(SharedString::from(
-                "Premiere disconnected · Standalone catalog active",
-            ));
+            show_status(ui, "Premiere disconnected. Built-in effects stay searchable.");
         }
         BridgeEvent::CatalogReceived(items) => {
             let hotkey = ctx.state.borrow().settings.hotkey.clone();
             ui.set_bridge_connected(true);
-            ui.set_status_message(SharedString::from(format!(
-                "Premiere synced ({} effects) · {hotkey}",
-                items.len()
-            )));
+            show_status(ui, format!("Synced {} effects from Premiere · {hotkey} opens Spotlight", items.len()));
             let mut st = ctx.state.borrow_mut();
             st.catalog.set_catalog(items);
             refresh_catalog_ui(ui, &mut st, true);
@@ -226,7 +218,7 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
                 ctx.toast.show(message, st.previous_hwnd);
             } else if !result.message.is_empty() {
                 debug_log::log_event(LogKind::Success, "APPLY", result.message.as_str());
-                ui.set_status_message(format!("Premiere: {}", result.message).into());
+                show_status(ui, result.message);
             }
             if let Some(open_effect_controls) = completed {
                 refresh_catalog_ui(ui, &mut st, true);
@@ -723,7 +715,7 @@ fn sync_settings_ui(ui: &SpotlightWindow, settings: &AppSettings) {
     ui.set_auto_preview_audio(settings.auto_preview_audio);
     ui.set_config_path_display(settings::config_path().to_string_lossy().into_owned().into());
     if !ui.get_bridge_connected() {
-        ui.set_status_message(format!("Ready · {}", settings.hotkey).into());
+        show_status(ui, format!("Ready · {}", settings.hotkey));
     }
 }
 

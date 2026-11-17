@@ -38,7 +38,7 @@ pub(super) fn apply_entry_with_options(
         }
     }
     if state.pending_placement.is_some() {
-        ui.set_status_message("A media placement is already in progress.".into());
+        show_status(ui, "A media placement is already in progress.");
         return Ok(None);
     }
     match chosen {
@@ -57,7 +57,7 @@ pub(super) fn apply_entry_with_options(
             let Some((request_id, recipients)) = bridge.send_apply(&entry) else {
                 return Err("Premiere effect bridge disconnected.".into());
             };
-            ui.set_status_message(format!("Applying {}…", entry.name).into());
+            show_status(ui, format!("Applying {}…", entry.name));
             state.pending_effects.insert(
                 request_id,
                 PendingEffect {
@@ -80,7 +80,7 @@ pub(super) fn apply_entry_with_options(
             let request_id = bridge
                 .place_project_item(catalog, entry.item_id.clone())
                 .map_err(SharedString::from)?;
-            ui.set_status_message(format!("Placing {}…", entry.name).into());
+            show_status(ui, format!("Placing {}…", entry.name));
             state.pending_placement = Some(PendingPlacement {
                 request: PendingRequest::new(catalog.peer_id, request_id),
                 recent: RecentItem {
@@ -144,9 +144,7 @@ pub(super) fn activate_action(
                 .get(action.id())
                 .filter(|spec| !spec.trim().is_empty())
             {
-                ui.set_status_message(
-                    format!("Hold {shortcut} in Premiere Pro to lock the horizontal axis.").into(),
-                );
+                show_status(ui, format!("Hold {shortcut} in Premiere Pro to lock the horizontal axis."));
             } else {
                 ui.set_settings_tab_index(1);
                 ui.set_settings_open(true);
@@ -237,7 +235,7 @@ pub(super) fn shift_activate_at(
                 OpenTarget::Timeline => bridge.open_sequence(catalog, item_id),
             }
             .map_err(SharedString::from)?;
-            ui.set_status_message(format!("Opening {}…", entry.name).into());
+            show_status(ui, format!("Opening {}…", entry.name));
             state.pending_open = Some(PendingOpen {
                 request: PendingRequest::new(catalog.peer_id, request_id),
                 target,
@@ -264,7 +262,7 @@ fn block_unavailable(
     let Some(reason) = availability.reason() else {
         return false;
     };
-    ui.set_status_message(reason.into());
+    show_status(ui, reason);
     debug_log::log_event(LogKind::Info, "UNAVAILABLE", reason);
     if let Some(row) = abs_index.checked_sub(state.scroll_offset).filter(|row| *row < VISIBLE_ROWS) {
         ui.set_flash_row(row as i32);

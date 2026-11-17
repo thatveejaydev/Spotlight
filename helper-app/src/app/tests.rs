@@ -18,18 +18,18 @@ mod at {
     pub const THEME_POPUP_LIGHT: Point = (505., 138.);
     /// Results list: first row's name, first and second rows' play/pause buttons, and
     /// the middle of the first row's progress line.
-    pub const FIRST_ROW_NAME: Point = (48., 111.);
-    pub const FIRST_ROW_PREVIEW_BUTTON: Point = (586., 111.);
-    pub const SECOND_ROW_PREVIEW_BUTTON: Point = (586., 149.);
-    pub const PREVIEW_TRACK_MIDDLE: Point = (310., 127.);
+    pub const FIRST_ROW_NAME: Point = (60., 104.);
+    pub const FIRST_ROW_PREVIEW_BUTTON: Point = (586., 104.);
+    pub const SECOND_ROW_PREVIEW_BUTTON: Point = (586., 141.);
+    pub const PREVIEW_TRACK_MIDDLE: Point = (310., 118.);
     /// Footer gear that opens Settings.
-    pub const SETTINGS_GEAR: Point = (594., 422.);
+    pub const SETTINGS_GEAR: Point = (597., 423.);
     /// Settings tabs and controls.
-    pub const HOTKEYS_TAB: Point = (193., 72.);
-    pub const ABOUT_TAB: Point = (375., 72.);
-    pub const LAUNCH_HOTKEY_BUTTON: Point = (490., 142.);
-    pub const FIRST_ACTION_RECORD: Point = (530., 128.);
-    pub const FIRST_ACTION_CLEAR: Point = (580., 128.);
+    pub const HOTKEYS_TAB: Point = (105., 66.);
+    pub const ABOUT_TAB: Point = (254., 66.);
+    pub const LAUNCH_HOTKEY_BUTTON: Point = (533., 125.);
+    pub const FIRST_ACTION_RECORD: Point = (530., 141.);
+    pub const FIRST_ACTION_CLEAR: Point = (581., 141.);
 }
 
 struct TestPlatform(Rc<MinimalSoftwareWindow>);
@@ -198,6 +198,7 @@ fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies()
         bin_path: "Audio".into(),
         kind: ProjectItemKind::Media,
         offline: false,
+        media_type: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -278,10 +279,9 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
     let ui = SpotlightWindow::new().unwrap();
     let row = |name: &str| EffectItemUI {
         name: name.into(),
-        category: "Media".into(),
-        folder: "Audio".into(),
-        badge_bg: Color::from_rgb_u8(0x21, 0x41, 0x68),
-        badge_fg: Color::from_rgb_u8(0xb9, 0xe5, 0xff),
+        detail: "Audio".into(),
+        icon: "audio".into(),
+        tint: Color::from_rgb_u8(125, 211, 252),
         ..EffectItemUI::default()
     };
     ui.set_results(ModelRc::new(VecModel::from(vec![
@@ -301,16 +301,16 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
     let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
     assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
     let fill = Rgb8Pixel { r: 0xa5, g: 0xb4, b: 0xfc };
-    assert_eq!(pixels[127 * width + 14], fill);
-    assert_eq!(pixels[127 * width + 605], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
-    assert_ne!(pixels[127 * width + 400], fill);
+    assert_eq!(pixels[119 * width + 14], fill);
+    assert_eq!(pixels[119 * width + 605], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
+    assert_ne!(pixels[119 * width + 400], fill);
     assert_ne!(pixels[165 * width + 80], fill);
-    // The progress fill and track meet the outline on y=129.
-    assert_eq!(pixels[128 * width + 40], fill);
-    assert_eq!(pixels[128 * width + 580], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
+    // The progress fill and track meet the outline on y=121.
+    assert_eq!(pixels[120 * width + 40], fill);
+    assert_eq!(pixels[120 * width + 580], Rgb8Pixel { r: 0x3e, g: 0x42, b: 0x5a });
 
     let corner_pixels = |pixels: &[Rgb8Pixel]| {
-        (127..130)
+        (119..122)
             .flat_map(|y| (6..12).chain(608..614).map(move |x| pixels[y * width + x]))
             .collect::<Vec<_>>()
     };
@@ -322,11 +322,11 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
     ui.set_preview_progress(1.0);
     assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
     assert_eq!(corner_pixels(&pixels), corners_with_track);
-    assert_eq!(pixels[128 * width + 605], fill);
+    assert_eq!(pixels[120 * width + 605], fill);
     ui.set_preview_progress(0.25);
     let icon = Rgb8Pixel { r: 0xc7, g: 0xd2, b: 0xfe };
     let icon_pixels = |pixels: &[Rgb8Pixel]| {
-        (102..121).flat_map(|y| &pixels[y * width + 574..y * width + 599])
+        (92..116).flat_map(|y| &pixels[y * width + 574..y * width + 599])
             .filter(|&&pixel| pixel == icon).count()
     };
     assert!(icon_pixels(&pixels) > 0);
@@ -342,9 +342,9 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
         apply_palette_theme(&ui, theme);
         assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
         let [r, g, b] = fill;
-        assert_eq!(pixels[127 * width + 14], Rgb8Pixel { r, g, b });
+        assert_eq!(pixels[119 * width + 14], Rgb8Pixel { r, g, b });
         let [r, g, b] = track;
-        assert_eq!(pixels[127 * width + 605], Rgb8Pixel { r, g, b });
+        assert_eq!(pixels[119 * width + 605], Rgb8Pixel { r, g, b });
     }
 
     let played = Rc::new(Cell::new(false));
@@ -389,7 +389,7 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
 fn error_toast_renders_a_separate_notification() {
     let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
-    let (width, height) = (304, 54);
+    let (width, height) = (320, 56);
     adapter.set_size(PhysicalSize::new(width as u32, height as u32));
     let toast = Rc::new(ErrorToast::default());
     toast.show("Select at least one timeline clip first.".into(), 0);
@@ -398,9 +398,10 @@ fn error_toast_renders_a_separate_notification() {
     assert!(adapter.draw_if_needed(|renderer| {
         renderer.render(&mut pixels, width);
     }));
-    assert_eq!(pixels[width * (height / 2) + 15].r, 0xca);
+    // The red accent runs down the left edge, and the message is light text beside the icon.
+    assert_eq!(pixels[width * (height / 2) + 1], Rgb8Pixel { r: 0xe0, g: 0x72, b: 0x7e });
     assert!(pixels.chunks_exact(width).any(|row| {
-        row[26..width - 12].iter().any(|pixel| pixel.g > 160)
+        row[40..width - 12].iter().any(|pixel| pixel.g > 160)
     }));
 }
 
@@ -452,13 +453,11 @@ fn premiere_context_dims_rows_and_blocks_them_without_hiding() {
     assert!(!first_row(&ui).disabled);
     receive_premiere_context(&ui, &mut state, reply(request_id + 100, Some(context(0))));
     assert!(!first_row(&ui).disabled);
-    assert_eq!(ui.get_context_summary(), "");
 
     receive_premiere_context(&ui, &mut state, reply(request_id, Some(context(0))));
     let row = first_row(&ui);
     assert!(row.disabled);
-    assert_eq!(row.reason, "Select clips in the Timeline first.");
-    assert_eq!(ui.get_context_summary(), "Sequence 01 · No selection");
+    assert_eq!(row.subtitle, "Select clips in the Timeline first.");
 
     // Enter on the dimmed row explains instead of sending the command.
     assert!(apply_entry_at(0, &ui, &mut state, &bridge).unwrap().is_none());
@@ -474,12 +473,10 @@ fn premiere_context_dims_rows_and_blocks_them_without_hiding() {
     assert_eq!(ui.get_flash_row(), -1);
     receive_premiere_context(&ui, &mut state, reply(request_id, None));
     assert!(!first_row(&ui).disabled);
-    assert_eq!(ui.get_context_summary(), "");
 
     let request_id = open(&ui, &mut state);
     receive_premiere_context(&ui, &mut state, reply(request_id, Some(context(2))));
     assert!(!first_row(&ui).disabled);
-    assert_eq!(ui.get_context_summary(), "Sequence 01 · 2 selected");
     apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
     assert!(!state.is_visible);
     assert_eq!(read_command()["action"], "remove_attributes");
@@ -505,6 +502,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         bin_path: "Footage".into(),
         kind: ProjectItemKind::Media,
         offline: false,
+        media_type: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -622,10 +620,10 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
     let results = ui.get_results();
     assert_eq!(results.row_count(), 3);
     assert_eq!(results.row_data(0).unwrap().name.as_str(), "Unnamed marker");
-    assert_eq!(results.row_data(0).unwrap().folder.as_str(), "Nested");
-    assert_eq!(results.row_data(1).unwrap().folder.as_str(), "Selects");
-    assert_eq!(results.row_data(1).unwrap().category.as_str(), "00:00:01.000");
-    assert_eq!(results.row_data(2).unwrap().category.as_str(), "00:00:02.000");
+    assert!(results.row_data(0).unwrap().detail.starts_with("Nested · "));
+    assert_eq!(results.row_data(1).unwrap().detail.as_str(), "Selects · 00:00:01.000");
+    assert!(results.row_data(2).unwrap().detail.ends_with(" · 00:00:02.000"));
+    assert!(results.row_data(0).unwrap().icon == "marker");
     ui.set_search_text("Earlier".into());
     refresh_marker_results(&ui, &mut state);
     assert_eq!(ui.get_results().row_count(), 1);
@@ -770,6 +768,7 @@ fn shift_activate_handles_effects_and_project_items() {
         bin_path: "Footage".into(),
         kind,
         offline: false,
+        media_type: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -902,38 +901,24 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         window.dispatch_event(WindowEvent::KeyPressed { text: Key::Tab.into() });
         window.dispatch_event(WindowEvent::KeyReleased { text: Key::Tab.into() });
     };
-    let click_tab = |x| {
-        let position = LogicalPosition::new(x, 69.);
+    // Centers of the All, Effects, Project and Actions text tabs.
+    const TAB_X: [f32; 4] = [23., 70., 129., 189.];
+    let click_tab = |index: usize| {
+        let position = LogicalPosition::new(TAB_X[index], 66.);
         let button = PointerEventButton::Left;
         window.dispatch_event(WindowEvent::PointerPressed { position, button });
         window.dispatch_event(WindowEvent::PointerReleased { position, button });
     };
-    let assert_highlight = |selected| {
+    // Only the active tab has an underline along the bottom of the tab row.
+    let assert_highlight = |selected: usize| {
         let width = WINDOW_WIDTH as usize;
         let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
         window.request_redraw();
         assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
-        let tab_width = width / 4;
-        let inactive = (selected + 1) % 4;
-        let background = pixels[64 * width + inactive * tab_width + 12];
-        let divider = Rgb8Pixel { r: 0x26, g: 0x28, b: 0x3a };
-        assert_ne!(background, pixels[26 * width + 550]);
-        assert_eq!(pixels[50 * width + 550], divider);
-        assert_eq!(pixels[87 * width + 550], divider);
-        for index in 0..4 {
-            for x in [index * tab_width + 4, (index + 1) * tab_width - 5] {
-                for y in [54, 84] {
-                    assert_eq!(pixels[y * width + x] != background, index == selected);
-                }
-            }
-            if index < 3 {
-                let boundary = (index + 1) * tab_width;
-                assert!(
-                    pixels[64 * width + boundary - 1..=64 * width + boundary + 1]
-                        .contains(&divider),
-                    "missing divider near x={boundary}"
-                );
-            }
+        let underline = Rgb8Pixel { r: 0x81, g: 0x8c, b: 0xf8 };
+        for (index, x) in TAB_X.iter().enumerate() {
+            let pixel = pixels[81 * width + *x as usize];
+            assert_eq!(pixel == underline, index == selected, "tab {index} underline");
         }
     };
     assert_highlight(0);
@@ -943,17 +928,17 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         assert_eq!(ui.get_search_text().as_str(), "Take");
         assert_highlight(index);
     }
-    click_tab(WINDOW_WIDTH as f32 - 5.);
+    click_tab(3);
     assert_eq!(ui.get_active_catalog().as_str(), "actions");
     assert_highlight(3);
-    click_tab(WINDOW_WIDTH as f32 * 0.625);
+    click_tab(2);
     assert_eq!(ui.get_active_catalog().as_str(), "project");
     assert_highlight(2);
-    click_tab(WINDOW_WIDTH as f32 * 0.375);
+    click_tab(1);
     assert_eq!(ui.get_active_catalog().as_str(), "effects");
-    click_tab(5.);
+    click_tab(0);
     assert_eq!(ui.get_active_catalog().as_str(), "all");
-    click_tab(WINDOW_WIDTH as f32 * 0.375);
+    click_tab(1);
     press_tab();
     assert_eq!(ui.get_active_catalog().as_str(), "project");
     assert_eq!(ui.get_search_text().as_str(), "Take");
@@ -1015,6 +1000,7 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         bin_path: "Audio".into(),
         kind: ProjectItemKind::Media,
         offline: false,
+        media_type: None,
     };
     remember_item(&mut state, RecentItem {
         item: SearchResult::ProjectItem(Arc::new(item.clone())), project_id: Some("project".into()),
@@ -1044,22 +1030,23 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         bin_path: "Footage / Interview".into(),
         kind: catalog::ProjectItemKind::Media,
         offline: false,
+        media_type: None,
     }).collect());
     refresh_results_ui(&ui, &mut state);
     assert_eq!(ui.get_total_matches(), 8);
-    click_tab(39.);
-    click_tab(WINDOW_WIDTH as f32 * 0.375);
-    click_tab(WINDOW_WIDTH as f32 * 0.625);
+    click_tab(0);
+    click_tab(1);
+    click_tab(2);
     assert_eq!(ui.get_active_catalog().as_str(), "project");
-    ui.set_status_message("This project item can't be placed on the timeline.".into());
+    show_status(&ui, "This project item can't be placed on the timeline.");
 
     let width = WINDOW_WIDTH as usize;
     let mut pixels = vec![Rgb8Pixel::default(); width * WINDOW_HEIGHT as usize];
     window.request_redraw();
     assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, width); }));
     for row in 0..8 {
-        let top = (94 + row * 38) * width;
-        let bottom = top + 36 * width;
+        let top = (88 + row * 36) * width;
+        let bottom = top + 34 * width;
         assert!(pixels[top..bottom].iter().any(|pixel| pixel.r > 170), "row {row} should render its label");
     }
     assert!(pixels[404 * width..].iter().any(|pixel| pixel.r > 130), "the footer should render its text");
@@ -1228,6 +1215,7 @@ fn moving_selection_inside_visible_window_reuses_results_model() {
                 bin_path: "Footage".into(),
                 kind: ProjectItemKind::Media,
                 offline: false,
+                media_type: None,
             })
             .collect(),
     );
@@ -1272,6 +1260,7 @@ fn bin_drill_down_enters_and_steps_out_without_hiding() {
         bin_path: bin_path.into(),
         kind,
         offline: false,
+        media_type: None,
     };
     let items = vec![
         item("b1", "Footage", "Project root", ProjectItemKind::Bin),
@@ -1323,7 +1312,7 @@ fn bin_drill_down_enters_and_steps_out_without_hiding() {
     assert_eq!(ui.get_active_bin().as_str(), "Footage / B-Roll");
     assert_eq!(state.matched_items.len(), 1);
     assert_eq!(
-        ui.get_results().row_data(0).unwrap().folder,
+        ui.get_results().row_data(0).unwrap().detail,
         "Footage › B-Roll"
     );
 
@@ -1398,7 +1387,7 @@ fn backspace_on_empty_search_triggers_step_out_bin_in_slint() {
 }
 
 #[test]
-fn selected_project_folder_renders_beside_name_and_separated() {
+fn row_detail_sits_at_the_right_edge_after_the_kind_icon_and_name() {
     let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(TestPlatform(adapter.clone()))).unwrap();
     let ui = SpotlightWindow::new().unwrap();
@@ -1407,13 +1396,12 @@ fn selected_project_folder_renders_beside_name_and_separated() {
     let window = ui.window();
     window.dispatch_event(WindowEvent::WindowActiveChanged(true));
 
-    let render = |name: &str, folder: &str| -> Vec<Rgb8Pixel> {
+    let render = |name: &str, detail: &str| -> Vec<Rgb8Pixel> {
         let item = EffectItemUI {
             name: name.into(),
-            category: "Sequence".into(),
-            folder: folder.into(),
-            badge_bg: Color::from_rgb_u8(0x36, 0x26, 0x5c),
-            badge_fg: Color::from_rgb_u8(0xdd, 0xd6, 0xfe),
+            detail: detail.into(),
+            icon: "sequence".into(),
+            tint: Color::from_rgb_u8(0xdd, 0xd6, 0xfe),
             ..EffectItemUI::default()
         };
         ui.set_results(ModelRc::new(VecModel::from(vec![item])));
@@ -1426,43 +1414,29 @@ fn selected_project_folder_renders_beside_name_and_separated() {
         }));
         pixels
     };
-
     let width = WINDOW_WIDTH as usize;
-    let without_folder = render("00_BACK UP", "");
-    let with_folder = render("00_BACK UP", "04_Nests › 041_Main");
+    // The first row spans y=88..122; its kind icon sits at x=14..40.
+    let diff_xs = |a: &[Rgb8Pixel], b: &[Rgb8Pixel]| -> Vec<usize> {
+        (89..121)
+            .flat_map(|y| (8..612).filter(move |&x| a[y * width + x] != b[y * width + x]))
+            .collect()
+    };
 
-    let diff_xs: Vec<usize> = (95..129)
-        .flat_map(|y| {
-            (18..500).filter_map({
-                let without_folder = &without_folder;
-                let with_folder = &with_folder;
-                move |x| (without_folder[y * width + x] != with_folder[y * width + x]).then_some(x)
-            })
-        })
-        .collect();
-    assert!(!diff_xs.is_empty());
-    // The category pill occupies the left edge of the content.
-    let badge = Rgb8Pixel { r: 0x36, g: 0x26, b: 0x5c };
-    let badge_end = (18..116)
-        .rfind(|&x| without_folder[105 * width + x] == badge)
-        .expect("category pill should be on the left");
-    assert_eq!(without_folder[105 * width + 22], badge);
+    let plain = render("00_BACK UP", "");
+    assert!((96..114).any(|y| (14..40).any(|x| plain[y * width + x] != plain[100 * width + 300])),
+        "the kind icon should draw at the left of the row");
+    let with_detail = render("00_BACK UP", "04_Nests › 041_Main");
+    let changed = diff_xs(&plain, &with_detail);
+    assert!(!changed.is_empty());
+    let first = *changed.iter().min().unwrap();
+    assert!(first > 380, "the detail should be right-aligned, got min x={first}");
 
-    // The folder text sits strictly to the right of the item name.
-    let min_diff_x = *diff_xs.iter().min().unwrap();
-    assert!(min_diff_x > badge_end + 60, "expected folder beside name, got min x={min_diff_x}");
-
-    // A long name and folder leave the leading category pill intact.
-    let long_base = render("Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider", "");
-    let long_with_folder = render(
-        "Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Divider",
-        "01_Project › 04_Nests › 041_Main › Exports › Final_Master",
-    );
-    let leaked_into_badge = (95..129).any(|y| {
-        (18..=badge_end)
-            .any(|x| long_base[y * width + x] != long_with_folder[y * width + x])
-    });
-    assert!(!leaked_into_badge);
+    // A long name elides before the detail and never touches the icon.
+    let long_name = "Very_Long_Sequence_Name_That_Must_Elide_Cleanly_Before_The_Detail_Text";
+    let long_plain = render(long_name, "");
+    let long_detail = render(long_name, "01_Project › 04_Nests › 041_Main › Exports › Final_Master");
+    let changed = diff_xs(&long_plain, &long_detail);
+    assert!(changed.iter().all(|&x| x > 40), "the detail must not disturb the icon");
 }
 
 #[test]
@@ -1482,6 +1456,7 @@ fn default_effect_controls_setting_swaps_enter_and_shift_enter_for_effects() {
         bin_path: "Footage".into(),
         kind: ProjectItemKind::Media,
         offline: false,
+        media_type: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -1664,6 +1639,7 @@ fn configurable_modifier_settings_hotkey_and_catalog_shortcuts_work() {
         bin_path: "01_Footage".into(),
         kind: ProjectItemKind::Media,
         offline: false,
+        media_type: None,
     };
     let state = Rc::new(RefCell::new(AppState {
         matched_items: vec![SearchResult::ProjectItem(Arc::new(clip))],
@@ -1848,6 +1824,7 @@ fn alternate_action_opens_sequences_in_the_timeline() {
         bin_path: "Sequences".into(),
         kind,
         offline: false,
+        media_type: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -1936,7 +1913,7 @@ fn add_named_marker_takes_a_name_and_adds_it_without_the_dialog() {
     drain();
     assert!(state.is_visible && ui.get_marker_naming());
     assert_eq!(ui.get_active_catalog(), "actions");
-    assert_eq!(ui.get_status_message(), "Add Named Marker · Esc to return");
+    assert_eq!((ui.get_hint_enter().as_str(), ui.get_hint_escape().as_str()), ("Add marker", "Back"));
 
     // Typing names the marker instead of searching, and Esc returns to the search.
     ui.set_search_text("Intro".into());
@@ -1997,4 +1974,122 @@ fn add_named_marker_takes_a_name_and_adds_it_without_the_dialog() {
     // Switching catalogs leaves the name field.
     clear_marker_picker(&ui, &mut state);
     assert!(!ui.get_marker_naming() && state.marker_naming.is_none());
+}
+
+#[test]
+fn footer_hints_follow_the_highlighted_row_and_messages_fade() {
+    use slint::Model;
+
+    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+    let ui = SpotlightWindow::new().unwrap();
+    let effect = |kind: &str| SearchResult::Effect(Arc::new(EffectEntry {
+        name: "Blur".into(),
+        match_name: "blur".into(),
+        effect_type: kind.into(),
+        folder: String::new(),
+    }));
+    let item = |kind| SearchResult::ProjectItem(Arc::new(ProjectItemEntry {
+        item_id: "i".into(),
+        name: "Item".into(),
+        bin_path: "Footage".into(),
+        kind,
+        offline: false,
+        media_type: None,
+    }));
+    let mut state = AppState::new(AppSettings::default());
+    let hints = |state: &mut AppState, result: SearchResult| {
+        state.matched_items = vec![result];
+        state.selected_abs_index = 0;
+        state.results_dirty = true;
+        sync_viewport_slice(&ui, state);
+        (
+            ui.get_hint_enter().to_string(),
+            ui.get_hint_alternate().to_string(),
+            ui.get_hint_escape().to_string(),
+        )
+    };
+    let expect = |enter: &str, alternate: &str| (enter.to_string(), alternate.to_string(), "Close".to_string());
+
+    assert_eq!(hints(&mut state, effect("videoEffect")), expect("Apply", "Apply and open Effect Controls"));
+    assert_eq!(hints(&mut state, effect("preset")), expect("Find in Effects panel", ""));
+    assert_eq!(hints(&mut state, item(ProjectItemKind::Media)), expect("Place at playhead", "Open in Source Monitor"));
+    assert_eq!(hints(&mut state, item(ProjectItemKind::Sequence)), expect("Nest at playhead", "Open in Timeline"));
+    assert_eq!(hints(&mut state, item(ProjectItemKind::Bin)), expect("Open bin", ""));
+    assert_eq!(hints(&mut state, SearchResult::Action(Action::RemoveAttributes)), expect("Run", ""));
+    // The active sequence can't nest into itself, so only the Timeline hint remains.
+    assert_eq!(hints(&mut state, item(ProjectItemKind::ActiveSequence)), expect("", "Open in Timeline"));
+
+    // The setting that swaps Enter and the alternate action swaps the hints too.
+    state.settings.open_effect_controls_by_default = true;
+    assert_eq!(hints(&mut state, effect("videoEffect")), expect("Apply and open Effect Controls", "Apply"));
+
+    // A row Premiere can't run right now offers no Enter hint.
+    state.premiere_context = Some(PremiereContext {
+        project_id: Some("p".into()),
+        sequence_id: Some("s".into()),
+        selection: Some(crate::protocol::SelectionSummary { total: 0, ..Default::default() }),
+        ..PremiereContext::default()
+    });
+    assert_eq!(hints(&mut state, SearchResult::Action(Action::RemoveAttributes)), expect("", ""));
+    let row = ui.get_results().row_data(0).unwrap();
+    assert!(row.disabled && row.icon == "action");
+    assert_eq!(row.subtitle, "Select clips in the Timeline first.");
+
+    // Naming a marker and browsing markers both go back with Esc.
+    state.marker_naming = Some(MarkerNaming { previous_query: "".into() });
+    assert_eq!(hints(&mut state, effect("videoEffect")), ("Add marker".into(), "".into(), "Back".into()));
+    state.marker_naming = None;
+
+    // Messages show in place of the hints until their timer hides them.
+    assert!(!ui.get_status_visible());
+    show_status(&ui, "Applied \"Blur\" to 1 clip.");
+    assert!(ui.get_status_visible());
+    assert_eq!(ui.get_status_message(), "Applied \"Blur\" to 1 clip.");
+}
+
+#[test]
+fn each_kind_of_result_gets_its_own_icon_and_media_files_follow_their_type() {
+    let effect = |kind: &str| SearchResult::Effect(Arc::new(EffectEntry {
+        name: "E".into(),
+        match_name: "e".into(),
+        effect_type: kind.into(),
+        folder: String::new(),
+    }));
+    let parse = |json: &str| -> ProjectItemEntry { serde_json::from_str(json).unwrap() };
+    let item = |kind: &str, media_type: &str| SearchResult::ProjectItem(Arc::new(parse(&format!(
+        r#"{{"itemId":"i","name":"I","binPath":"B","kind":"{kind}"{media_type}}}"#
+    ))));
+    let icon = |result: SearchResult| kind_icon(&result).name;
+
+    assert_eq!(icon(effect("videoEffect")), "video-effect");
+    assert_eq!(icon(effect("audioEffect")), "audio-effect");
+    assert_eq!(icon(effect("videoTransition")), "video-transition");
+    assert_eq!(icon(effect("audioTransition")), "audio-transition");
+    assert_eq!(icon(effect("preset")), "preset");
+    assert_eq!(icon(item("media", r#","mediaType":"video""#)), "video");
+    assert_eq!(icon(item("media", r#","mediaType":"image""#)), "image");
+    assert_eq!(icon(item("media", r#","mediaType":"audio""#)), "audio");
+    // Older plugins, items without an extension and unknown types show as video.
+    assert_eq!(icon(item("media", "")), "video");
+    assert_eq!(icon(item("media", r#","mediaType":null"#)), "video");
+    assert_eq!(icon(item("media", r#","mediaType":"hologram""#)), "video");
+    assert_eq!(icon(item("sequence", "")), "sequence");
+    assert_eq!(icon(item("activeSequence", "")), "sequence");
+    assert_eq!(icon(item("bin", "")), "bin");
+    assert_eq!(icon(item("other", "")), "other");
+    assert_eq!(icon(SearchResult::Action(Action::AddMarker)), "action");
+
+    // Every kind has a distinct look, apart from the deliberate sequence and video fallbacks.
+    let looks: std::collections::HashSet<_> = [
+        effect("videoEffect"), effect("audioEffect"), effect("videoTransition"), effect("audioTransition"),
+        effect("preset"), item("media", r#","mediaType":"video""#), item("media", r#","mediaType":"image""#),
+        item("media", r#","mediaType":"audio""#), item("sequence", ""), item("bin", ""),
+        SearchResult::Action(Action::AddMarker), item("other", ""),
+    ]
+    .iter()
+    .map(kind_icon)
+    .map(|look| (look.name, look.tint))
+    .collect();
+    assert_eq!(looks.len(), 12);
 }

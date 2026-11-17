@@ -27,7 +27,6 @@ pub(super) fn center_and_show(ui: &SpotlightWindow, state: &mut AppState, bridge
     ui.set_project_loading(bridge.project_scan_pending());
     // The selection may have changed since the last open, so rows stay enabled until Premiere answers.
     state.premiere_context = None;
-    ui.set_context_summary("".into());
     ui.set_flash_row(-1);
     request_premiere_context(state, bridge);
     state.selected_abs_index = 0;

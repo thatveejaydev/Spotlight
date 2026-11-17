@@ -1,6 +1,7 @@
 import { AboutSlint, ComboBox, Palette } from "std-widgets.slint";
 import { PaletteThemeColors as Theme } from "palette-theme.slint";
-import { ShortcutRecorderRow, SettingsToggle } from "settings-rows.slint";
+import { ShortcutRecorderRow, SettingsToggle, KeyHint, TextTab } from "settings-rows.slint";
+import { Icon } from "icons.slint";
 
 // Rust also creates these windows, so the file that slint-build compiles re-exports them.
 export { DebugLogWindow, DebugLogEntryUI } from "debug-log.slint";
@@ -8,13 +9,16 @@ export { ErrorToastWindow } from "error-toast.slint";
 
 export struct EffectItemUI {
     name: string,
-    category: string,
-    folder: string,
-    badge-bg: color,
-    badge-fg: color,
-    // True when the primary action can't run now; `reason` says why.
+    // Quiet text at the row's right edge: the kind of effect, a bin path or a marker's sequence.
+    detail: string,
+    // A second line on the highlighted row: why it can't run, or what an action does.
+    subtitle: string,
+    // The kind icon, as named in icons.slint, its color, and the darker color the Light theme uses.
+    icon: string,
+    tint: color,
+    ink: color,
+    // True when the primary action can't run now; `subtitle` says why.
     disabled: bool,
-    reason: string,
 }
 
 export struct ActionHotkeyUI {
@@ -69,7 +73,20 @@ export component SpotlightWindow inherits Window {
     in-out property <string> hotkey-label: "Ctrl+Space";
     // Set from settings::DEFAULT_HOTKEY so the Reset button matches the real default.
     in property <string> default-hotkey: "Ctrl+Space";
-    in-out property <string> status-message: "Ready · " + root.hotkey-label;
+    // A short-lived result such as "Applied Blur to 2 clips"; `status-visible` is true while it shows.
+    in-out property <string> status-message: "";
+    in property <bool> status-visible: false;
+    // What Enter, the alternate modifier with Enter, and Esc do for the highlighted row.
+    in property <string> hint-enter: "";
+    in property <string> hint-alternate: "";
+    in property <string> hint-escape: "Close";
+    // A message that replaces the key hints: marker progress, audio preview problems, a
+    // short-lived result, or a lost connection.
+    private property <string> footer-message: root.marker-picker && root.marker-status != "" && root.results.length > 0 ? root.marker-status
+        : root.preview-message != "" ? root.preview-message
+        : root.status-visible ? root.status-message
+        : !root.bridge-connected ? "Not connected to Premiere"
+        : "";
     in-out property <bool> settings-open: false;
     in-out property <int> settings-tab-index: 0;
     in-out property <bool> recording-hotkey: false;
@@ -98,8 +115,6 @@ export component SpotlightWindow inherits Window {
     in-out property <string> settings-feedback: "";
     in-out property <bool> settings-feedback-error: false;
     in property <[EffectItemUI]> results: [];
-    // The active sequence and selection, such as "Sequence 01 · 2 video"; empty until Premiere answers.
-    in property <string> context-summary: "";
     // The visible row that briefly flashes after activating it while it is disabled, or -1.
     in property <int> flash-row: -1;
 
@@ -292,7 +307,7 @@ export component SpotlightWindow inherits Window {
 
             // Search bar or Settings header
             Rectangle {
-                height: root.settings-open ? 54px : 50px;
+                height: 48px;
                 background: Theme.header-background;
 
                 HorizontalLayout {
@@ -300,23 +315,22 @@ export component SpotlightWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     padding-left: 16px;
-                    padding-right: 14px;
+                    padding-right: 12px;
                     spacing: 12px;
                     alignment: stretch;
 
                     VerticalLayout {
                         horizontal-stretch: 1;
                         alignment: center;
-                        spacing: 2px;
+                        spacing: 1px;
                         Text {
                             text: "Settings";
-                            font-size: 14px;
-                            font-weight: 700;
+                            font-size: 15px;
+                            font-weight: 600;
                             color: Theme.primary-text;
                         }
                         Text {
-                            visible: root.settings-tab-index == 0;
-                            text: "Hotkeys and preferences apply immediately";
+                            text: "Changes save as you make them";
                             font-size: 11px;
                             color: Theme.muted-text;
                             overflow: elide;
@@ -326,18 +340,18 @@ export component SpotlightWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         Rectangle {
-                            width: 72px;
+                            width: 64px;
                             height: 26px;
                             border-radius: 6px;
-                            background: back-touch.has-hover ? Theme.control-hover : Theme.control-background;
+                            background: back-touch.has-hover ? Theme.control-hover : transparent;
                             border-width: 1px;
-                            border-color: Theme.outline;
+                            border-color: Theme.card-border;
                             accessible-role: button;
                             accessible-label: "Back to search";
                             accessible-action-default => { root.toggle-settings(); }
                             Text {
-                                text: "← Back";
-                                font-size: 11px;
+                                text: "Done";
+                                font-size: 12px;
                                 font-weight: 600;
                                 color: Theme.result-text;
                                 horizontal-alignment: center;
@@ -358,29 +372,46 @@ export component SpotlightWindow inherits Window {
                     height: 100%;
                     padding-left: 16px;
                     padding-right: 14px;
-                    spacing: 12px;
+                    spacing: 10px;
                     alignment: stretch;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            name: "search";
+                            ink: Theme.placeholder-text;
+                            width: 17px;
+                            height: 17px;
+                        }
+                    }
 
                     if root.active-bin != "" : VerticalLayout {
                         alignment: center;
                         Rectangle {
                             height: 24px;
-                            max-width: 210px;
+                            width: min(bin-content.preferred-width, 220px);
                             border-radius: 6px;
                             background: bin-touch.has-hover ? Theme.project-hover : Theme.project-tint;
-                            border-width: 1px;
-                            border-color: Theme.project-outline;
                             accessible-role: button;
                             accessible-label: "Inside bin " + root.active-bin + ". Step up one level";
                             accessible-action-default => { root.step-out-bin(); }
-                            HorizontalLayout {
-                                padding-left: 8px;
+                            bin-content := HorizontalLayout {
+                                padding-left: 7px;
                                 padding-right: 7px;
                                 spacing: 5px;
                                 alignment: center;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Icon {
+                                        name: "folder";
+                                        ink: Theme.project-accent;
+                                        width: 13px;
+                                        height: 13px;
+                                    }
+                                }
                                 Text {
                                     text: root.active-bin;
-                                    font-size: 11px;
+                                    font-size: 11.5px;
                                     font-weight: 600;
                                     color: Theme.project-emphasis;
                                     vertical-alignment: center;
@@ -414,15 +445,15 @@ export component SpotlightWindow inherits Window {
                             x: 0px;
                             width: 100%;
                             height: 100%;
-                            text: root.marker-naming ? "Name the marker…"
-                                : root.marker-picker ? "Search markers…"
-                                : root.active-bin != "" ? "Search in \{root.active-bin}…"
-                                : root.active-catalog == "effects" ? "Search effects and transitions…"
-                                : root.active-catalog == "project" ? "Search project items…"
-                                : root.active-catalog == "actions" ? "Search actions…"
-                                : "Search effects, project items, and actions…";
+                            text: root.marker-naming ? "Name the marker"
+                                : root.marker-picker ? "Search markers"
+                                : root.active-bin != "" ? "Search this bin"
+                                : root.active-catalog == "effects" ? "Search effects and transitions"
+                                : root.active-catalog == "project" ? "Search project media"
+                                : root.active-catalog == "actions" ? "Search actions"
+                                : "Search effects, media, and actions";
                             color: Theme.placeholder-text;
-                            font-size: 13.5px;
+                            font-size: 15px;
                             vertical-alignment: center;
                             overflow: elide;
                         }
@@ -487,6 +518,25 @@ export component SpotlightWindow inherits Window {
                             }
                         }
                     }
+
+                    // A reminder of the launch hotkey while the search box is empty.
+                    if root.search-text == "" && !root.marker-naming : VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 20px;
+                            width: launch-label.preferred-width + 12px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Theme.card-border;
+                            launch-label := Text {
+                                text: root.hotkey-label;
+                                font-size: 10.5px;
+                                color: Theme.subtle-text;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
 
             }
@@ -496,51 +546,32 @@ export component SpotlightWindow inherits Window {
                 background: Theme.section-divider;
             }
 
+            // Catalogs as plain text tabs.
             if !root.settings-open : Rectangle {
-                height: 36px;
-                background: Theme.section-divider;
-                accessible-role: tab-list;
-                accessible-label: "Search catalogs";
-                accessible-item-count: 4;
+                height: 34px;
+                background: Theme.header-background;
 
                 HorizontalLayout {
                     width: 100%;
                     height: 100%;
-                    spacing: 1px;
-                    alignment: stretch;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 20px;
 
-                    for catalog[index] in [
-                        { id: "all", label: "All", name: "All", accent: Theme.catalog-all },
-                        { id: "effects", label: "FX", name: "Effects", accent: Theme.catalog-effects },
-                        { id: "project", label: "PRJ", name: "Project", accent: Theme.catalog-project },
-                        { id: "actions", label: "ACT", name: "Actions", accent: Theme.catalog-actions },
-                    ] : Rectangle {
-                        private property <bool> active: catalog.id == root.active-catalog;
-                        min-width: 0px;
-                        preferred-width: 0px;
-                        horizontal-stretch: 1;
-                        background: Theme.strip-background;
-                        accessible-role: tab;
-                        accessible-label: catalog.name;
-                        accessible-item-index: index;
-                        accessible-item-selectable: true;
-                        accessible-item-selected: active;
-                        accessible-action-default => { root.select-catalog(catalog.id); }
-                        if active : Rectangle {
-                            background: catalog.accent.with-alpha(0.12);
-                            border-width: 1px;
-                            border-color: catalog.accent.with-alpha(0.4);
-                        }
-                        Text {
-                            text: catalog.label;
-                            font-size: 11px;
-                            font-weight: 700;
-                            color: active ? catalog.accent : Theme.tab-text;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        TouchArea {
-                            mouse-cursor: pointer;
+                    HorizontalLayout {
+                        spacing: 20px;
+                        accessible-role: tab-list;
+                        accessible-label: "Search catalogs";
+                        accessible-item-count: 4;
+                        for catalog[index] in [
+                            { id: "all", label: "All" },
+                            { id: "effects", label: "Effects" },
+                            { id: "project", label: "Project" },
+                            { id: "actions", label: "Actions" },
+                        ] : TextTab {
+                            label: catalog.label;
+                            index: index;
+                            active: catalog.id == root.active-catalog;
                             clicked => { root.select-catalog(catalog.id); }
                         }
                     }
@@ -554,7 +585,7 @@ export component SpotlightWindow inherits Window {
 
             // Eight visible results (or Settings panel)
             Rectangle {
-                min-height: 314px;
+                min-height: 0px;
                 vertical-stretch: 1;
                 background: Theme.window-background;
                 clip: true;
@@ -602,45 +633,27 @@ export component SpotlightWindow inherits Window {
                         spacing: 0px;
 
                         Rectangle {
-                            height: 38px;
+                            height: 34px;
                             background: Theme.header-background;
-                            accessible-role: tab-list;
-                            accessible-label: "Settings sections";
-                            accessible-item-count: 3;
                             HorizontalLayout {
-                                padding-left: 14px;
-                                padding-top: 5px;
-                                padding-bottom: 6px;
-                                spacing: 6px;
+                                padding-left: 16px;
+                                spacing: 20px;
                                 alignment: start;
+                                accessible-role: tab-list;
+                                accessible-label: "Settings sections";
+                                accessible-item-count: 4;
 
-                                for title[index] in ["Spotlight Controls", "Hotkeys", "Appearance", "About"] : Rectangle {
-                                    width: index == 0 ? 133px : 88px;
-                                    border-radius: 6px;
-                                    background: index == root.settings-tab-index ? Theme.selected-tab-background
-                                        : (tab-touch.has-hover ? Theme.tab-hover : transparent);
-                                    border-width: index == root.settings-tab-index ? 1px : 0px;
-                                    border-color: Theme.selected-tab-outline;
-                                    accessible-role: tab;
-                                    accessible-label: title;
-                                    accessible-item-index: index;
-                                    accessible-item-selectable: true;
-                                    accessible-item-selected: index == root.settings-tab-index;
-                                    accessible-action-default => { root.select-settings-tab(index); }
-                                    Text {
-                                        text: title;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        color: index == root.settings-tab-index ? Theme.selected-tab-text : Theme.tab-text;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                    tab-touch := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.select-settings-tab(index); }
-                                    }
+                                for title[index] in ["General", "Hotkeys", "Appearance", "About"] : TextTab {
+                                    label: title;
+                                    index: index;
+                                    active: index == root.settings-tab-index;
+                                    clicked => { root.select-settings-tab(index); }
                                 }
                             }
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.section-divider;
                         }
 
                         if root.settings-tab-index == 3 : VerticalLayout {
@@ -707,24 +720,43 @@ export component SpotlightWindow inherits Window {
                                     wrap: word-wrap;
                                 }
 
-                                for action in root.action-hotkeys : Rectangle {
+                                Text {
+                                    text: "Hotkeys work in Premiere and in Spotlight. None are set at first.";
+                                    font-size: 11px;
+                                    color: Theme.muted-text;
+                                    wrap: word-wrap;
+                                }
+
+                                // One card with a row per action, separated by hairlines.
+                                Rectangle {
                                     background: Theme.header-background;
                                     border-radius: 8px;
                                     border-width: 1px;
                                     border-color: Theme.card-border;
 
                                     VerticalLayout {
-                                        padding: 10px;
-                                        ShortcutRecorderRow {
-                                            label: action.label;
-                                            hint: action.hint;
-                                            shortcut-text: action.shortcut;
-                                            empty-text: "Record hotkey";
-                                            recording: root.recording-hotkey && root.recording-target == action.id;
-                                            toggle-record => { root.begin-recording(action.id); }
-                                            clear-clicked => {
-                                                root.set-recording(false);
-                                                root.clear-shortcut(action.id);
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        for action[index] in root.action-hotkeys : VerticalLayout {
+                                            if index > 0 : Rectangle {
+                                                height: 1px;
+                                                background: Theme.section-divider;
+                                            }
+                                            VerticalLayout {
+                                                padding-top: 9px;
+                                                padding-bottom: 9px;
+                                                ShortcutRecorderRow {
+                                                    label: action.label;
+                                                    hint: action.hint;
+                                                    shortcut-text: action.shortcut;
+                                                    empty-text: "Set hotkey";
+                                                    recording: root.recording-hotkey && root.recording-target == action.id;
+                                                    toggle-record => { root.begin-recording(action.id); }
+                                                    clear-clicked => {
+                                                        root.set-recording(false);
+                                                        root.clear-shortcut(action.id);
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -809,13 +841,13 @@ export component SpotlightWindow inherits Window {
                                                 alignment: center;
                                                 spacing: 2px;
                                                 Text {
-                                                    text: "Launch Hotkey";
+                                                    text: "Launch hotkey";
                                                     font-size: 13px;
                                                     font-weight: 600;
                                                     color: Theme.primary-text;
                                                 }
                                                 Text {
-                                                    text: "Global shortcut to open Spotlight in Premiere Pro";
+                                                    text: "Opens Spotlight while Premiere Pro is in front";
                                                     font-size: 11px;
                                                     color: Theme.muted-text;
                                                     overflow: elide;
@@ -915,15 +947,15 @@ export component SpotlightWindow inherits Window {
                                             alignment: center;
                                             spacing: 2px;
                                             Text {
-                                                text: "Always open Effect Controls on Enter";
+                                                text: "Open Effect Controls on Enter";
                                                 font-size: 13px;
                                                 font-weight: 600;
                                                 color: Theme.primary-text;
                                             }
                                             Text {
                                                 text: root.open-effect-controls-default
-                                                    ? "Enter applies & opens Effect Controls · " + root.alternate-modifier-label + "+Enter applies only"
-                                                    : "Enter applies only · " + root.alternate-modifier-label + "+Enter opens Effect Controls";
+                                                    ? "Enter applies and opens Effect Controls. " + root.alternate-modifier-label + "+Enter only applies."
+                                                    : "Enter only applies. " + root.alternate-modifier-label + "+Enter also opens Effect Controls.";
                                                 font-size: 11px;
                                                 color: Theme.muted-text;
                                                 overflow: elide;
@@ -934,7 +966,7 @@ export component SpotlightWindow inherits Window {
                                             alignment: center;
                                             SettingsToggle {
                                                 checked: root.open-effect-controls-default;
-                                                label: "Always open Effect Controls on Enter";
+                                                label: "Open Effect Controls on Enter";
                                                 toggled => {
                                                     root.set-recording(false);
                                                     root.toggle-default-effect-controls();
@@ -961,13 +993,13 @@ export component SpotlightWindow inherits Window {
                                             alignment: center;
                                             spacing: 2px;
                                             Text {
-                                                text: "Alternate Action Modifier";
+                                                text: "Alternate action key";
                                                 font-size: 13px;
                                                 font-weight: 600;
                                                 color: Theme.primary-text;
                                             }
                                             Text {
-                                                text: root.alternate-modifier-label + "+Enter / " + root.alternate-modifier-label + "+Click triggers Source Monitor or Effect Controls swap";
+                                                text: "Hold with Enter or a click for the second action of a result";
                                                 font-size: 11px;
                                                 color: Theme.muted-text;
                                                 overflow: elide;
@@ -1023,8 +1055,8 @@ export component SpotlightWindow inherits Window {
                                     VerticalLayout {
                                         padding: 12px;
                                         ShortcutRecorderRow {
-                                            label: "Open Settings Shortcut";
-                                            hint: "Press inside Spotlight to toggle Settings";
+                                            label: "Open settings";
+                                            hint: "Works inside Spotlight";
                                             shortcut-text: root.settings-hotkey-label;
                                             recording: root.recording-hotkey && root.recording-target == "settings";
                                             toggle-record => { root.begin-recording("settings"); }
@@ -1047,9 +1079,24 @@ export component SpotlightWindow inherits Window {
                                         padding: 12px;
                                         spacing: 8px;
 
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Catalog shortcuts";
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: Theme.primary-text;
+                                            }
+                                            Text {
+                                                text: "Optional. Jump straight to a catalog while Spotlight is open.";
+                                                font-size: 11px;
+                                                color: Theme.muted-text;
+                                                overflow: elide;
+                                            }
+                                        }
+
                                         ShortcutRecorderRow {
-                                            label: "Switch to All Catalog";
-                                            hint: "Optional shortcut inside Spotlight (empty by default)";
+                                            label: "All";
                                             shortcut-text: root.catalog-all-hotkey-label;
                                             recording: root.recording-hotkey && root.recording-target == "catalog_all";
                                             toggle-record => { root.begin-recording("catalog_all"); }
@@ -1060,7 +1107,7 @@ export component SpotlightWindow inherits Window {
                                         }
 
                                         ShortcutRecorderRow {
-                                            label: "Switch to Effects Catalog";
+                                            label: "Effects";
                                             shortcut-text: root.catalog-effects-hotkey-label;
                                             recording: root.recording-hotkey && root.recording-target == "catalog_effects";
                                             toggle-record => { root.begin-recording("catalog_effects"); }
@@ -1071,7 +1118,7 @@ export component SpotlightWindow inherits Window {
                                         }
 
                                         ShortcutRecorderRow {
-                                            label: "Switch to Project Catalog";
+                                            label: "Project";
                                             shortcut-text: root.catalog-project-hotkey-label;
                                             recording: root.recording-hotkey && root.recording-target == "catalog_project";
                                             toggle-record => { root.begin-recording("catalog_project"); }
@@ -1082,7 +1129,7 @@ export component SpotlightWindow inherits Window {
                                         }
 
                                         ShortcutRecorderRow {
-                                            label: "Switch to Actions Catalog";
+                                            label: "Actions";
                                             shortcut-text: root.catalog-actions-hotkey-label;
                                             recording: root.recording-hotkey && root.recording-target == "catalog_actions";
                                             toggle-record => { root.begin-recording("catalog_actions"); }
@@ -1105,7 +1152,7 @@ export component SpotlightWindow inherits Window {
                                         spacing: 8px;
 
                                         ShortcutRecorderRow {
-                                            label: "Preview Audio Shortcut";
+                                            label: "Preview audio";
                                             shortcut-text: root.audio-preview-hotkey-label;
                                             recording: root.recording-hotkey && root.recording-target == "audio_preview";
                                             toggle-record => { root.begin-recording("audio_preview"); }
@@ -1153,7 +1200,7 @@ export component SpotlightWindow inherits Window {
                                             alignment: center;
                                             spacing: 2px;
                                             Text {
-                                                text: "Config File";
+                                                text: "Settings file";
                                                 font-size: 13px;
                                                 font-weight: 600;
                                                 color: Theme.primary-text;
@@ -1184,7 +1231,7 @@ export component SpotlightWindow inherits Window {
                                                     accessible-label: "Open config file";
                                                     accessible-action-default => { root.open-config-file(); }
                                                     Text {
-                                                        text: "Open File";
+                                                        text: "Open";
                                                         font-size: 11px;
                                                         font-weight: 600;
                                                         color: Theme.control-text;
@@ -1240,15 +1287,17 @@ export component SpotlightWindow inherits Window {
 
                 if !root.settings-open && root.results.length == 0 : VerticalLayout {
                     alignment: center;
+                    padding-left: 40px;
+                    padding-right: 40px;
                     Text {
                         text: root.marker-naming ? (root.search-text == ""
                                 ? "Type a name, then press Enter to add a marker at the playhead"
                                 : "Press Enter to add \u{201c}" + root.search-text + "\u{201d} at the playhead")
                             : root.marker-picker && root.marker-status != "" ? root.marker-status
                             : root.active-bin != "" && root.search-text == "" ? "This bin is empty"
-                            : root.show-recent-items ? "No recently added items"
-                            : root.show-project-loading ? "Loading project items…"
-                            : "No matching results";
+                            : root.show-recent-items ? "Effects and media you use show up here"
+                            : root.show-project-loading ? "Loading project media…"
+                            : "No matches. Try another word, or press Tab to switch catalogs.";
                         font-size: 13px;
                         color: Theme.subtle-text;
                         horizontal-alignment: center;
@@ -1260,25 +1309,36 @@ export component SpotlightWindow inherits Window {
                     visible: !root.settings-open;
                     width: 100%;
                     height: 100%;
-                    padding: 6px;
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    padding-top: 4px;
                     spacing: 2px;
                     alignment: start;
 
+                    if root.show-recent-items && root.results.length > 0 : HorizontalLayout {
+                        height: 20px;
+                        padding-left: 10px;
+                        Text {
+                            text: "Recent";
+                            font-size: 11px;
+                            color: Theme.subtle-text;
+                            vertical-alignment: center;
+                        }
+                    }
+
                     for item[idx] in root.results : result-row := Rectangle {
-                        height: 36px;
-                        border-radius: 6px;
+                        // The highlighted row grows a second line for its subtitle.
+                        property <bool> selected: idx == root.selected-index;
+                        property <bool> show-subtitle: self.selected && item.subtitle != "";
+                        height: self.show-subtitle ? 48px : 34px;
+                        border-radius: 7px;
                         clip: true;
-                        background: idx == root.selected-index ? Theme.row-selected : (row-touch.has-hover ? Theme.row-hover : transparent);
-                        border-width: idx == root.selected-index || idx == root.flash-row ? 1px : 0px;
+                        background: self.selected ? Theme.row-selected : (row-touch.has-hover ? Theme.row-hover : transparent);
+                        border-width: self.selected || idx == root.flash-row ? 1px : 0px;
                         border-color: idx == root.flash-row ? Theme.warning : Theme.row-outline;
                         animate border-color { duration: 120ms; }
-                        // Shown as "(row): unavailable, (reason)" to screen readers.
                         accessible-role: list-item;
-                        accessible-label: item.disabled ? item.name + ", unavailable: " + item.reason : item.name;
-                        // A highlighted disabled row shows why instead of its folder.
-                        property <bool> show-reason: item.disabled && idx == root.selected-index;
-                        property <string> detail: show-reason ? item.reason : item.folder;
-                        property <bool> show-detail: (root.marker-picker || idx == root.selected-index) && detail != "";
+                        accessible-label: item.disabled ? item.name + ", unavailable: " + item.subtitle : item.name;
 
                         row-touch := TouchArea {
                             property <bool> shift-click;
@@ -1298,74 +1358,72 @@ export component SpotlightWindow inherits Window {
                         }
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
+                            padding-left: 8px;
+                            padding-right: 10px;
                             spacing: 10px;
 
-                            // Category pill
+                            // The kind of result, as a tinted icon.
                             VerticalLayout {
                                 alignment: center;
                                 Rectangle {
-                                    width: category-label.preferred-width + 14px;
-                                    height: 20px;
-                                    border-radius: 4px;
-                                    opacity: item.disabled ? 0.45 : 1;
-                                    background: Theme.indigo ? item.badge-bg : item.badge-fg.with-alpha(Theme.light ? 0.26 : 0.14);
-                                    category-label := Text {
-                                        text: item.category;
-                                        font-size: 10px;
-                                        font-weight: 600;
-                                        color: Theme.indigo ? item.badge-fg : item.badge-fg.mix(Theme.primary-text, Theme.light ? 0.20 : 0.75);
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                    width: 26px;
+                                    height: 26px;
+                                    border-radius: 7px;
+                                    background: item.tint.with-alpha((Theme.light ? 0.32 : 0.14) * (item.disabled ? 0.5 : 1));
+                                    Icon {
+                                        x: 5px;
+                                        y: 5px;
+                                        width: 16px;
+                                        height: 16px;
+                                        name: item.icon;
+                                        ink: item.disabled ? Theme.subtle-text
+                                            : (Theme.light ? item.ink : item.tint);
                                     }
                                 }
                             }
 
-                            // Result name and selected project item's bin path side-by-side
-                            HorizontalLayout {
+                            VerticalLayout {
                                 horizontal-stretch: 1;
-                                spacing: 10px;
-
-
-                                VerticalLayout {
-                                    horizontal-stretch: result-row.show-detail ? 0 : 1;
-                                    max-width: result-row.show-detail ? 260px : 1000px;
-                                    alignment: center;
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: item.name;
+                                    font-size: 13px;
+                                    font-weight: result-row.selected ? 600 : 400;
+                                    color: item.disabled ? Theme.subtle-text
+                                        : (result-row.selected ? Theme.row-selected-text : Theme.result-text);
+                                    overflow: elide;
+                                }
+                                if result-row.show-subtitle : HorizontalLayout {
+                                    spacing: 5px;
+                                    if item.disabled : VerticalLayout {
+                                        alignment: center;
+                                        Icon {
+                                            name: "info";
+                                            ink: Theme.warning;
+                                            width: 12px;
+                                            height: 12px;
+                                        }
+                                    }
                                     Text {
-                                        text: item.name;
-                                        font-size: 13px;
-                                        font-weight: idx == root.selected-index ? 600 : 400;
-                                        color: idx == root.selected-index ? Theme.row-selected-text : Theme.result-text;
-                                        opacity: item.disabled ? 0.5 : 1;
+                                        text: item.subtitle;
+                                        font-size: 11px;
+                                        color: item.disabled ? Theme.warning : Theme.muted-text;
+                                        vertical-alignment: center;
                                         overflow: elide;
                                     }
                                 }
+                            }
 
-                                if result-row.show-detail : Text {
-                                    min-width: 0px;
-                                    horizontal-stretch: 1;
-                                    text: result-row.detail;
-                                    font-size: 10.5px;
-                                    color: result-row.show-reason ? Theme.warning : Theme.breadcrumb-text;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-
-                                if item.disabled : VerticalLayout {
-                                    alignment: center;
-                                    // A circle with a slash at the row's end: this row can't run right now.
-                                    Path {
-                                        width: 12px;
-                                        height: 12px;
-                                        viewbox-width: 24;
-                                        viewbox-height: 24;
-                                        stroke: result-row.show-reason ? Theme.warning : Theme.subtle-text;
-                                        stroke-width: 1.6px;
-                                        fill: transparent;
-                                        commands: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM5.6 5.6L18.4 18.4";
-                                    }
-                                }
+                            if item.detail != "" : Text {
+                                min-width: 0px;
+                                max-width: 210px;
+                                text: item.detail;
+                                font-size: 11px;
+                                color: Theme.subtle-text;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                overflow: elide;
                             }
 
                             if root.preview-active && idx == root.selected-index : VerticalLayout {
@@ -1461,82 +1519,59 @@ export component SpotlightWindow inherits Window {
                 background: Theme.footer-divider;
             }
 
-            // Footer
+            // Footer: what the keys do for the highlighted row, or a short message in their place.
             Rectangle {
-                height: 36px;
+                height: 34px;
                 background: Theme.strip-background;
 
                 HorizontalLayout {
                     width: 100%;
                     height: 100%;
                     padding-left: 14px;
-                    padding-right: 14px;
-                    spacing: 12px;
+                    padding-right: 10px;
+                    spacing: 14px;
 
-                    // Connection status indicator
-                    HorizontalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 7px;
-                        alignment: start;
-
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 7px;
-                                height: 7px;
-                                border-radius: 3.5px;
-                                background: root.bridge-connected ? Theme.connected : Theme.warning;
-                            }
-                        }
-
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            alignment: center;
-                            Text {
-                                text: root.marker-picker ? (root.marker-status != "" && root.results.length > 0 ? root.marker-status
-                                    : root.marker-context != "" ? root.marker-context + " · Esc to return"
-                                    : root.marker-status != "" ? root.marker-status : "Go to Marker · Esc to return")
-                                    : root.preview-message != "" ? root.preview-message : root.status-message;
-                                font-size: 11px;
-                                color: Theme.muted-text;
-                                wrap: word-wrap;
-                                height: 30px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                        }
-                    }
-
-                    // The active sequence and selection, which explain the dimmed rows.
-                    if !root.settings-open && !root.marker-picker && root.context-summary != "" : VerticalLayout {
+                    VerticalLayout {
                         alignment: center;
                         Rectangle {
-                            height: 20px;
-                            width: min(context-label.preferred-width + 14px, 190px);
-                            border-radius: 4px;
-                            background: Theme.control-background;
-                            border-width: 1px;
-                            border-color: Theme.card-border;
-                            context-label := Text {
-                                x: 7px;
-                                width: parent.width - 14px;
-                                text: root.context-summary;
-                                font-size: 10.5px;
-                                color: Theme.muted-text;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 3.5px;
+                            background: root.bridge-connected ? Theme.connected : Theme.warning;
+                            accessible-role: text;
+                            accessible-label: root.bridge-connected ? "Connected to Premiere" : "Not connected to Premiere";
                         }
                     }
 
-                    if !root.settings-open && !root.marker-naming : VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: (root.show-project-loading ? "Loading… · " : "")
-                                + (root.show-recent-items ? "Recently added"
-                                : root.total-matches == 1 ? "1 result" : root.total-matches + " results");
-                            font-size: 11px;
-                            color: Theme.muted-text;
+                    if root.footer-message != "" : Text {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        text: root.footer-message;
+                        font-size: 11.5px;
+                        color: Theme.muted-text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    if root.footer-message == "" : HorizontalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 16px;
+                        alignment: start;
+                        if !root.settings-open && root.hint-enter != "" : KeyHint {
+                            key: "Enter";
+                            label: root.hint-enter;
+                        }
+                        if !root.settings-open && root.hint-alternate != "" : KeyHint {
+                            key: root.alternate-modifier-label + "+Enter";
+                            label: root.hint-alternate;
+                        }
+                        if !root.settings-open && !root.marker-picker && !root.marker-naming : KeyHint {
+                            key: "Tab";
+                            label: "Catalogs";
+                        }
+                        KeyHint {
+                            key: "Esc";
+                            label: root.settings-open ? "Back" : root.hint-escape;
                         }
                     }
 

@@ -62,7 +62,7 @@ pub(super) fn update_placement(
                 remember_item(state, pending.recent);
                 refresh_catalog_ui(ui, state, true);
             }
-            ui.set_status_message(result.message.into());
+            show_status(ui, result.message);
         } else {
             return Some(if result.message.is_empty() {
                 "Premiere could not place the media.".into()
@@ -84,7 +84,6 @@ pub(super) fn start_marker_naming(ui: &SpotlightWindow, state: &mut AppState) {
     state.marker_naming = Some(MarkerNaming { previous_query });
     ui.set_marker_naming(true);
     ui.set_search_text("".into());
-    ui.set_status_message("Add Named Marker · Esc to return".into());
     refresh_marker_results(ui, state);
     ui.invoke_focus_search();
 }
@@ -109,7 +108,7 @@ pub(super) fn submit_marker_name(
     }
     let facts = state.facts();
     if let Some(reason) = availability::primary(&SearchResult::Action(Action::AddNamedMarker), &facts).reason() {
-        ui.set_status_message(reason.into());
+        show_status(ui, reason);
         return Ok(());
     }
     let name = ui.get_search_text().trim().to_string();
@@ -187,7 +186,7 @@ pub(super) fn receive_marker(
         if matches!(event.result, Some(MarkerReply::Added)) {
             let message = named_marker_added(&pending.name);
             debug_log::log_event(LogKind::Success, "MARKER", &message);
-            ui.set_status_message(message.into());
+            show_status(ui, message);
         } else {
             let message = if event.message.is_empty() {
                 "Premiere could not add the marker.".to_string()
@@ -254,7 +253,7 @@ pub(super) fn finish_action(
     match outcome {
         Ok(message) => {
             debug_log::log_event(LogKind::Success, "ACTION", &message);
-            ui.set_status_message(message.into());
+            show_status(ui, message);
         }
         Err(message) => {
             debug_log::log_event(LogKind::Error, "ACTION", &message);
@@ -275,7 +274,7 @@ pub(super) fn update_open(
     if let Some(result) = reply.filter(|reply| reply.answers(&pending.request)) {
         state.pending_open = None;
         if result.ok {
-            ui.set_status_message(result.message.into());
+            show_status(ui, result.message);
         } else {
             return Some(if result.message.is_empty() {
                 target.failure().into()

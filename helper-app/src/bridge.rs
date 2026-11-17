@@ -1144,6 +1144,7 @@ mod tests {
             bin_path: "Project root".into(),
             kind,
             offline: id == "f",
+            media_type: None,
         };
         let catalog = MediaCatalog {
             peer_id: 9,

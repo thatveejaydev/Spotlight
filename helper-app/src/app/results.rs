@@ -2,34 +2,133 @@
 
 use super::*;
 
-/// What a result row's badge shows; each kind has its own color.
-#[derive(Clone, Copy)]
-pub(super) enum BadgeKind {
-    Effect(EffectType),
-    Media,
-    Sequence,
-    Bin,
-    /// Actions, markers and project items Spotlight can't place.
-    Neutral,
+/// How a kind of result looks: its icon (named in `ui/icons.slint`), its color on the
+/// dark themes, and the darker color the Light theme draws it in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct KindIcon {
+    pub name: &'static str,
+    pub tint: (u8, u8, u8),
+    pub ink: (u8, u8, u8),
 }
 
-/// Background and text color of a badge, before the theme adjusts them.
-pub(super) fn badge_colors(kind: BadgeKind) -> (Color, Color) {
-    let (background, text) = match kind {
-        BadgeKind::Effect(EffectType::VideoEffect) => ((45, 99, 102, 241), (165, 180, 252)),
-        BadgeKind::Effect(EffectType::AudioEffect) => ((45, 16, 185, 129), (110, 231, 183)),
-        BadgeKind::Effect(EffectType::VideoTransition) => ((45, 245, 158, 11), (252, 211, 77)),
-        BadgeKind::Effect(EffectType::AudioTransition) => ((45, 236, 72, 153), (249, 168, 212)),
-        BadgeKind::Effect(EffectType::Preset) => ((68, 248, 78, 66), (255, 174, 162)),
-        BadgeKind::Media => ((52, 56, 189, 248), (125, 211, 252)),
-        BadgeKind::Sequence => ((52, 168, 85, 247), (216, 180, 254)),
-        BadgeKind::Bin => ((52, 245, 158, 11), (253, 224, 131)),
-        BadgeKind::Effect(EffectType::Unknown) | BadgeKind::Neutral => {
-            ((45, 148, 163, 184), (203, 213, 225))
-        }
+const fn kind(name: &'static str, tint: (u8, u8, u8), ink: (u8, u8, u8)) -> KindIcon {
+    KindIcon { name, tint, ink }
+}
+
+pub(super) fn kind_icon(result: &SearchResult) -> KindIcon {
+    const VIDEO_FILE: KindIcon = kind("video", (125, 211, 252), (3, 105, 161));
+    const OTHER: KindIcon = kind("other", (203, 213, 225), (71, 85, 105));
+    match result {
+        SearchResult::Effect(entry) => match entry.effect_type {
+            EffectType::VideoEffect => kind("video-effect", (165, 180, 252), (79, 70, 229)),
+            EffectType::AudioEffect => kind("audio-effect", (110, 231, 183), (4, 120, 87)),
+            EffectType::VideoTransition => kind("video-transition", (252, 211, 77), (161, 98, 7)),
+            EffectType::AudioTransition => kind("audio-transition", (249, 168, 212), (190, 24, 93)),
+            EffectType::Preset => kind("preset", (255, 174, 162), (194, 65, 12)),
+            EffectType::Unknown => OTHER,
+        },
+        SearchResult::ProjectItem(item) => match item.kind {
+            ProjectItemKind::Media => match item.media_type {
+                Some(MediaType::Image) => kind("image", (94, 234, 212), (15, 118, 110)),
+                Some(MediaType::Audio) => kind("audio", (190, 242, 100), (77, 124, 15)),
+                Some(MediaType::Video | MediaType::Unknown) | None => VIDEO_FILE,
+            },
+            ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => {
+                kind("sequence", (216, 180, 254), (126, 34, 206))
+            }
+            ProjectItemKind::Bin => kind("bin", (253, 224, 131), (161, 98, 7)),
+            ProjectItemKind::Other => OTHER,
+        },
+        SearchResult::Action(_) => kind("action", (253, 186, 116), (194, 65, 12)),
+        SearchResult::Marker(_) => kind("marker", (252, 165, 165), (185, 28, 28)),
+    }
+}
+
+/// The kind of effect in words, shown at the right of effect rows.
+fn effect_kind(kind: EffectType) -> &'static str {
+    match kind {
+        EffectType::VideoEffect => "Video effect",
+        EffectType::AudioEffect => "Audio effect",
+        EffectType::VideoTransition => "Video transition",
+        EffectType::AudioTransition => "Audio transition",
+        EffectType::Preset => "Preset",
+        EffectType::Unknown => "Effect",
+    }
+}
+
+fn bin_path_label(path: &str) -> String {
+    path.replace(crate::catalog::BIN_PATH_SEPARATOR, " › ")
+}
+
+/// One row of the result list.
+pub(super) fn result_row(result: &SearchResult, facts: &Facts) -> EffectItemUI {
+    let reason = availability::primary(result, facts).reason();
+    let icon = kind_icon(result);
+    let color = |(r, g, b): (u8, u8, u8)| Color::from_rgb_u8(r, g, b);
+    let (name, detail, subtitle): (&str, String, &str) = match result {
+        SearchResult::Marker(marker) => (
+            marker.title(),
+            format!("{} · {}", marker.sequence_name, marker.position()),
+            "",
+        ),
+        SearchResult::Action(action) => (action.name(), "Action".into(), action.description()),
+        SearchResult::Effect(entry) if entry.is_preset() => (
+            entry.name.as_str(),
+            if entry.folder.is_empty() { "Preset".into() } else { bin_path_label(&entry.folder) },
+            "Finds it in the Effects panel so you can drag it onto a clip",
+        ),
+        SearchResult::Effect(entry) => (entry.name.as_str(), effect_kind(entry.effect_type).into(), ""),
+        SearchResult::ProjectItem(entry) => (entry.name.as_str(), bin_path_label(&entry.bin_path), ""),
     };
-    let ((alpha, red, green, blue), (r, g, b)) = (background, text);
-    (Color::from_argb_u8(alpha, red, green, blue), Color::from_rgb_u8(r, g, b))
+    EffectItemUI {
+        name: name.into(),
+        detail: detail.into(),
+        subtitle: reason.unwrap_or(subtitle).into(),
+        icon: icon.name.into(),
+        tint: color(icon.tint),
+        ink: color(icon.ink),
+        disabled: reason.is_some(),
+    }
+}
+
+/// What Enter, the alternate modifier with Enter, and Esc do for the highlighted row,
+/// for the footer. An empty label hides that hint.
+pub(super) fn key_hints(state: &AppState) -> (&'static str, &'static str, &'static str) {
+    if state.marker_naming.is_some() {
+        return ("Add marker", "", "Back");
+    }
+    let escape = if state.marker_picker.is_some() { "Back" } else { "Close" };
+    let Some(result) = state.matched_items.get(state.selected_abs_index) else {
+        return ("", "", escape);
+    };
+    let facts = state.facts();
+    let ready = |availability: Availability| availability.reason().is_none();
+    let open_effect_controls = state.settings.open_effect_controls_by_default;
+    let (enter, alternate) = match result {
+        SearchResult::Marker(_) => ("Go to marker", ""),
+        SearchResult::Action(Action::GoToMarker | Action::AddNamedMarker) => ("Open", ""),
+        SearchResult::Action(Action::LockHorizontalAxis) => ("Show how", ""),
+        SearchResult::Action(_) => ("Run", ""),
+        SearchResult::Effect(entry) if entry.is_preset() => ("Find in Effects panel", ""),
+        SearchResult::Effect(_) if open_effect_controls => ("Apply and open Effect Controls", "Apply"),
+        SearchResult::Effect(_) => ("Apply", "Apply and open Effect Controls"),
+        SearchResult::ProjectItem(item) => match item.kind {
+            ProjectItemKind::Bin => ("Open bin", ""),
+            ProjectItemKind::Media => ("Place at playhead", "Open in Source Monitor"),
+            ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => ("Nest at playhead", "Open in Timeline"),
+            ProjectItemKind::Other => ("", ""),
+        },
+    };
+    let enter = if ready(availability::primary(result, &facts)) { enter } else { "" };
+    let alternate = if ready(availability::alternate(result, &facts)) { alternate } else { "" };
+    (enter, alternate, escape)
+}
+
+pub(super) fn sync_key_hints(ui: &SpotlightWindow, state: &AppState) {
+    let (enter, alternate, escape) = key_hints(state);
+    ui.set_hint_enter(enter.into());
+    ui.set_hint_alternate(alternate.into());
+    ui.set_hint_escape(escape.into());
 }
 
 pub(super) fn remember_item(state: &mut AppState, recent: RecentItem) {
@@ -82,7 +181,6 @@ pub(super) fn receive_premiere_context(ui: &SpotlightWindow, state: &mut AppStat
     }
     state.context_request = None;
     state.premiere_context = event.context;
-    ui.set_context_summary(availability::summary(state.premiere_context.as_ref()).into());
     state.results_dirty = true;
     sync_viewport_slice(ui, state);
 }
@@ -107,7 +205,7 @@ pub(super) fn enter_bin(entry: &ProjectItemEntry, ui: &SpotlightWindow, state: &
     state.selected_abs_index = 0;
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
-    ui.set_status_message(format!("Browsing {} · Backspace to go up", bin_path).into());
+    show_status(ui, format!("Inside {} · Backspace goes up a level", bin_path));
     ui.invoke_focus_search();
 }
 
@@ -122,9 +220,9 @@ pub(super) fn step_out_bin(ui: &SpotlightWindow, state: &mut AppState) {
     state.scroll_offset = 0;
     refresh_results_ui(ui, state);
     if let Some(parent) = &state.active_bin_path {
-        ui.set_status_message(format!("Browsing {} · Backspace to go up", parent).into());
+        show_status(ui, format!("Inside {} · Backspace goes up a level", parent));
     } else {
-        ui.set_status_message("Showing all project items".into());
+        show_status(ui, "Showing all project media");
     }
     ui.invoke_focus_search();
 }
@@ -204,6 +302,7 @@ pub(super) fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
         state.results_dirty = false;
         ui.set_selected_index(0);
         ui.set_results(ModelRc::new(VecModel::from(Vec::<EffectItemUI>::new())));
+        sync_key_hints(ui, state);
         return;
     }
 
@@ -235,6 +334,7 @@ pub(super) fn refresh_catalog_ui(ui: &SpotlightWindow, state: &mut AppState, pre
 }
 
 pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
+    sync_key_hints(ui, state);
     let total = state.matched_items.len();
     if total == 0 {
         state.rendered_scroll_offset = None;
@@ -260,56 +360,7 @@ pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
     let facts = state.facts();
     let slice: Vec<EffectItemUI> = state.matched_items[state.scroll_offset..end]
         .iter()
-        .map(|entry| {
-            let reason = availability::primary(entry, &facts).reason();
-            let position;
-            let (name, category, folder, colors) = match entry {
-                SearchResult::Marker(marker) => {
-                    position = marker.position();
-                    (marker.title(), position.as_str(), marker.sequence_name.as_str(), badge_colors(BadgeKind::Neutral))
-                }
-                SearchResult::Action(action) => (
-                    action.name(),
-                    "Action",
-                    action.description(),
-                    badge_colors(BadgeKind::Neutral),
-                ),
-                SearchResult::Effect(entry) => (
-                    entry.name.as_str(),
-                    entry.category_short(),
-                    if entry.is_preset() {
-                        entry.folder.as_str()
-                    } else {
-                        ""
-                    },
-                    badge_colors(BadgeKind::Effect(entry.effect_type)),
-                ),
-                SearchResult::ProjectItem(entry) => (
-                    entry.name.as_str(),
-                    entry.kind.label(),
-                    entry.bin_path.as_str(),
-                    badge_colors(match entry.kind {
-                        ProjectItemKind::Media => BadgeKind::Media,
-                        ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => BadgeKind::Sequence,
-                        ProjectItemKind::Bin => BadgeKind::Bin,
-                        ProjectItemKind::Other => BadgeKind::Neutral,
-                    }),
-                ),
-            };
-            EffectItemUI {
-                name: name.into(),
-                category: category.into(),
-                folder: if matches!(entry, SearchResult::Marker(_)) {
-                    folder.into()
-                } else {
-                    folder.replace(crate::catalog::BIN_PATH_SEPARATOR, " › ").into()
-                },
-                badge_bg: colors.0,
-                badge_fg: colors.1,
-                disabled: reason.is_some(),
-                reason: reason.unwrap_or_default().into(),
-            }
-        })
+        .map(|entry| result_row(entry, &facts))
         .collect();
 
     ui.set_results(ModelRc::new(VecModel::from(slice)));

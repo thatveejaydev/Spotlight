@@ -1,6 +1,73 @@
-// Rows used by the settings view.
+// Controls shared by the palette and the settings view.
 
 import { PaletteThemeColors as Theme } from "palette-theme.slint";
+
+// A plain text tab with an underline when active, used for catalogs and settings sections.
+export component TextTab inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <int> index;
+    callback clicked();
+
+    width: tab-label.preferred-width;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-index: root.index;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.clicked(); }
+
+    tab-label := Text {
+        text: root.label;
+        font-size: 12.5px;
+        font-weight: root.active ? 600 : 400;
+        color: root.active ? Theme.primary-text : (tab-touch.has-hover ? Theme.result-text : Theme.tab-text);
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - self.height;
+        height: 2px;
+        border-radius: 1px;
+        background: root.active ? Theme.focus-outline : transparent;
+    }
+    tab-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A key and what it does, such as "Enter  Apply", for the palette footer.
+export component KeyHint inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> label;
+
+    spacing: 6px;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            height: 18px;
+            width: key-label.preferred-width + 10px;
+            border-radius: 4px;
+            background: Theme.control-background;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            key-label := Text {
+                text: root.key;
+                font-size: 10.5px;
+                font-weight: 600;
+                color: Theme.shortcut-text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Text {
+        text: root.label;
+        font-size: 11.5px;
+        color: Theme.muted-text;
+        vertical-alignment: center;
+    }
+}
 
 export component ShortcutRecorderRow inherits HorizontalLayout {
     in property <string> label;

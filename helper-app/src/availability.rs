@@ -21,9 +21,6 @@ const NEEDS_25_6: &str = "Requires Premiere Pro 25.6 or later.";
 const NOT_REGISTERED: &str = "Run Register Adjustment Layer first.";
 const NOT_ADJUSTMENT_LAYER: &str = "Select one adjustment layer in the Timeline.";
 
-/// The longest sequence name the footer shows before eliding it.
-const SUMMARY_NAME_CHARS: usize = 18;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Availability {
     Ready,
@@ -100,47 +97,6 @@ pub fn alternate(result: &SearchResult, facts: &Facts) -> Availability {
     match result {
         SearchResult::ProjectItem(entry) => Availability::from_check(source_monitor(entry, facts)),
         _ => primary(result, facts),
-    }
-}
-
-/// A short description of the active sequence and selection for the footer, or
-/// empty while the plugin hasn't answered.
-pub fn summary(context: Option<&PremiereContext>) -> String {
-    let Some(context) = context else {
-        return String::new();
-    };
-    if context.project_id.is_none() {
-        return "No project".into();
-    }
-    if context.sequence_id.is_none() {
-        return "No sequence".into();
-    }
-    let name = context
-        .sequence_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Sequence");
-    let name = if name.chars().count() > SUMMARY_NAME_CHARS {
-        let short: String = name.chars().take(SUMMARY_NAME_CHARS - 1).collect();
-        format!("{}…", short.trim_end())
-    } else {
-        name.to_string()
-    };
-    let Some(selection) = &context.selection else {
-        return name;
-    };
-    match (selection.total, selection.video, selection.audio) {
-        (0, _, _) => format!("{name} · No selection"),
-        (_, Some(video), Some(audio)) if video + audio > 0 => {
-            let parts: Vec<String> = [(video, "video"), (audio, "audio")]
-                .into_iter()
-                .filter(|(count, _)| *count > 0)
-                .map(|(count, label)| format!("{count} {label}"))
-                .collect();
-            format!("{name} · {}", parts.join(", "))
-        }
-        (total, _, _) => format!("{name} · {total} selected"),
     }
 }
 
@@ -276,6 +232,7 @@ mod tests {
             bin_path: "Footage".into(),
             kind,
             offline,
+            media_type: None,
         }))
     }
 
@@ -465,27 +422,5 @@ mod tests {
         ] {
             assert_eq!(supports_25_6(version), expected, "{version}");
         }
-    }
-
-    #[test]
-    fn summary_describes_the_sequence_and_selection() {
-        assert_eq!(summary(None), "");
-        assert_eq!(summary(Some(&PremiereContext::default())), "No project");
-        assert_eq!(summary(Some(&PremiereContext { sequence_id: None, ..context(None) })), "No sequence");
-        assert_eq!(summary(Some(&context(None))), "Sequence 01");
-        assert_eq!(summary(Some(&context(selected(0, 0, 0)))), "Sequence 01 · No selection");
-        assert_eq!(summary(Some(&context(selected(3, 2, 1)))), "Sequence 01 · 2 video, 1 audio");
-        assert_eq!(summary(Some(&context(selected(1, 0, 1)))), "Sequence 01 · 1 audio");
-        assert_eq!(
-            summary(Some(&context(Some(SelectionSummary { total: 4, ..SelectionSummary::default() })))),
-            "Sequence 01 · 4 selected"
-        );
-        let long = PremiereContext {
-            sequence_name: Some("A very long sequence name".into()),
-            ..context(None)
-        };
-        assert_eq!(summary(Some(&long)), "A very long seque…");
-        let unnamed = PremiereContext { sequence_name: Some("  ".into()), ..context(None) };
-        assert_eq!(summary(Some(&unnamed)), "Sequence");
     }
 }

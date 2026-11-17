@@ -130,6 +130,22 @@ pub struct ProjectItemEntry {
     pub kind: ProjectItemKind,
     #[serde(default)]
     pub offline: bool,
+    /// What a media clip holds, for its icon. Null from older plugins and for items
+    /// without a file extension.
+    #[serde(default)]
+    pub media_type: Option<MediaType>,
+}
+
+/// The kind of file behind a media clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaType {
+    Video,
+    Image,
+    Audio,
+    /// A type a newer plugin may send.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ProjectItemEntry {
@@ -342,17 +358,6 @@ impl CatalogEntry<'_> {
 impl EffectEntry {
     pub fn is_preset(&self) -> bool {
         self.effect_type == EffectType::Preset
-    }
-
-    pub fn category_short(&self) -> &'static str {
-        match self.effect_type {
-            EffectType::VideoEffect => "Video FX",
-            EffectType::AudioEffect => "Audio FX",
-            EffectType::VideoTransition => "Video Trans",
-            EffectType::AudioTransition => "Audio Trans",
-            EffectType::Preset => "Preset",
-            EffectType::Unknown => "Effect",
-        }
     }
 
     fn is_supported(&self) -> bool {
@@ -633,6 +638,7 @@ mod tests {
                 bin_path: "Archive / Stills".into(),
                 kind: ProjectItemKind::Media,
                 offline: false,
+                media_type: None,
             },
             ProjectItemEntry {
                 item_id: "2".into(),
@@ -640,6 +646,7 @@ mod tests {
                 bin_path: "Drafts".into(),
                 kind: ProjectItemKind::Sequence,
                 offline: false,
+                media_type: None,
             },
         ]);
         let all = store.search("Gaussian Blur", "all");
@@ -732,6 +739,7 @@ mod tests {
             bin_path: bin_path.into(),
             kind: ProjectItemKind::Bin,
             offline: false,
+            media_type: None,
         };
         let clip = |id: &str, name: &str, bin_path: &str| ProjectItemEntry {
             item_id: id.into(),
@@ -739,6 +747,7 @@ mod tests {
             bin_path: bin_path.into(),
             kind: ProjectItemKind::Media,
             offline: false,
+            media_type: None,
         };
 
         let root_bin = bin("b1", "Footage", "Project root");
@@ -826,6 +835,7 @@ mod tests {
             bin_path: bin_path.into(),
             kind: ProjectItemKind::Media,
             offline: false,
+            media_type: None,
         };
         let mut items: Vec<_> = [
             ("A-Cam_Interview_01.mov", "Footage / Interviews"),

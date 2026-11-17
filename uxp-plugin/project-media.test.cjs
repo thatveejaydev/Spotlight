@@ -603,3 +603,28 @@ test("opening in the Timeline rejects media, bins, stale context and host failur
   f.ppro.Project.getActiveProject = () => ({ ...f.project, guid: "other project" });
   await assert.rejects(open("draft"), /Active project changed/);
 });
+
+test("reports whether each clip is video, an image or audio", async () => {
+  const f = fixture();
+  await f.scan(7);
+  const typeOf = (messages, itemId) => messages.at(-1).items.find((item) => item.itemId === itemId).mediaType;
+  // Without a media path the item name decides; sequences, bins and other items get none.
+  assert.equal(typeOf(f.messages, "take"), "video");
+  for (const itemId of ["draft", "bin", "other", "self"]) assert.equal(typeOf(f.messages, itemId), null);
+
+  // The media file wins over a renamed item.
+  f.clip.getMediaFilePath = async () => "D:\Graphics\Logo_Lockup.PNG";
+  f.markProjectChanged();
+  await f.scan(8);
+  assert.equal(typeOf(f.messages, "take"), "image");
+  f.clip.getMediaFilePath = async () => "D:\Music\Theme.wav";
+  f.markProjectChanged();
+  await f.scan(9);
+  assert.equal(typeOf(f.messages, "take"), "audio");
+
+  // A failing or empty path falls back to the name.
+  f.clip.getMediaFilePath = async () => { throw new Error("unavailable"); };
+  f.markProjectChanged();
+  await f.scan(10);
+  assert.equal(typeOf(f.messages, "take"), "video");
+});

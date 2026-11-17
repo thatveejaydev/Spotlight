@@ -28,7 +28,7 @@ use crate::{
     audio_preview::AudioPreview,
     availability::{self, Availability, Facts},
     bridge::{ApplyResult, BridgeClients, BridgeEvent, ContextEvent, MarkerEvent, MediaCatalog},
-    catalog::{Catalog, CatalogStore, EffectEntry, EffectType, ProjectItemEntry, ProjectItemKind, SearchResult},
+    catalog::{Catalog, CatalogStore, EffectEntry, EffectType, MediaType, ProjectItemEntry, ProjectItemKind, SearchResult},
     debug_log::{self, DebugLogController, LogKind},
     error_toast::{self, ErrorToast},
     premiere_prefs::{self, ShortcutBinding},
@@ -194,6 +194,25 @@ struct PendingOpen {
     target: OpenTarget,
 }
 
+/// How long a result message replaces the footer's key hints.
+const STATUS_DURATION: Duration = Duration::from_secs(4);
+
+/// Shows `message` in the footer for a few seconds, then brings the key hints back.
+pub(crate) fn show_status(ui: &SpotlightWindow, message: impl Into<SharedString>) {
+    ui.set_status_message(message.into());
+    ui.set_status_visible(true);
+    let weak = ui.as_weak();
+    STATUS_TIMER.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let timer = guard.get_or_insert_with(Timer::default);
+        timer.start(TimerMode::SingleShot, STATUS_DURATION, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_status_visible(false);
+            }
+        });
+    });
+}
+
 fn start_focus_grace_timer() {
     FOCUS_TIMER.with(|slot| {
         let mut guard = slot.borrow_mut();
@@ -251,4 +270,5 @@ thread_local! {
     static PREMIERE_EXIT_DISPATCH: UiSlot<()> = const { UiSlot::new() };
     static FOCUS_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
     static DEADLINE_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
+    static STATUS_TIMER: RefCell<Option<Timer>> = const { RefCell::new(None) };
 }

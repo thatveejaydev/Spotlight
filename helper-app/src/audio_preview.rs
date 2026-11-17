@@ -1,6 +1,7 @@
 mod playback;
 
 use crate::{
+    app::show_status,
     bridge::{AudioPreviewResult, BridgeClients, MediaCatalog},
     catalog::{ProjectItemEntry, ProjectItemKind},
     SpotlightWindow,
@@ -202,7 +203,7 @@ impl AudioPreview {
         self.timer.stop();
         if intent == ResolveIntent::Manual {
             if !ui.get_preview_active() {
-                ui.set_status_message(message.into());
+                show_status(ui, message);
             } else {
                 ui.set_preview_message(message.into());
             }

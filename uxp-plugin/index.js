@@ -10,6 +10,7 @@ const { runMarkerCommand } = require("./actions/markers.js");
 const { sourceKey } = require("./actions/adjustment-layer.js");
 const { entrypoints, shell, host } = require("uxp");
 const { nowMs, mapWithConcurrency, guid } = require("./lib/util.js");
+const { mediaTypeOfFileName } = require("./lib/media.js");
 const {
   readTicks,
   readItemRange,
@@ -115,6 +116,19 @@ function sendProjectItems(connection, requestId, projectId, sequenceId, items, s
   }
 }
 
+// "audio", "image" or "video" for the clip icon, from the media file when Premiere
+// reports it (25.6 or later), else from the item name. Null when neither tells.
+async function readMediaType(item, clip) {
+  try {
+    const filePath = await clip.getMediaFilePath?.();
+    const fromPath = mediaTypeOfFileName(filePath);
+    if (fromPath) return fromPath;
+  } catch (_) {
+    // Fall back to the name.
+  }
+  return mediaTypeOfFileName(item.name);
+}
+
 // `reuse` sends the last list without walking the project when nothing changed since it was built.
 async function syncProjectItems(connection, requestId, clear = false, reuse = false) {
   if (!connection || ws !== connection) return;
@@ -158,6 +172,7 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
         async ({ item, clip, itemId, path, bin }) => {
           let kind = bin ? "bin" : "other";
           let offline = false;
+          let mediaType = null;
           if (itemId === activeItemId) {
             kind = "activeSequence";
           } else if (clip && !stale()) {
@@ -165,12 +180,13 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
               kind = (await clip.isSequence()) ? "sequence" : "media";
               if (kind === "media" && !stale()) {
                 offline = Boolean(await clip.isOffline?.());
+                mediaType = await readMediaType(item, clip);
               }
             } catch (_) {
               // Keep items visible even when Premiere cannot classify their source.
             }
           }
-          return { itemId, name: item.name, binPath: path || PROJECT_ROOT_BIN, kind, offline };
+          return { itemId, name: item.name, binPath: path || PROJECT_ROOT_BIN, kind, offline, mediaType };
         }
       );
       if (stale()) return;

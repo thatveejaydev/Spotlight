@@ -351,7 +351,7 @@ mod tests {
                 panic!("Expected two presets");
             };
             assert_eq!(root.name, "Café & 光 🎞");
-            assert_eq!(root.category_short(), "Preset");
+            assert!(root.is_preset());
             assert_eq!(root.folder, "Presets");
             assert_eq!(nested.folder, "Presets / Pack");
             assert!(!results[0].same_item(&results[1]));

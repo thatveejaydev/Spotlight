@@ -1,43 +1,52 @@
 // The small notification Spotlight shows over Premiere when a command fails.
 
+import { Icon } from "icons.slint";
+
 export component ErrorToastWindow inherits Window {
     title: "Premiere Spotlight error";
     no-frame: true;
     always-on-top: true;
-    width: 304px;
+    width: 320px;
     height: toast-height;
-    background: #242427;
+    background: #1c1d24;
 
-    out property <length> toast-height: 54px;
+    out property <length> toast-height: 56px;
     in property <string> message;
 
     Rectangle {
         width: parent.width;
         height: parent.height;
         border-width: 1px;
-        border-color: #604249;
+        border-color: #4a3038;
 
+        // A thin accent on the left edge marks the problem without shouting.
         Rectangle {
-            x: 12px;
+            x: 0px;
+            width: 3px;
+            height: parent.height;
+            background: #e0727e;
+        }
+
+        Icon {
+            x: 14px;
             y: (parent.height - self.height) / 2;
-            width: 6px;
-            height: 6px;
-            border-radius: 3px;
-            background: #ca7c85;
+            width: 16px;
+            height: 16px;
+            name: "info";
+            ink: #f0a3ab;
         }
 
         Text {
-            x: 26px;
+            x: 40px;
             y: 4px;
-            width: parent.width - 38px;
+            width: parent.width - 52px;
             height: parent.height - 8px;
             text: root.message;
-            font-size: 13px;
-            color: #e2e2e5;
+            font-size: 12.5px;
+            color: #e6e7ee;
             vertical-alignment: center;
             wrap: word-wrap;
             overflow: elide;
         }
     }
 }
-
