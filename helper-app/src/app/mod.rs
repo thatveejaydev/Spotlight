@@ -26,12 +26,14 @@ use crate::{
         Action,
     },
     audio_preview::AudioPreview,
-    bridge::{ApplyResult, BridgeClients, BridgeEvent, MarkerEvent, MediaCatalog},
+    availability::{self, Availability, Facts},
+    bridge::{ApplyResult, BridgeClients, BridgeEvent, ContextEvent, MarkerEvent, MediaCatalog},
     catalog::{Catalog, CatalogStore, EffectEntry, EffectType, ProjectItemEntry, ProjectItemKind, SearchResult},
     debug_log::{self, DebugLogController, LogKind},
     error_toast::{self, ErrorToast},
     premiere_prefs::{self, ShortcutBinding},
     presets::{self, PresetHandoff},
+    protocol::PremiereContext,
     request::{CommandReply, PendingRequest, ACTION_TIMEOUT},
     settings::{
         self, AlternateModifier, AppSettings, PaletteShortcut, PaletteShortcutAction, PaletteTheme,
@@ -65,6 +67,9 @@ struct AppState {
     recent_items: Vec<RecentItem>,
     pending_effects: HashMap<u64, PendingEffect>,
     media_catalog: Option<MediaCatalog>,
+    /// What Premiere reported when the palette opened; `None` until it answers.
+    premiere_context: Option<PremiereContext>,
+    context_request: Option<PendingRequest>,
     pending_placement: Option<PendingPlacement>,
     pending_source_open: Option<PendingRequest>,
     pending_action: Option<PendingRequest>,
@@ -91,6 +96,8 @@ impl AppState {
             recent_items: Vec::new(),
             pending_effects: HashMap::new(),
             media_catalog: None,
+            premiere_context: None,
+            context_request: None,
             pending_placement: None,
             pending_source_open: None,
             pending_action: None,
@@ -108,6 +115,12 @@ impl AppState {
             saw_foreground: false,
             previous_hwnd: 0,
         }
+    }
+}
+
+impl AppState {
+    fn facts(&self) -> Facts {
+        Facts::new(self.premiere_context.as_ref(), self.media_catalog.as_ref())
     }
 }
 

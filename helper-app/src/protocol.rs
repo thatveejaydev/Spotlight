@@ -62,6 +62,17 @@ pub enum IncomingPluginMessage {
         #[serde(default)]
         message: String,
     },
+    /// The Premiere state Spotlight uses to dim results that can't run. `context` is
+    /// null when the plugin could not read it.
+    #[serde(rename = "context", rename_all = "camelCase")]
+    Context {
+        request_id: u64,
+        #[serde(default)]
+        context: Option<PremiereContext>,
+        /// Time the plugin spent reading it, in milliseconds; diagnostics only.
+        #[serde(default)]
+        elapsed_ms: Option<u64>,
+    },
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "show_window")]
@@ -71,6 +82,8 @@ pub enum IncomingPluginMessage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum OutgoingHelperMessage {
+    #[serde(rename = "request_context", rename_all = "camelCase")]
+    RequestContext { request_id: u64 },
     #[serde(rename = "request_project_items", rename_all = "camelCase")]
     RequestProjectItems { request_id: u64 },
     #[serde(rename = "place_project_item", rename_all = "camelCase")]
@@ -116,6 +129,45 @@ pub enum OutgoingHelperMessage {
     },
 }
 
+
+/// What the plugin knows about the active project, sequence and Timeline selection
+/// when the palette opens.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PremiereContext {
+    /// Null when no project is open.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Null when no sequence is open in the Timeline.
+    #[serde(default)]
+    pub sequence_id: Option<String>,
+    #[serde(default)]
+    pub sequence_name: Option<String>,
+    /// Null without an open sequence, or when Premiere could not read the selection.
+    #[serde(default)]
+    pub selection: Option<SelectionSummary>,
+    /// Null when unknown.
+    #[serde(default)]
+    pub adjustment_layer_registered: Option<bool>,
+    /// Premiere's version, such as "25.6.1". Null when unknown.
+    #[serde(default)]
+    pub host_version: Option<String>,
+}
+
+/// The selected Timeline items. A null field means Premiere can't classify them.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionSummary {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub video: Option<u32>,
+    #[serde(default)]
+    pub audio: Option<u32>,
+    /// True when exactly one item is selected and it is an adjustment layer.
+    #[serde(default)]
+    pub single_adjustment_layer: Option<bool>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -212,5 +264,66 @@ pub enum MarkerReply {
         created: bool,
     },
     Confirmed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_context(json: &str) -> (u64, Option<PremiereContext>) {
+        match serde_json::from_str(json).unwrap() {
+            IncomingPluginMessage::Context { request_id, context, .. } => (request_id, context),
+            _ => panic!("not a context message"),
+        }
+    }
+
+    #[test]
+    fn context_messages_parse_full_partial_and_null_replies() {
+        let (request_id, context) = parse_context(
+            r#"{ "type": "context", "requestId": 7, "context": {
+                "projectId": "p", "sequenceId": "s", "sequenceName": "Sequence 01",
+                "selection": { "total": 3, "video": 2, "audio": 1, "singleAdjustmentLayer": false },
+                "adjustmentLayerRegistered": true, "hostVersion": "25.6.1" } }"#,
+        );
+        assert_eq!(request_id, 7);
+        assert_eq!(
+            context,
+            Some(PremiereContext {
+                project_id: Some("p".into()),
+                sequence_id: Some("s".into()),
+                sequence_name: Some("Sequence 01".into()),
+                selection: Some(SelectionSummary {
+                    total: 3,
+                    video: Some(2),
+                    audio: Some(1),
+                    single_adjustment_layer: Some(false),
+                }),
+                adjustment_layer_registered: Some(true),
+                host_version: Some("25.6.1".into()),
+            })
+        );
+
+        let (_, context) = parse_context(
+            r#"{ "type": "context", "requestId": 8, "context": {
+                "projectId": "p", "sequenceId": null, "selection": { "total": 1, "video": null } } }"#,
+        );
+        let context = context.unwrap();
+        assert_eq!(context.sequence_id, None);
+        assert_eq!(context.selection.unwrap().video, None);
+        assert_eq!(context.host_version, None);
+
+        for json in [
+            r#"{ "type": "context", "requestId": 9, "context": null }"#,
+            r#"{ "type": "context", "requestId": 9 }"#,
+        ] {
+            assert_eq!(parse_context(json), (9, None));
+        }
+    }
+
+    #[test]
+    fn context_requests_serialize_with_a_request_id() {
+        let json = serde_json::to_value(OutgoingHelperMessage::RequestContext { request_id: 4 }).unwrap();
+        assert_eq!(json, serde_json::json!({ "type": "request_context", "requestId": 4 }));
+    }
 }
 

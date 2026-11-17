@@ -282,6 +282,7 @@ fn inline_audio_controls_fill_from_the_left_and_keep_row_activation_separate() {
         folder: "Audio".into(),
         badge_bg: Color::from_rgb_u8(0x21, 0x41, 0x68),
         badge_fg: Color::from_rgb_u8(0xb9, 0xe5, 0xff),
+        ..EffectItemUI::default()
     };
     ui.set_results(ModelRc::new(VecModel::from(vec![
         row("Music.wav"),
@@ -401,6 +402,87 @@ fn error_toast_renders_a_separate_notification() {
     assert!(pixels.chunks_exact(width).any(|row| {
         row[26..width - 12].iter().any(|pixel| pixel.g > 160)
     }));
+}
+
+#[test]
+fn premiere_context_dims_rows_and_blocks_them_without_hiding() {
+    use slint::Model;
+
+    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+    let ui = SpotlightWindow::new().unwrap();
+    let bridge = BridgeClients::new();
+    let requests = bridge.connect_test_peer(MediaCatalog {
+        peer_id: 7,
+        project_id: Some("project".into()),
+        sequence_id: Some("sequence".into()),
+        items: Vec::new(),
+    });
+    let mut state = AppState::new(AppSettings::default());
+    let read_command = || -> serde_json::Value {
+        serde_json::from_str(&requests.try_recv().unwrap()).unwrap()
+    };
+    let open = |ui: &SpotlightWindow, state: &mut AppState| {
+        center_and_show(ui, state, &bridge);
+        assert_eq!(read_command()["type"], "request_project_items");
+        let request = read_command();
+        assert_eq!(request["type"], "request_context");
+        ui.set_active_catalog("actions".into());
+        ui.set_search_text("Remove Attributes".into());
+        refresh_results_ui(ui, state);
+        request["requestId"].as_u64().unwrap()
+    };
+    let first_row = |ui: &SpotlightWindow| ui.get_results().row_data(0).unwrap();
+    let context = |total: u32| PremiereContext {
+        project_id: Some("project".into()),
+        sequence_id: Some("sequence".into()),
+        sequence_name: Some("Sequence 01".into()),
+        selection: Some(crate::protocol::SelectionSummary { total, ..Default::default() }),
+        adjustment_layer_registered: None,
+        host_version: Some("25.6.0".into()),
+    };
+    let reply = |request_id: u64, context: Option<PremiereContext>| ContextEvent {
+        peer_id: 7,
+        request_id,
+        context,
+    };
+
+    let request_id = open(&ui, &mut state);
+    // Rows stay enabled until Premiere answers, and stale replies are ignored.
+    assert!(!first_row(&ui).disabled);
+    receive_premiere_context(&ui, &mut state, reply(request_id + 100, Some(context(0))));
+    assert!(!first_row(&ui).disabled);
+    assert_eq!(ui.get_context_summary(), "");
+
+    receive_premiere_context(&ui, &mut state, reply(request_id, Some(context(0))));
+    let row = first_row(&ui);
+    assert!(row.disabled);
+    assert_eq!(row.reason, "Select clips in the Timeline first.");
+    assert_eq!(ui.get_context_summary(), "Sequence 01 · No selection");
+
+    // Enter on the dimmed row explains instead of sending the command.
+    assert!(apply_entry_at(0, &ui, &mut state, &bridge).unwrap().is_none());
+    assert!(state.is_visible);
+    assert!(state.pending_action.is_none());
+    assert_eq!(ui.get_status_message(), "Select clips in the Timeline first.");
+    assert_eq!(ui.get_flash_row(), 0);
+    assert!(requests.try_recv().is_err());
+
+    // Reopening forgets the old selection; a null context leaves rows enabled.
+    let request_id = open(&ui, &mut state);
+    assert!(!first_row(&ui).disabled);
+    assert_eq!(ui.get_flash_row(), -1);
+    receive_premiere_context(&ui, &mut state, reply(request_id, None));
+    assert!(!first_row(&ui).disabled);
+    assert_eq!(ui.get_context_summary(), "");
+
+    let request_id = open(&ui, &mut state);
+    receive_premiere_context(&ui, &mut state, reply(request_id, Some(context(2))));
+    assert!(!first_row(&ui).disabled);
+    assert_eq!(ui.get_context_summary(), "Sequence 01 · 2 selected");
+    apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+    assert!(!state.is_visible);
+    assert_eq!(read_command()["action"], "remove_attributes");
 }
 
 #[test]
@@ -618,6 +700,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
     activate_action(Action::GoToMarker, &ui, &mut state, &bridge).unwrap();
     assert!(state.is_visible && ui.get_marker_picker());
     assert_eq!(read_command()["type"], "request_project_items");
+    assert_eq!(read_command()["type"], "request_context");
     assert_eq!(read_command()["operation"], "list");
     escape_palette(&ui, &mut state);
     assert!(state.is_visible && !ui.get_marker_picker());
@@ -774,10 +857,11 @@ fn shift_activate_handles_effects_and_project_items() {
         Some(false)
     );
 
-    // Bins are rejected without hiding.
+    // Bins are rejected without hiding, and the reason shows in the footer.
     show_palette(&ui, &mut state);
-    let error = shift_activate_at(2, &ui, &mut state, &bridge).unwrap_err();
-    assert!(error.contains("Bins"));
+    assert!(shift_activate_at(2, &ui, &mut state, &bridge).unwrap().is_none());
+    assert!(ui.get_status_message().contains("Bins"));
+    assert_eq!(ui.get_flash_row(), 2);
     assert!(state.is_visible);
     assert!(requests.try_recv().is_err());
 
@@ -1330,6 +1414,7 @@ fn selected_project_folder_renders_beside_name_and_separated() {
             folder: folder.into(),
             badge_bg: Color::from_rgb_u8(0x36, 0x26, 0x5c),
             badge_fg: Color::from_rgb_u8(0xdd, 0xd6, 0xfe),
+            ..EffectItemUI::default()
         };
         ui.set_results(ModelRc::new(VecModel::from(vec![item])));
         ui.set_selected_index(0);

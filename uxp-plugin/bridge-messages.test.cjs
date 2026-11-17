@@ -83,6 +83,14 @@ test("each helper command gets its reply type, request ID and failure message", 
   const items = await bridge.send({ type: "request_project_items", requestId: 7 });
   assert.ok(items.some((reply) => reply.type === "project_items" && reply.requestId === 7));
 
+  const [context] = await bridge.send({ type: "request_context", requestId: 8 });
+  assert.equal(context.type, "context");
+  assert.equal(context.requestId, 8);
+  assert.deepEqual(context.context, {
+    projectId: null, sequenceId: null, sequenceName: null, selection: null,
+    adjustmentLayerRegistered: null, hostVersion: null
+  });
+
   const [catalog] = await bridge.send({ type: "request_catalog" });
   assert.equal(catalog.type, "catalog");
   assert.ok(Array.isArray(catalog.effects));
@@ -91,7 +99,7 @@ test("each helper command gets its reply type, request ID and failure message", 
 test("commands without a request ID and unknown types get no reply", async () => {
   const bridge = connect();
   for (const type of ["place_project_item", "open_in_source_monitor", "run_action",
-    "request_audio_preview", "marker_command", "request_project_items"]) {
+    "request_audio_preview", "marker_command", "request_project_items", "request_context"]) {
     assert.deepEqual(await bridge.send({ type, requestId: "1" }), [], type);
   }
   assert.deepEqual(await bridge.send({ type: "toString", requestId: 1 }), []);

@@ -23,6 +23,9 @@ pub(super) fn apply_entry_with_options(
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
         return Ok(None);
     };
+    if block_unavailable(availability::primary(&chosen, &state.facts()), abs_index, ui, state) {
+        return Ok(None);
+    }
     if let SearchResult::Effect(entry) = &chosen {
         if entry.is_preset() {
             let reveal = PresetHandoff::new(state.previous_hwnd, entry.clone())?;
@@ -200,7 +203,10 @@ pub(super) fn shift_activate_at(
             );
             apply_entry_with_options(abs_index, ui, state, bridge, open_effect_controls)
         }
-        SearchResult::ProjectItem(entry) => {
+        SearchResult::ProjectItem(ref entry) => {
+            if block_unavailable(availability::alternate(&chosen, &state.facts()), abs_index, ui, state) {
+                return Ok(None);
+            }
             let Some(catalog) = &state.media_catalog else {
                 return Err("Project media changed. Search again.".into());
             };
@@ -215,6 +221,36 @@ pub(super) fn shift_activate_at(
             Ok(None)
         }
     }
+}
+
+/// How long a disabled row's outline flashes after activating it.
+const FLASH_DURATION: Duration = Duration::from_millis(400);
+
+/// Keeps the palette open and shows why when `availability` blocks the row at
+/// `abs_index`. Returns true when it blocked.
+fn block_unavailable(
+    availability: Availability,
+    abs_index: usize,
+    ui: &SpotlightWindow,
+    state: &AppState,
+) -> bool {
+    let Some(reason) = availability.reason() else {
+        return false;
+    };
+    ui.set_status_message(reason.into());
+    debug_log::log_event(LogKind::Info, "UNAVAILABLE", reason);
+    if let Some(row) = abs_index.checked_sub(state.scroll_offset).filter(|row| *row < VISIBLE_ROWS) {
+        ui.set_flash_row(row as i32);
+        let weak = ui.as_weak();
+        Timer::single_shot(FLASH_DURATION, move || {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_flash_row() == row as i32 {
+                    ui.set_flash_row(-1);
+                }
+            }
+        });
+    }
+    true
 }
 
 pub(super) fn finish_activation(

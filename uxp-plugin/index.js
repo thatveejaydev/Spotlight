@@ -7,7 +7,8 @@
 const ppro = require("premierepro");
 const { runAction } = require("./actions/index.js");
 const { runMarkerCommand } = require("./actions/markers.js");
-const { entrypoints, shell } = require("uxp");
+const { sourceKey } = require("./actions/adjustment-layer.js");
+const { entrypoints, shell, host } = require("uxp");
 const { nowMs, mapWithConcurrency, guid } = require("./lib/util.js");
 const {
   readTicks,
@@ -24,6 +25,11 @@ const {
 const effects = require("./lib/effects.js")(ppro);
 const placement = require("./lib/placement.js")(ppro, { findProjectEntry });
 const sourceMedia = require("./lib/source-media.js")(ppro, { findProjectEntry });
+const premiereContext = require("./lib/context.js")(ppro, {
+  storage: globalThis.localStorage,
+  sourceKey,
+  hostVersion: host?.version
+});
 
 const WS_URLS = ["ws://localhost:3847", "ws://127.0.0.1:3847"];
 const HELPER_EXE_PATH = "__SPOTLIGHT_HELPER_EXE_PATH__";
@@ -370,6 +376,20 @@ const messageHandlers = new Map([
   ["request_project_items", withRequestId(async (msg, connection) => {
     mediaRequestId = msg.requestId;
     void syncProjectItems(connection, mediaRequestId, false, true);
+  })],
+  // Answers with null when Premiere can't be read, so the helper leaves every row enabled.
+  ["request_context", withRequestId(async (msg, connection) => {
+    const startedAt = nowMs();
+    let context = null;
+    try {
+      context = await premiereContext.readContext();
+    } catch (error) {
+      console.warn("[Spotlight] Could not read the Premiere context:", error);
+    }
+    if (ws === connection) {
+      const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
+      sendJson({ type: "context", requestId: msg.requestId, context, elapsedMs });
+    }
   })],
   ["place_project_item", withRequestId((msg, connection) =>
     replyWithOutcome(connection, "placement_ack", msg.requestId, async () => {

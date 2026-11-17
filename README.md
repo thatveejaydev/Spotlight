@@ -77,6 +77,9 @@ CI runs both suites and Clippy on Windows for every push to `main` and every pul
 - **`Shift + Enter` (or `Shift` + Click; configurable to `Ctrl` or `Alt`):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, or open a project item in the Source Monitor.
 - **`Esc`:** Close popup and return focus to Premiere (or exit Settings back to Search if Settings is open)
 
+### Unavailable results
+When Spotlight opens, it reads the active sequence and Timeline selection from Premiere. The footer shows a summary such as `Sequence 01 · 2 video, 1 audio`. Results that can't run right now are dimmed and marked with ⊘. Examples include a video effect when only audio clips are selected, **Remove Attributes** with nothing selected, offline media, or a command that requires Premiere Pro 25.6 on an older version. Highlight a dimmed row to see why. Pressing `Enter` on it keeps Spotlight open, shows the reason in the footer and sends nothing to Premiere. Until Premiere answers, or when it can't report something, every row stays enabled and the command's own checks apply.
+
 ## Settings & Configuration
 - Click the **⚙** icon in the lower-right corner of the Spotlight popup, press **`Ctrl+,`** inside Spotlight (configurable), or right-click the **Premiere Spotlight** tray icon → **Settings** to:
   - Customize the global **Launch Hotkey** (default `Ctrl+Space`).

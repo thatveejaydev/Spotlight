@@ -4,6 +4,7 @@ mod action_hotkeys;
 mod actions;
 mod app;
 mod audio_preview;
+mod availability;
 mod bridge;
 mod catalog;
 mod cursor_lock;

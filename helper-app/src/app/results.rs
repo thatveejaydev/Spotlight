@@ -64,6 +64,29 @@ pub(super) fn recent_results(state: &AppState) -> Vec<SearchResult> {
         .collect()
 }
 
+/// Asks the plugin for the Premiere state that decides which rows are dimmed.
+/// Keeps the current state until the reply arrives.
+pub(super) fn request_premiere_context(state: &mut AppState, bridge: &BridgeClients) {
+    state.context_request = bridge
+        .request_context()
+        .map(|(request_id, peer_id)| PendingRequest::new(peer_id, request_id));
+}
+
+/// Stores the plugin's reply to the latest context request and redraws the rows.
+pub(super) fn receive_premiere_context(ui: &SpotlightWindow, state: &mut AppState, event: ContextEvent) {
+    if !state
+        .context_request
+        .is_some_and(|request| request.is_answered_by(event.peer_id, event.request_id))
+    {
+        return;
+    }
+    state.context_request = None;
+    state.premiere_context = event.context;
+    ui.set_context_summary(availability::summary(state.premiere_context.as_ref()).into());
+    state.results_dirty = true;
+    sync_viewport_slice(ui, state);
+}
+
 pub(super) fn sync_bin_ui(ui: &SpotlightWindow, state: &AppState) {
     ui.set_active_bin(state.active_bin_path.as_deref().unwrap_or("").into());
 }
@@ -229,9 +252,11 @@ pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
     }
 
     let end = (state.scroll_offset + VISIBLE_ROWS).min(total);
+    let facts = state.facts();
     let slice: Vec<EffectItemUI> = state.matched_items[state.scroll_offset..end]
         .iter()
         .map(|entry| {
+            let reason = availability::primary(entry, &facts).reason();
             let position;
             let (name, category, folder, colors) = match entry {
                 SearchResult::Marker(marker) => {
@@ -276,6 +301,8 @@ pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
                 },
                 badge_bg: colors.0,
                 badge_fg: colors.1,
+                disabled: reason.is_some(),
+                reason: reason.unwrap_or_default().into(),
             }
         })
         .collect();

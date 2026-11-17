@@ -12,6 +12,9 @@ export struct EffectItemUI {
     folder: string,
     badge-bg: color,
     badge-fg: color,
+    // True when the primary action can't run now; `reason` says why.
+    disabled: bool,
+    reason: string,
 }
 
 export struct ActionHotkeyUI {
@@ -93,6 +96,10 @@ export component SpotlightWindow inherits Window {
     in-out property <string> settings-feedback: "";
     in-out property <bool> settings-feedback-error: false;
     in property <[EffectItemUI]> results: [];
+    // The active sequence and selection, such as "Sequence 01 · 2 video"; empty until Premiere answers.
+    in property <string> context-summary: "";
+    // The visible row that briefly flashes after activating it while it is disabled, or -1.
+    in property <int> flash-row: -1;
 
     callback search-edited(string);
     callback catalog-changed();
@@ -1255,8 +1262,16 @@ export component SpotlightWindow inherits Window {
                         border-radius: 6px;
                         clip: true;
                         background: idx == root.selected-index ? Theme.row-selected : (row-touch.has-hover ? Theme.row-hover : transparent);
-                        border-width: idx == root.selected-index ? 1px : 0px;
-                        border-color: Theme.row-outline;
+                        border-width: idx == root.selected-index || idx == root.flash-row ? 1px : 0px;
+                        border-color: idx == root.flash-row ? Theme.warning : Theme.row-outline;
+                        animate border-color { duration: 120ms; }
+                        // Shown as "(row): unavailable, (reason)" to screen readers.
+                        accessible-role: list-item;
+                        accessible-label: item.disabled ? item.name + ", unavailable: " + item.reason : item.name;
+                        // A highlighted disabled row shows why instead of its folder.
+                        property <bool> show-reason: item.disabled && idx == root.selected-index;
+                        property <string> detail: show-reason ? item.reason : item.folder;
+                        property <bool> show-detail: (root.marker-picker || idx == root.selected-index) && detail != "";
 
                         row-touch := TouchArea {
                             property <bool> shift-click;
@@ -1287,6 +1302,7 @@ export component SpotlightWindow inherits Window {
                                     width: category-label.preferred-width + 14px;
                                     height: 20px;
                                     border-radius: 4px;
+                                    opacity: item.disabled ? 0.45 : 1;
                                     background: Theme.indigo ? item.badge-bg : item.badge-fg.with-alpha(Theme.light ? 0.26 : 0.14);
                                     category-label := Text {
                                         text: item.category;
@@ -1304,27 +1320,44 @@ export component SpotlightWindow inherits Window {
                                 horizontal-stretch: 1;
                                 spacing: 10px;
 
+
                                 VerticalLayout {
-                                    horizontal-stretch: ((root.marker-picker || idx == root.selected-index) && item.folder != "") ? 0 : 1;
-                                    max-width: ((root.marker-picker || idx == root.selected-index) && item.folder != "") ? 260px : 1000px;
+                                    horizontal-stretch: result-row.show-detail ? 0 : 1;
+                                    max-width: result-row.show-detail ? 260px : 1000px;
                                     alignment: center;
                                     Text {
                                         text: item.name;
                                         font-size: 13px;
                                         font-weight: idx == root.selected-index ? 600 : 400;
                                         color: idx == root.selected-index ? Theme.row-selected-text : Theme.result-text;
+                                        opacity: item.disabled ? 0.5 : 1;
                                         overflow: elide;
                                     }
                                 }
 
-                                if (root.marker-picker || idx == root.selected-index) && item.folder != "" : Text {
+                                if result-row.show-detail : Text {
                                     min-width: 0px;
                                     horizontal-stretch: 1;
-                                    text: item.folder;
+                                    text: result-row.detail;
                                     font-size: 10.5px;
-                                    color: Theme.breadcrumb-text;
+                                    color: result-row.show-reason ? Theme.warning : Theme.breadcrumb-text;
                                     vertical-alignment: center;
                                     overflow: elide;
+                                }
+
+                                if item.disabled : VerticalLayout {
+                                    alignment: center;
+                                    // A circle with a slash at the row's end: this row can't run right now.
+                                    Path {
+                                        width: 12px;
+                                        height: 12px;
+                                        viewbox-width: 24;
+                                        viewbox-height: 24;
+                                        stroke: result-row.show-reason ? Theme.warning : Theme.subtle-text;
+                                        stroke-width: 1.6px;
+                                        fill: transparent;
+                                        commands: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM5.6 5.6L18.4 18.4";
+                                    }
                                 }
                             }
 
@@ -1461,6 +1494,28 @@ export component SpotlightWindow inherits Window {
                                 color: Theme.muted-text;
                                 wrap: word-wrap;
                                 height: 30px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    // The active sequence and selection, which explain the dimmed rows.
+                    if !root.settings-open && !root.marker-picker && root.context-summary != "" : VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 20px;
+                            width: min(context-label.preferred-width + 14px, 190px);
+                            border-radius: 4px;
+                            background: Theme.control-background;
+                            border-width: 1px;
+                            border-color: Theme.card-border;
+                            context-label := Text {
+                                x: 7px;
+                                width: parent.width - 14px;
+                                text: root.context-summary;
+                                font-size: 10.5px;
+                                color: Theme.muted-text;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }

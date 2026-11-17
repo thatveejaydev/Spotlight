@@ -4,6 +4,7 @@ use crate::debug_log::{self, LogKind};
 use crate::premiere_prefs::{default_transition_prefs, read_premiere_transition_prefs};
 use crate::protocol::{
     AudioPreviewSource, IncomingPluginMessage, MarkerCommand, MarkerReply, OutgoingHelperMessage,
+    PremiereContext,
 };
 use crate::request::{CommandReply, PendingRequest};
 use std::{
@@ -237,7 +238,15 @@ pub enum BridgeEvent {
     PlacementResult(CommandReply),
     SourceMonitorResult(CommandReply),
     AudioPreviewResult(AudioPreviewResult),
+    ContextReceived(ContextEvent),
     ShowWindowRequested,
+}
+
+/// The plugin's reply to a context request; `context` is `None` when it couldn't read it.
+pub struct ContextEvent {
+    pub peer_id: usize,
+    pub request_id: u64,
+    pub context: Option<PremiereContext>,
 }
 
 pub struct ApplyResult {
@@ -572,6 +581,20 @@ impl BridgeClients {
         Ok(PendingRequest::new(peer.id, request_id))
     }
 
+    /// Asks the only connected plugin for the Premiere state, returning the request
+    /// and peer IDs. With no plugin, or more than one, the state stays unknown.
+    pub fn request_context(&self) -> Option<(u64, usize)> {
+        let peers = self.peers();
+        let [peer] = peers.as_slice() else {
+            return None;
+        };
+        let request_id = self.next_request_id();
+        let msg = OutgoingHelperMessage::RequestContext { request_id };
+        self.send_command(peer, request_id, "context", &msg, "").ok()?;
+        Self::log_sent("request_context", "", request_id);
+        Some((request_id, peer.id))
+    }
+
     pub fn run_action(&self, action: Action) -> Result<(u64, usize), &'static str> {
         let peers = self.peers();
         let peer = sole_peer(&peers, None, &ACTION_PEERS)?;
@@ -853,6 +876,21 @@ where
                                 if is_plugin_client {
                                     cb(BridgeEvent::AudioPreviewResult(AudioPreviewResult {
                                         peer_id, request_id, source, message,
+                                    }));
+                                }
+                            }
+                            IncomingPluginMessage::Context { request_id, context, elapsed_ms } => {
+                                bridge.finish_request(request_id);
+                                if is_plugin_client {
+                                    let selection = context.as_ref().and_then(|context| context.selection.as_ref());
+                                    let read = elapsed_ms.map(|ms| format!(", read in {ms} ms")).unwrap_or_default();
+                                    debug_log::log_event(
+                                        LogKind::Bridge,
+                                        "BRIDGE",
+                                        format!("<- context (id={request_id}{read}) selection={selection:?}"),
+                                    );
+                                    cb(BridgeEvent::ContextReceived(ContextEvent {
+                                        peer_id, request_id, context,
                                     }));
                                 }
                             }

@@ -275,4 +275,4 @@ async function addAdjustmentLayer(ppro, _isCurrent, timeline) {
   }
 }
 
-module.exports = { addAdjustmentLayer, registerAdjustmentLayer };
+module.exports = { addAdjustmentLayer, registerAdjustmentLayer, sourceKey };

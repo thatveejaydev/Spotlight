@@ -190,6 +190,13 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
             )));
         }
         BridgeEvent::ClientDisconnected => {
+            let mut st = ctx.state.borrow_mut();
+            st.premiere_context = None;
+            st.context_request = None;
+            ui.set_context_summary("".into());
+            st.results_dirty = true;
+            sync_viewport_slice(ui, &mut st);
+            drop(st);
             ui.set_bridge_connected(false);
             ui.set_status_message(SharedString::from(
                 "Premiere disconnected · Standalone catalog active",
@@ -233,7 +240,21 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
         }
         BridgeEvent::ProjectItemsChanged => {
             ui.set_project_loading(ctx.bridge.project_scan_pending());
-            apply_project_items(ui, &mut ctx.state.borrow_mut(), &ctx.bridge, &ctx.toast);
+            let mut st = ctx.state.borrow_mut();
+            let timeline = |st: &AppState| {
+                st.media_catalog
+                    .as_ref()
+                    .map(|media| (media.peer_id, media.project_id.clone(), media.sequence_id.clone()))
+            };
+            let before = timeline(&st);
+            apply_project_items(ui, &mut st, &ctx.bridge, &ctx.toast);
+            // Ask again when the project or sequence changed while the palette is open.
+            if st.is_visible && timeline(&st) != before {
+                request_premiere_context(&mut st, &ctx.bridge);
+            }
+        }
+        BridgeEvent::ContextReceived(event) => {
+            receive_premiere_context(ui, &mut ctx.state.borrow_mut(), event);
         }
         BridgeEvent::PlacementResult(result) => {
             let mut st = ctx.state.borrow_mut();
