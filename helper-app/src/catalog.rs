@@ -1,10 +1,10 @@
+mod search;
+
 use crate::{actions::Action, protocol::SequenceMarker};
-use nucleo_matcher::{
-    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
-    Config, Matcher, Utf32Str,
-};
+use nucleo_matcher::{Config, Matcher};
+use search::{Query, SearchKey};
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 /// Bin name the plugin reports for items at the top of the Project panel.
 /// Must match `PROJECT_ROOT_BIN` in `uxp-plugin/index.js`.
@@ -81,6 +81,18 @@ impl EffectType {
 
     pub fn is_transition(self) -> bool {
         matches!(self, Self::VideoTransition | Self::AudioTransition)
+    }
+
+    /// The kind's full name, which search matches as context.
+    fn label(self) -> &'static str {
+        match self {
+            Self::VideoEffect => "Video Effect",
+            Self::AudioEffect => "Audio Effect",
+            Self::VideoTransition => "Video Transition",
+            Self::AudioTransition => "Audio Transition",
+            Self::Preset => "Preset",
+            Self::Unknown => "Effect",
+        }
     }
 }
 
@@ -198,19 +210,23 @@ pub enum SearchResult {
 struct IndexedEffect {
     entry: Arc<EffectEntry>,
     name_lower: String,
-    haystack: String,
+    key: SearchKey,
     supported: bool,
 }
 
 impl IndexedEffect {
     fn new(entry: EffectEntry) -> Self {
         let name_lower = entry.name.to_lowercase();
-        let haystack = format!("{} {}", entry.name, entry.folder);
+        // The type label lets "transition" or "audio" find every entry of that kind.
+        let key = SearchKey::new(
+            &entry.name,
+            &format!("{} {}", entry.folder, entry.effect_type.label()),
+        );
         let supported = entry.is_supported();
         Self {
             entry: Arc::new(entry),
             name_lower,
-            haystack,
+            key,
             supported,
         }
     }
@@ -219,17 +235,36 @@ impl IndexedEffect {
 struct IndexedProjectItem {
     entry: Arc<ProjectItemEntry>,
     name_lower: String,
-    haystack: String,
+    key: SearchKey,
 }
 
 impl IndexedProjectItem {
     fn new(entry: ProjectItemEntry) -> Self {
         let name_lower = entry.name.to_lowercase();
-        let haystack = format!("{} {}", entry.name, entry.bin_path);
+        let key = SearchKey::new(
+            &entry.name,
+            &format!("{} {}", entry.bin_path, entry.kind.label()),
+        );
         Self {
             entry: Arc::new(entry),
             name_lower,
-            haystack,
+            key,
+        }
+    }
+}
+
+struct IndexedAction {
+    action: Action,
+    name_lower: String,
+    key: SearchKey,
+}
+
+impl IndexedAction {
+    fn new(action: Action) -> Self {
+        Self {
+            action,
+            name_lower: action.name().to_lowercase(),
+            key: SearchKey::new(action.name(), action.description()),
         }
     }
 }
@@ -238,7 +273,14 @@ impl IndexedProjectItem {
 enum CatalogEntry<'a> {
     Effect(&'a IndexedEffect),
     ProjectItem(&'a IndexedProjectItem),
-    Action(Action),
+    Action(&'a IndexedAction),
+}
+
+/// Ranking bonus for an effect applied `count` times this session. It grows
+/// with each doubling and is capped, so habit reorders similar matches without
+/// burying an exact match of a less-used effect.
+fn usage_bonus(count: u32) -> u32 {
+    (40 * (count.saturating_add(1)).ilog2()).min(160)
 }
 
 impl SearchResult {
@@ -260,15 +302,15 @@ impl CatalogEntry<'_> {
         match self {
             Self::Effect(item) => &item.entry.name,
             Self::ProjectItem(item) => &item.entry.name,
-            Self::Action(action) => action.name(),
+            Self::Action(item) => item.action.name(),
         }
     }
 
-    fn name_lower(&self) -> Cow<'_, str> {
+    fn name_lower(&self) -> &str {
         match self {
-            Self::Effect(item) => Cow::Borrowed(&item.name_lower),
-            Self::ProjectItem(item) => Cow::Borrowed(&item.name_lower),
-            Self::Action(action) => Cow::Owned(action.name().to_lowercase()),
+            Self::Effect(item) => &item.name_lower,
+            Self::ProjectItem(item) => &item.name_lower,
+            Self::Action(item) => &item.name_lower,
         }
     }
 
@@ -280,11 +322,11 @@ impl CatalogEntry<'_> {
         }
     }
 
-    fn haystack(&self) -> &str {
+    fn key(&self) -> &SearchKey {
         match self {
-            Self::Effect(item) => &item.haystack,
-            Self::ProjectItem(item) => &item.haystack,
-            Self::Action(action) => action.name(),
+            Self::Effect(item) => &item.key,
+            Self::ProjectItem(item) => &item.key,
+            Self::Action(item) => &item.key,
         }
     }
 
@@ -292,7 +334,7 @@ impl CatalogEntry<'_> {
         match self {
             Self::Effect(item) => SearchResult::Effect(Arc::clone(&item.entry)),
             Self::ProjectItem(item) => SearchResult::ProjectItem(Arc::clone(&item.entry)),
-            Self::Action(action) => SearchResult::Action(action),
+            Self::Action(item) => SearchResult::Action(item.action),
         }
     }
 }
@@ -327,8 +369,8 @@ pub struct CatalogStore {
     project_items: Vec<IndexedProjectItem>,
     /// How often each effect was applied this session, by type and match name.
     usage_counts: HashMap<EffectType, HashMap<String, u32>>,
+    actions: Vec<IndexedAction>,
     matcher: Matcher,
-    utf32_buf: Vec<char>,
 }
 
 impl CatalogStore {
@@ -342,8 +384,8 @@ impl CatalogStore {
             presets: Vec::new(),
             project_items: Vec::new(),
             usage_counts: HashMap::new(),
+            actions: Action::ALL.into_iter().map(IndexedAction::new).collect(),
             matcher: Matcher::new(Config::DEFAULT),
-            utf32_buf: Vec::with_capacity(128),
         }
     }
 
@@ -402,19 +444,24 @@ impl CatalogStore {
         self.search_in_bin(query, catalog, None)
     }
 
+    /// Markers matching `query`, best match first. Equal matches, and every
+    /// marker for a blank query, keep the order of `markers`.
     pub fn search_markers(&mut self, query: &str, markers: &[Arc<SequenceMarker>]) -> Vec<SearchResult> {
-        let query = query.trim();
-        let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
-        markers.iter()
-            .filter(|marker| {
-                if query.is_empty() {
-                    return true;
-                }
-                let text = format!("{} {} {} {}", marker.title(), marker.sequence_name, marker.comments, marker.position());
-                pattern.score(Utf32Str::new(&text, &mut self.utf32_buf), &mut self.matcher).is_some()
+        let Some(query) = Query::new(query) else {
+            return markers.iter().cloned().map(SearchResult::Marker).collect();
+        };
+        let mut scored: Vec<_> = markers
+            .iter()
+            .filter_map(|marker| {
+                let context = format!("{} {} {}", marker.sequence_name, marker.comments, marker.position());
+                let key = SearchKey::new(marker.title(), &context);
+                Some((query.score(&key, &mut self.matcher)?, marker))
             })
-            .cloned()
-            .map(SearchResult::Marker)
+            .collect();
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored
+            .into_iter()
+            .map(|(_, marker)| SearchResult::Marker(Arc::clone(marker)))
             .collect()
     }
 
@@ -441,9 +488,11 @@ impl CatalogStore {
                     && bin_scope.is_none_or(|scope| in_bin_scope(&item.entry.bin_path, scope))
             })
             .map(CatalogEntry::ProjectItem);
-        let actions = Action::ALL
-            .into_iter()
-            .filter(|_| catalog.includes_actions() && bin_scope.is_none())
+        let include_actions = catalog.includes_actions() && bin_scope.is_none();
+        let actions = self
+            .actions
+            .iter()
+            .filter(move |_| include_actions)
             .map(CatalogEntry::Action);
         let entries = effects.chain(project_items).chain(actions);
         let usage = |item: &CatalogEntry| match item {
@@ -470,41 +519,26 @@ impl CatalogStore {
                 scope_order(a)
                     .cmp(&scope_order(b))
                     .then_with(|| usage(b).cmp(&usage(a)))
-                    .then_with(|| a.name_lower().cmp(&b.name_lower()))
+                    .then_with(|| a.name_lower().cmp(b.name_lower()))
                     .then_with(|| a.folder().cmp(b.folder()))
             });
             return filtered.into_iter().map(CatalogEntry::to_result).collect();
         }
 
-        let pattern = Pattern::new(
-            trimmed,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        );
-        let q_lower = trimmed.to_lowercase();
-        let mut scored = Vec::new();
-
-        for item in entries {
-            let utf32 = Utf32Str::new(item.haystack(), &mut self.utf32_buf);
-            if let Some(mut score) = pattern.score(utf32, &mut self.matcher) {
-                let name_lower = item.name_lower();
-                if name_lower == q_lower {
-                    score += 500;
-                } else if name_lower.starts_with(&q_lower) {
-                    score += 200;
-                } else if name_lower.contains(&q_lower) {
-                    score += 80;
-                }
-                score += usage(&item).min(50) * 15;
-                scored.push((score, item));
-            }
-        }
+        let Some(query) = Query::new(trimmed) else {
+            return Vec::new();
+        };
+        let mut scored: Vec<_> = entries
+            .filter_map(|item| {
+                let score = query.score(item.key(), &mut self.matcher)?;
+                Some((score + usage_bonus(usage(&item)), item))
+            })
+            .collect();
 
         scored.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then_with(|| a.1.name().len().cmp(&b.1.name().len()))
-                .then_with(|| a.1.name().cmp(b.1.name()))
+                .then_with(|| a.1.name_lower().cmp(b.1.name_lower()))
                 .then_with(|| a.1.folder().cmp(b.1.folder()))
         });
 
@@ -771,5 +805,207 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Zeta", "Alpha"]);
+    }
+
+    fn result_name(result: &SearchResult) -> &str {
+        match result {
+            SearchResult::Effect(effect) => &effect.name,
+            SearchResult::ProjectItem(item) => &item.name,
+            SearchResult::Action(action) => action.name(),
+            SearchResult::Marker(marker) => marker.title(),
+        }
+    }
+
+    /// The default effects plus a project with a few named clips and many
+    /// camera-card clips, whose long bin path used to attract scattered matches.
+    fn relevance_store() -> CatalogStore {
+        let clip = |id: String, name: &str, bin_path: &str| ProjectItemEntry {
+            item_id: id,
+            name: name.into(),
+            bin_path: bin_path.into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+        };
+        let mut items: Vec<_> = [
+            ("A-Cam_Interview_01.mov", "Footage / Interviews"),
+            ("Interview.mp4", "Footage / Interviews"),
+            ("Interview B-Roll Street.mp4", "Footage / B-Roll"),
+            ("street_day_01.mov", "Footage / B-Roll"),
+            ("Gaussian test render.mov", "Exports"),
+            ("Blur Pass.mov", "Graphics / Blur Sharpen Archive"),
+            ("Crossfade music.wav", "Audio / Music"),
+            ("Café scene.mov", "Footage"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, bin_path))| clip(i.to_string(), name, bin_path))
+        .collect();
+        items.extend((0..200).map(|i| {
+            clip(
+                format!("card{i}"),
+                &format!("Clip_{i:04}_take{}.mov", i % 7),
+                "Footage / Raw Cards / Card A",
+            )
+        }));
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_project_items(items);
+        store
+    }
+
+    #[test]
+    fn the_intended_result_ranks_first() {
+        let mut store = relevance_store();
+        for (query, first) in [
+            ("blur", "Blur Pass.mov"),
+            ("gaussian", "Gaussian Blur"),
+            ("blur gaussian", "Gaussian Blur"),
+            ("gb", "Gaussian Blur"),
+            ("dip bl", "Dip to Black"),
+            ("dip to w", "Dip to White"),
+            ("color", "Color Key"),
+            ("color key", "Color Key"),
+            ("crop", "Crop"),
+            ("brightness contrast", "Brightness & Contrast"),
+            ("brightness & contrast", "Brightness & Contrast"),
+            ("single band", "Single-band Compressor"),
+            ("noise", "Noise"),
+            ("denoise", "DeNoise"),
+            ("interview", "Interview.mp4"),
+            ("a cam", "A-Cam_Interview_01.mov"),
+            ("a-cam interview", "A-Cam_Interview_01.mov"),
+            ("street day", "street_day_01.mov"),
+            ("cafe", "Café scene.mov"),
+            ("CROSS DIS", "Cross Dissolve"),
+            ("  push  ", "Push"),
+            ("rmat", "Remove Attributes"),
+            ("go to marker", "Go to Marker"),
+            ("(hls)", "Color Balance (HLS)"),
+            ("3d", "Basic 3D"),
+            ("clip 0042", "Clip_0042_take0.mov"),
+        ] {
+            let results = store.search(query, "all");
+            assert_eq!(
+                results.first().map(result_name),
+                Some(first),
+                "{query:?} ranked {:?}",
+                results.iter().take(5).map(result_name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn scattered_letters_and_near_misses_stay_out_of_results() {
+        let mut store = relevance_store();
+        for (query, expected) in [
+            // Each of these once matched hundreds of clips through letters
+            // spread across the name and the bin path.
+            ("cafe", &["Café scene.mov"][..]),
+            ("3d", &["Basic 3D"]),
+            ("crop", &["Crop"]),
+            ("gb", &["Gaussian Blur", "Single-band Compressor"]),
+            ("push", &["Push"]),
+            ("street day", &["street_day_01.mov"]),
+            ("clip 0042", &["Clip_0042_take0.mov"]),
+        ] {
+            let results = store.search(query, "all");
+            let names: Vec<_> = results.iter().map(result_name).collect();
+            assert_eq!(names, expected, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn typos_still_find_names_but_rank_below_clean_matches() {
+        let mut store = relevance_store();
+        for (query, first) in [
+            ("guassian", "Gaussian Blur"),
+            ("guassian blur", "Gaussian Blur"),
+            ("interveiw", "Interview.mp4"),
+            ("lumetir", "Lumetri Color"),
+            ("compresor", "Multiband Compressor"),
+            ("mosiac", "Mosaic"),
+            ("disolve cross", "Cross Dissolve"),
+        ] {
+            let results = store.search(query, "all");
+            assert_eq!(results.first().map(result_name), Some(first), "{query:?}");
+        }
+        let results = store.search("guassian", "all");
+        let names: Vec<_> = results.iter().map(result_name).collect();
+        assert_eq!(names, ["Gaussian Blur", "Gaussian test render.mov"]);
+    }
+
+    #[test]
+    fn context_finds_kinds_folders_and_bins_below_name_matches() {
+        let mut store = relevance_store();
+        let transitions = store.search("transition", "effects");
+        assert!(!transitions.is_empty());
+        assert!(transitions.iter().all(
+            |r| matches!(r, SearchResult::Effect(e) if e.effect_type.is_transition())
+        ));
+        let trans = store.search("trans", "effects");
+        assert_eq!(trans.first().map(result_name), Some("Transform"));
+        assert!(trans.iter().any(|r| result_name(r) == "Cross Dissolve"));
+
+        let keying = store.search("keying", "effects");
+        assert_eq!(keying.len(), 4);
+        // The bin name finds its clips, after a clip whose own name matches.
+        let interviews = store.search("interviews", "project");
+        let names: Vec<_> = interviews.iter().map(result_name).collect();
+        assert_eq!(
+            names,
+            ["Interview B-Roll Street.mp4", "Interview.mp4", "A-Cam_Interview_01.mov"]
+        );
+        assert_eq!(store.search("raw cards", "project").len(), 200);
+    }
+
+    #[test]
+    fn usage_reorders_similar_matches_but_not_past_an_exact_match() {
+        assert_eq!(usage_bonus(0), 0);
+        assert!(usage_bonus(1) < usage_bonus(3));
+        assert_eq!(usage_bonus(1_000), usage_bonus(u32::MAX));
+        assert!(usage_bonus(u32::MAX) < 200);
+
+        let mut store = relevance_store();
+        let lumetri = EffectEntry {
+            name: "Lumetri Color".into(),
+            match_name: "AE.ADBE Lumetri".into(),
+            effect_type: EffectType::VideoEffect,
+            folder: String::new(),
+        };
+        for _ in 0..500 {
+            store.record_usage(&lumetri);
+        }
+        let first = |store: &mut CatalogStore, query| {
+            store.search(query, "all").first().map(result_name).map(String::from)
+        };
+        assert_eq!(first(&mut store, "color").as_deref(), Some("Lumetri Color"));
+        assert_eq!(first(&mut store, "color key").as_deref(), Some("Color Key"));
+        assert_eq!(first(&mut store, "color balance").as_deref(), Some("Color Balance (HLS)"));
+    }
+
+    #[test]
+    fn markers_rank_title_matches_first_and_otherwise_keep_timeline_order() {
+        let marker = |name: &str, comments: &str, ticks: u64| {
+            Arc::new(
+                serde_json::from_value::<SequenceMarker>(serde_json::json!({
+                    "sequenceId": "s", "sequenceName": "Selects", "name": name,
+                    "comments": comments, "ticks": ticks.to_string(),
+                }))
+                .unwrap(),
+            )
+        };
+        let markers = [
+            marker("Music cue", "fade the intro song", 0),
+            marker("Intro", "", 254_016_000_000),
+            marker("Outro", "", 508_032_000_000),
+            marker("Intro b", "", 762_048_000_000),
+        ];
+        let mut store = CatalogStore::new_with_defaults();
+        let titles = |results: Vec<SearchResult>| -> Vec<String> {
+            results.iter().map(|r| result_name(r).to_string()).collect()
+        };
+        assert_eq!(titles(store.search_markers("", &markers)), ["Music cue", "Intro", "Outro", "Intro b"]);
+        assert_eq!(titles(store.search_markers("intro", &markers)), ["Intro", "Intro b", "Music cue"]);
+        assert_eq!(titles(store.search_markers("selects", &markers)), ["Music cue", "Intro", "Outro", "Intro b"]);
+        assert!(store.search_markers("zzz", &markers).is_empty());
     }
 }

@@ -7,7 +7,7 @@ An ultra-lightweight, zero-WebView Spotlight launcher for Adobe Premiere Pro eff
 1. **`helper-app/` (Rust + Slint Software Renderer)**
    - **Single process, zero WebView2:** Compiles `.slint` declarative UI directly to native Rust machine code rendered via Slint's CPU software renderer (`renderer-software`).
    - **Global Hotkey (`Ctrl + Space`):** Toggles the frameless centered floating window (`620×440`).
-   - **Fuzzy Search (`nucleo-matcher`):** Typo-tolerant fuzzy search across Video Effects, Audio Effects, Transitions, and custom presets, boosted by the effects you applied most this session.
+   - **Fuzzy Search (`nucleo-matcher`):** Fuzzy, typo-tolerant search across Video Effects, Audio Effects, Transitions, and custom presets. Exact, prefix and whole-word name matches rank first, then folder, bin and kind matches (type `transition` or a bin name). Effects you applied most this session get a capped boost.
    - **Localhost WebSocket Bridge (`ws://127.0.0.1:3847`):** Event-driven, 0% idle CPU bridge to Premiere Pro.
 
 2. **`uxp-plugin/` (Adobe Premiere Pro UXP Plugin)**
