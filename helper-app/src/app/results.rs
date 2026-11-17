@@ -154,11 +154,16 @@ pub(super) fn sync_audio_selection(ui: &SpotlightWindow, state: &mut AppState) {
 pub(super) fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     let query = ui.get_search_text();
     let catalog = current_catalog(ui);
-    let show_history =
-        state.active_bin_path.is_none() && catalog == Catalog::All && query.trim().is_empty();
+    let show_history = state.marker_naming.is_none()
+        && state.active_bin_path.is_none()
+        && catalog == Catalog::All
+        && query.trim().is_empty();
     ui.set_show_recent_items(show_history);
     let started = Instant::now();
-    state.matched_items = if let Some(picker) = &state.marker_picker {
+    // The search box holds a marker name, so nothing is searched.
+    state.matched_items = if state.marker_naming.is_some() {
+        Vec::new()
+    } else if let Some(picker) = &state.marker_picker {
         state.catalog.search_markers(query.as_str(), picker.markers())
     } else if show_history {
         recent_results(state)

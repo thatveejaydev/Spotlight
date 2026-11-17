@@ -33,7 +33,7 @@ use crate::{
     error_toast::{self, ErrorToast},
     premiere_prefs::{self, ShortcutBinding},
     presets::{self, PresetHandoff},
-    protocol::PremiereContext,
+    protocol::{MarkerCommand, MarkerReply, PremiereContext},
     request::{CommandReply, PendingRequest, ACTION_TIMEOUT},
     settings::{
         self, AlternateModifier, AppSettings, PaletteShortcut, PaletteShortcutAction, PaletteTheme,
@@ -71,10 +71,13 @@ struct AppState {
     premiere_context: Option<PremiereContext>,
     context_request: Option<PendingRequest>,
     pending_placement: Option<PendingPlacement>,
-    pending_source_open: Option<PendingRequest>,
+    pending_open: Option<PendingOpen>,
     pending_action: Option<PendingRequest>,
     marker_picker: Option<MarkerPicker>,
     marker_dialog: Option<MarkerDialog>,
+    /// Set while the search box is the name field of Add Named Marker.
+    marker_naming: Option<MarkerNaming>,
+    pending_named_marker: Option<PendingNamedMarker>,
     audio_preview: AudioPreview,
     active_bin_path: Option<String>,
     settings: AppSettings,
@@ -99,10 +102,12 @@ impl AppState {
             premiere_context: None,
             context_request: None,
             pending_placement: None,
-            pending_source_open: None,
+            pending_open: None,
             pending_action: None,
             marker_picker: None,
             marker_dialog: None,
+            marker_naming: None,
+            pending_named_marker: None,
             audio_preview: AudioPreview::default(),
             active_bin_path: None,
             settings,
@@ -142,6 +147,53 @@ struct RecentItem {
     project_id: Option<String>,
 }
 
+/// Where the alternate action opens a project item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenTarget {
+    /// Media opens in the Source Monitor.
+    SourceMonitor,
+    /// Sequences open in their own Timeline tab.
+    Timeline,
+}
+
+impl OpenTarget {
+    fn for_item(entry: &ProjectItemEntry) -> Self {
+        match entry.kind {
+            ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => Self::Timeline,
+            _ => Self::SourceMonitor,
+        }
+    }
+
+    fn failure(self) -> &'static str {
+        match self {
+            Self::SourceMonitor => "Premiere could not open the item in the Source Monitor.",
+            Self::Timeline => "Premiere could not open the sequence in the Timeline.",
+        }
+    }
+
+    fn timeout(self) -> &'static str {
+        match self {
+            Self::SourceMonitor => "Source Monitor didn't respond. Check Premiere.",
+            Self::Timeline => "Premiere didn't confirm opening the sequence. Check the Timeline.",
+        }
+    }
+}
+
+struct MarkerNaming {
+    /// Restored when Esc leaves the name field.
+    previous_query: SharedString,
+}
+
+struct PendingNamedMarker {
+    request: PendingRequest,
+    name: String,
+}
+
+struct PendingOpen {
+    request: PendingRequest,
+    target: OpenTarget,
+}
+
 fn start_focus_grace_timer() {
     FOCUS_TIMER.with(|slot| {
         let mut guard = slot.borrow_mut();
@@ -164,10 +216,11 @@ fn stop_focus_grace_timer() {
 fn schedule_action_deadlines(state: &AppState) {
     let earliest = [
         state.pending_placement.as_ref().map(|p| p.request.deadline),
-        state.pending_source_open.as_ref().map(|p| p.deadline),
+        state.pending_open.as_ref().map(|p| p.request.deadline),
         state.pending_action.as_ref().map(|p| p.deadline),
         state.marker_picker.as_ref().and_then(MarkerPicker::deadline),
         state.marker_dialog.as_ref().map(MarkerDialog::deadline),
+        state.pending_named_marker.as_ref().map(|p| p.request.deadline),
     ]
     .into_iter()
     .flatten()

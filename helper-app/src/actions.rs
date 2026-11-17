@@ -7,6 +7,7 @@ use serde::Serialize;
 pub enum Action {
     AddAdjustmentLayer,
     AddMarker,
+    AddNamedMarker,
     GoToMarker,
     LockHorizontalAxis,
     RegisterAdjustmentLayer,
@@ -14,9 +15,10 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::AddAdjustmentLayer,
         Self::AddMarker,
+        Self::AddNamedMarker,
         Self::GoToMarker,
         Self::LockHorizontalAxis,
         Self::RegisterAdjustmentLayer,
@@ -27,6 +29,7 @@ impl Action {
         match self {
             Self::AddAdjustmentLayer => "add_adjustment_layer",
             Self::AddMarker => "add_marker",
+            Self::AddNamedMarker => "add_named_marker",
             Self::GoToMarker => "go_to_marker",
             Self::LockHorizontalAxis => "lock_horizontal_axis",
             Self::RegisterAdjustmentLayer => "register_adjustment_layer",
@@ -42,6 +45,7 @@ impl Action {
         match self {
             Self::AddAdjustmentLayer => "Add Adjustment Layer",
             Self::AddMarker => "Add Marker",
+            Self::AddNamedMarker => "Add Named Marker",
             Self::GoToMarker => "Go to Marker",
             Self::LockHorizontalAxis => "Lock Horizontal Axis",
             Self::RegisterAdjustmentLayer => "Register Adjustment Layer",
@@ -53,6 +57,7 @@ impl Action {
         match self {
             Self::AddAdjustmentLayer => "Place a layer above selected video clips",
             Self::AddMarker => "Open the Marker dialog at the playhead",
+            Self::AddNamedMarker => "Type a name and add a marker at the playhead",
             Self::GoToMarker => "Find a marker in the active project",
             Self::LockHorizontalAxis => "Hold hotkey over a handle to click-drag horizontally",
             Self::RegisterAdjustmentLayer => "Use the selected adjustment layer as this project's source",

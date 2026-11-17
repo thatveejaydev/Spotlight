@@ -93,7 +93,7 @@ function fixture() {
     WebSocket: { OPEN: 1 }, console, socket
   });
   const exports = vm.runInContext(
-    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog, markProjectChanged: () => ++projectContextRevision });", context
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, openSequence: (payload) => sourceMedia.openSequenceInTimeline(payload), resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog, markProjectChanged: () => ++projectContextRevision });", context
   );
   const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = exports;
   return {
@@ -557,4 +557,49 @@ test("skips unused track groups, locked tracks, and unaffected trailing tracks d
   // 3 initial track scans + 2 verification scans (A1..A2) + 2 post-commit placedAudioTracks checks (skipping locked A1).
   assert.equal(audioReads, 7);
   assert.equal(lockedTrackItemReads, 0);
+});
+
+test("opens a sequence in its own Timeline tab and brings an open one forward", async () => {
+  const f = fixture();
+  const calls = [];
+  let active = f.seq;
+  f.project.getActiveSequence = () => active;
+  f.project.openSequence = async (sequence) => { calls.push(["open", sequence.guid]); return true; };
+  f.project.setActiveSequence = async (sequence) => {
+    calls.push(["activate", sequence.guid]);
+    active = sequence;
+    return true;
+  };
+  const open = (itemId) => f.openSequence({ itemId, projectId: "project" });
+
+  // openSequence leaves another sequence active, so Spotlight activates the opened one.
+  assert.match(await open("draft"), /Opened "Draft" in the Timeline/);
+  assert.deepEqual(calls, [["open", "draft"], ["activate", "draft"]]);
+
+  // The active sequence is already in front.
+  calls.length = 0;
+  active = f.seq;
+  assert.match(await open("self"), /Opened "Draft" in the Timeline/);
+  assert.deepEqual(calls, []);
+
+  f.project.openSequence = async (sequence) => { active = sequence; calls.push(["open", sequence.guid]); return true; };
+  await open("draft");
+  assert.deepEqual(calls, [["open", "draft"]]);
+  assert.deepEqual(f.commits, []);
+});
+
+test("opening in the Timeline rejects media, bins, stale context and host failures", async () => {
+  const f = fixture();
+  f.project.openSequence = async () => false;
+  f.project.setActiveSequence = async () => false;
+  const open = (itemId) => f.openSequence({ itemId, projectId: "project" });
+  for (const itemId of ["take", "bin", "other"]) {
+    await assert.rejects(open(itemId), /Only sequences open in the Timeline/);
+  }
+  await assert.rejects(open("missing"), /removed/);
+  await assert.rejects(open("draft"), /could not open "Draft" in the Timeline/);
+  f.project.openSequence = async () => true;
+  await assert.rejects(open("draft"), /could not bring "Draft" forward/);
+  f.ppro.Project.getActiveProject = () => ({ ...f.project, guid: "other project" });
+  await assert.rejects(open("draft"), /Active project changed/);
 });

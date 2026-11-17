@@ -186,7 +186,11 @@ fn placement(entry: &ProjectItemEntry, facts: &Facts) -> Result<(), &'static str
     require(facts.placement_sequence, NO_PLACEMENT_SEQUENCE)
 }
 
+/// The alternate action opens sequences in the Timeline and other items in the Source Monitor.
 fn source_monitor(entry: &ProjectItemEntry, facts: &Facts) -> Result<(), &'static str> {
+    if matches!(entry.kind, ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence) {
+        return Ok(());
+    }
     if let Some(message) = entry.source_monitor_error() {
         return Err(message);
     }
@@ -212,7 +216,7 @@ fn action_check(action: Action, facts: &Facts) -> Result<(), &'static str> {
             timeline(facts)?;
             some_selected(facts.selected, NO_SELECTION)
         }
-        Action::AddMarker => timeline(facts),
+        Action::AddMarker | Action::AddNamedMarker => timeline(facts),
         Action::GoToMarker => require(facts.project, NO_PROJECT),
         Action::LockHorizontalAxis => Ok(()),
     }
@@ -379,12 +383,12 @@ mod tests {
             .reason()
             .unwrap()
             .contains("Bins"));
-        // An offline clip still opens in the Source Monitor, and the active sequence too.
+        // An offline clip still opens in the Source Monitor.
         assert_eq!(alternate(&item(ProjectItemKind::Media, true), &facts(&modern)), Availability::Ready);
-        assert_eq!(
-            alternate(&item(ProjectItemKind::ActiveSequence, false), &facts(&modern)),
-            Availability::Ready
-        );
+        // Sequences open in the Timeline instead, which older versions support too.
+        for kind in [ProjectItemKind::Sequence, ProjectItemKind::ActiveSequence] {
+            assert_eq!(alternate(&item(kind, false), &facts(&old)), Availability::Ready);
+        }
         // Effects use the same rule for both actions.
         let none = context(selected(0, 0, 0));
         assert_eq!(
@@ -429,6 +433,8 @@ mod tests {
 
         assert_eq!(reason(Action::AddMarker, &none), None);
         assert_eq!(reason(Action::AddMarker, &no_sequence), Some(NO_SEQUENCE));
+        assert_eq!(reason(Action::AddNamedMarker, &none), None);
+        assert_eq!(reason(Action::AddNamedMarker, &no_sequence), Some(NO_SEQUENCE));
         assert_eq!(reason(Action::GoToMarker, &no_sequence), None);
         assert_eq!(reason(Action::GoToMarker, &no_project), Some(NO_PROJECT));
         assert_eq!(reason(Action::LockHorizontalAxis, &no_project), None);

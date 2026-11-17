@@ -146,3 +146,36 @@ test("reports an empty marker list and avoids mutations when the connection is s
   assert.equal(f.sequence.selection.length, 1);
   assert.deepEqual(f.transactions, []);
 });
+
+test("adds a named marker at the playhead without touching the selection", async () => {
+  const f = fixture();
+  assert.deepEqual(await f.run("add", { name: "  Intro  " }), { kind: "added" });
+  assert.equal(f.markers.length, 1);
+  assert.equal(f.markers[0].getName(), "Intro");
+  assert.equal(f.markers[0].getStart().ticks, f.sequence.position);
+  assert.deepEqual(f.transactions, ['Add Marker "Intro"']);
+  assert.equal(f.sequence.selection.length, 1);
+
+  await assert.rejects(f.run("add", { name: "Again" }), /already exists at the playhead/);
+  assert.equal(f.markers.length, 1);
+
+  f.sequence.position = "0";
+  assert.deepEqual(await f.run("add", { name: 42 }), { kind: "added" });
+  assert.equal(f.markers[1].getName(), "");
+  assert.deepEqual(f.transactions.at(-1), "Add Marker");
+  assert.equal(f.markers.length, 2);
+});
+
+test("a named marker needs a paused timeline and a connected bridge", async () => {
+  const f = fixture();
+  const getPlayerPosition = f.sequence.getPlayerPosition;
+  let reads = 0;
+  f.sequence.getPlayerPosition = function () {
+    reads += 1;
+    return reads === 1 ? getPlayerPosition.call(this) : { ticks: "1" };
+  };
+  await assert.rejects(f.run("add", { name: "Moving" }), /Pause playback/);
+  f.sequence.getPlayerPosition = getPlayerPosition;
+  await assert.rejects(f.run("add", { name: "Gone" }, () => false), /disconnected/);
+  assert.equal(f.markers.length, 0);
+});

@@ -55,6 +55,13 @@ pub enum IncomingPluginMessage {
         #[serde(default)]
         message: String,
     },
+    #[serde(rename = "open_sequence_ack", rename_all = "camelCase")]
+    OpenSequenceAck {
+        request_id: u64,
+        ok: bool,
+        #[serde(default)]
+        message: String,
+    },
     #[serde(rename = "audio_preview_ack", rename_all = "camelCase")]
     AudioPreviewAck {
         request_id: u64,
@@ -95,6 +102,12 @@ pub enum OutgoingHelperMessage {
     },
     #[serde(rename = "open_in_source_monitor", rename_all = "camelCase")]
     OpenInSourceMonitor {
+        request_id: u64,
+        project_id: String,
+        item_id: String,
+    },
+    #[serde(rename = "open_sequence", rename_all = "camelCase")]
+    OpenSequence {
         request_id: u64,
         project_id: String,
         item_id: String,
@@ -246,6 +259,10 @@ pub enum MarkerCommand {
     Confirm {
         location: MarkerLocation,
     },
+    /// Adds a marker with `name` at the playhead without Premiere's Marker dialog.
+    Add {
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -264,6 +281,8 @@ pub enum MarkerReply {
         created: bool,
     },
     Confirmed,
+    /// The named marker was added at the playhead.
+    Added,
 }
 
 #[cfg(test)]

@@ -77,7 +77,62 @@ pub(super) fn update_placement(
     None
 }
 
+/// Turns the search box into the name field of Add Named Marker.
+pub(super) fn start_marker_naming(ui: &SpotlightWindow, state: &mut AppState) {
+    let previous_query = ui.get_search_text();
+    clear_marker_picker(ui, state);
+    state.marker_naming = Some(MarkerNaming { previous_query });
+    ui.set_marker_naming(true);
+    ui.set_search_text("".into());
+    ui.set_status_message("Add Named Marker · Esc to return".into());
+    refresh_marker_results(ui, state);
+    ui.invoke_focus_search();
+}
+
+/// Leaves the name field, if it is open, and returns what was searched before it.
+pub(super) fn clear_marker_naming(ui: &SpotlightWindow, state: &mut AppState) -> Option<MarkerNaming> {
+    let naming = state.marker_naming.take()?;
+    ui.set_marker_naming(false);
+    ui.set_search_text("".into());
+    refresh_marker_results(ui, state);
+    Some(naming)
+}
+
+/// Adds a marker named after the search text at the playhead, then returns to Premiere.
+pub(super) fn submit_marker_name(
+    ui: &SpotlightWindow,
+    state: &mut AppState,
+    bridge: &BridgeClients,
+) -> Result<(), SharedString> {
+    if state.pending_named_marker.is_some() {
+        return Err("A marker is already being added.".into());
+    }
+    let facts = state.facts();
+    if let Some(reason) = availability::primary(&SearchResult::Action(Action::AddNamedMarker), &facts).reason() {
+        ui.set_status_message(reason.into());
+        return Ok(());
+    }
+    let name = ui.get_search_text().trim().to_string();
+    let request = bridge
+        .marker_command(MarkerCommand::Add { name: name.clone() }, None)
+        .map_err(SharedString::from)?;
+    state.pending_named_marker = Some(PendingNamedMarker { request, name });
+    clear_marker_naming(ui, state);
+    hide_and_restore_focus(ui, state);
+    schedule_action_deadlines(state);
+    Ok(())
+}
+
+fn named_marker_added(name: &str) -> String {
+    if name.is_empty() {
+        "Added a marker at the playhead.".into()
+    } else {
+        format!("Added marker \u{201c}{name}\u{201d}.")
+    }
+}
+
 pub(super) fn clear_marker_picker(ui: &SpotlightWindow, state: &mut AppState) -> Option<MarkerPicker> {
+    clear_marker_naming(ui, state);
     let picker = state.marker_picker.take()?;
     ui.set_marker_picker(false);
     ui.set_marker_status("".into());
@@ -88,7 +143,11 @@ pub(super) fn clear_marker_picker(ui: &SpotlightWindow, state: &mut AppState) ->
 }
 
 pub(super) fn escape_palette(ui: &SpotlightWindow, state: &mut AppState) {
-    if let Some(picker) = clear_marker_picker(ui, state) {
+    if let Some(naming) = clear_marker_naming(ui, state) {
+        ui.set_search_text(naming.previous_query);
+        refresh_marker_results(ui, state);
+        ui.invoke_focus_search();
+    } else if let Some(picker) = clear_marker_picker(ui, state) {
         ui.set_search_text(picker.previous_query);
         refresh_marker_results(ui, state);
         ui.invoke_focus_search();
@@ -119,6 +178,25 @@ pub(super) fn receive_marker(
             ui.set_marker_status(picker.status().into());
             refresh_marker_results(ui, state);
         }
+    } else if state
+        .pending_named_marker
+        .as_ref()
+        .is_some_and(|pending| pending.request.is_answered_by(event.peer_id, event.request_id))
+    {
+        let pending = state.pending_named_marker.take().unwrap();
+        if matches!(event.result, Some(MarkerReply::Added)) {
+            let message = named_marker_added(&pending.name);
+            debug_log::log_event(LogKind::Success, "MARKER", &message);
+            ui.set_status_message(message.into());
+        } else {
+            let message = if event.message.is_empty() {
+                "Premiere could not add the marker.".to_string()
+            } else {
+                event.message
+            };
+            debug_log::log_event(LogKind::Error, "MARKER", &message);
+            toast.show(message.into(), state.previous_hwnd);
+        }
     } else if let Some(dialog) = state.marker_dialog.as_mut().filter(|dialog| dialog.accepts(&event)) {
         if let Err(message) = dialog.receive(bridge, event) {
             let message = dialog.failure(message);
@@ -134,6 +212,13 @@ pub(super) fn poll_markers(ui: &SpotlightWindow, state: &mut AppState, bridge: &
         if picker.expire() {
             ui.set_marker_status(picker.status().into());
         }
+    }
+    if state.pending_named_marker.as_ref().is_some_and(|pending| pending.request.expired()) {
+        state.pending_named_marker = None;
+        toast.show(
+            "Premiere didn't confirm the marker. Check the Timeline before retrying.".into(),
+            state.previous_hwnd,
+        );
     }
     if let Some(dialog) = &mut state.marker_dialog {
         match dialog.tick(bridge) {
@@ -178,26 +263,29 @@ pub(super) fn finish_action(
     }
 }
 
-pub(super) fn update_source_open(
+/// Handles the reply to opening an item in the Source Monitor or a sequence in the
+/// Timeline, or the timeout when `reply` is `None`. Returns an error to show.
+pub(super) fn update_open(
     ui: &SpotlightWindow,
     state: &mut AppState,
     reply: Option<CommandReply>,
 ) -> Option<SharedString> {
-    let pending = state.pending_source_open.as_ref()?;
-    if let Some(result) = reply.filter(|reply| reply.answers(pending)) {
-        state.pending_source_open = None;
+    let pending = state.pending_open.as_ref()?;
+    let target = pending.target;
+    if let Some(result) = reply.filter(|reply| reply.answers(&pending.request)) {
+        state.pending_open = None;
         if result.ok {
             ui.set_status_message(result.message.into());
         } else {
             return Some(if result.message.is_empty() {
-                "Premiere could not open the item in the Source Monitor.".into()
+                target.failure().into()
             } else {
                 result.message.into()
             });
         }
-    } else if pending.expired() {
-        state.pending_source_open = None;
-        return Some("Source Monitor didn't respond. Check Premiere.".into());
+    } else if pending.request.expired() {
+        state.pending_open = None;
+        return Some(target.timeout().into());
     }
     None
 }

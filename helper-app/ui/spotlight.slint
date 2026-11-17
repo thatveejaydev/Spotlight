@@ -53,6 +53,8 @@ export component SpotlightWindow inherits Window {
     in-out property <string> active-catalog: "all";
     in-out property <string> active-bin: "";
     in property <bool> marker-picker: false;
+    // True while the search box is the name field of Add Named Marker.
+    in property <bool> marker-naming: false;
     in property <string> marker-status: "";
     in property <string> marker-context: "";
     in property <bool> show-recent-items: false;
@@ -412,7 +414,8 @@ export component SpotlightWindow inherits Window {
                             x: 0px;
                             width: 100%;
                             height: 100%;
-                            text: root.marker-picker ? "Search markers…"
+                            text: root.marker-naming ? "Name the marker…"
+                                : root.marker-picker ? "Search markers…"
                                 : root.active-bin != "" ? "Search in \{root.active-bin}…"
                                 : root.active-catalog == "effects" ? "Search effects and transitions…"
                                 : root.active-catalog == "project" ? "Search project items…"
@@ -1238,7 +1241,10 @@ export component SpotlightWindow inherits Window {
                 if !root.settings-open && root.results.length == 0 : VerticalLayout {
                     alignment: center;
                     Text {
-                        text: root.marker-picker && root.marker-status != "" ? root.marker-status
+                        text: root.marker-naming ? (root.search-text == ""
+                                ? "Type a name, then press Enter to add a marker at the playhead"
+                                : "Press Enter to add \u{201c}" + root.search-text + "\u{201d} at the playhead")
+                            : root.marker-picker && root.marker-status != "" ? root.marker-status
                             : root.active-bin != "" && root.search-text == "" ? "This bin is empty"
                             : root.show-recent-items ? "No recently added items"
                             : root.show-project-loading ? "Loading project items…"
@@ -1246,6 +1252,7 @@ export component SpotlightWindow inherits Window {
                         font-size: 13px;
                         color: Theme.subtle-text;
                         horizontal-alignment: center;
+                        wrap: word-wrap;
                     }
                 }
 
@@ -1522,7 +1529,7 @@ export component SpotlightWindow inherits Window {
                         }
                     }
 
-                    if !root.settings-open : VerticalLayout {
+                    if !root.settings-open && !root.marker-naming : VerticalLayout {
                         alignment: center;
                         Text {
                             text: (root.show-project-loading ? "Loading… · " : "")

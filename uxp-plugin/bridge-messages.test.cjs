@@ -54,6 +54,8 @@ test("each helper command gets its reply type, request ID and failure message", 
       "placement_ack", /Active project changed/],
     [{ type: "open_in_source_monitor", requestId: 2, projectId: "p", itemId: "i" },
       "source_monitor_ack", /Premiere Pro 25\.6/],
+    [{ type: "open_sequence", requestId: 9, projectId: "p", itemId: "i" },
+      "open_sequence_ack", /Active project changed/],
     [{ type: "run_action", requestId: 3, action: "not_an_action" },
       "action_ack", /does not support that action/],
     [{ type: "apply_effect", requestId: 4, name: "Blur", matchName: "blur", effectType: "videoEffect" },
@@ -99,7 +101,7 @@ test("each helper command gets its reply type, request ID and failure message", 
 test("commands without a request ID and unknown types get no reply", async () => {
   const bridge = connect();
   for (const type of ["place_project_item", "open_in_source_monitor", "run_action",
-    "request_audio_preview", "marker_command", "request_project_items", "request_context"]) {
+    "request_audio_preview", "marker_command", "request_project_items", "request_context", "open_sequence"]) {
     assert.deepEqual(await bridge.send({ type, requestId: "1" }), [], type);
   }
   assert.deepEqual(await bridge.send({ type: "toString", requestId: 1 }), []);

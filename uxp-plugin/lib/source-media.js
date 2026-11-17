@@ -1,6 +1,6 @@
 "use strict";
 
-// Opens project items in the Source Monitor and resolves audio preview sources.
+// Opens project items in the Source Monitor or the Timeline and resolves audio preview sources.
 
 const { guid } = require("./util.js");
 const { isAudioFileName } = require("./media.js");
@@ -81,5 +81,31 @@ module.exports = function createSourceMedia(ppro, { findProjectEntry }) {
     return { path, inSeconds, outSeconds };
   }
 
-  return { openInSourceMonitor, resolveAudioPreview };
+  // Opens a sequence in its own Timeline tab, or brings its tab forward when it is already open.
+  async function openSequenceInTimeline({ projectId, itemId }) {
+    const project = await ppro.Project.getActiveProject();
+    if (!project || guid(project) !== projectId) {
+      throw new Error("Active project changed. Search again.");
+    }
+    const source = await findProjectEntry(project, projectId, itemId);
+    if (!source) throw new Error("Project item was removed. Search again.");
+    if (source.bin || !source.clip || !(await source.clip.isSequence())) {
+      throw new Error("Only sequences open in the Timeline.");
+    }
+    const sequence = await source.clip.getSequence();
+    const sequenceId = guid(sequence);
+    if (!sequenceId) throw new Error("Premiere could not resolve the sequence.");
+    const name = source.item.name;
+    if (guid(await project.getActiveSequence()) !== sequenceId) {
+      if (!(await project.openSequence(sequence))) {
+        throw new Error(`Premiere could not open "${name}" in the Timeline.`);
+      }
+      if (guid(await project.getActiveSequence()) !== sequenceId && !(await project.setActiveSequence(sequence))) {
+        throw new Error(`Premiere could not bring "${name}" forward in the Timeline.`);
+      }
+    }
+    return `Opened "${name}" in the Timeline.`;
+  }
+
+  return { openInSourceMonitor, openSequenceInTimeline, resolveAudioPreview };
 };

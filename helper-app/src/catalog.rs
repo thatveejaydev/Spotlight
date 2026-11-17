@@ -669,6 +669,7 @@ mod tests {
             [
                 SearchResult::Action(Action::AddAdjustmentLayer),
                 SearchResult::Action(Action::AddMarker),
+                SearchResult::Action(Action::AddNamedMarker),
                 SearchResult::Action(Action::GoToMarker),
                 SearchResult::Action(Action::LockHorizontalAxis),
                 SearchResult::Action(Action::RegisterAdjustmentLayer),

@@ -405,6 +405,9 @@ const messageHandlers = new Map([
   ["open_in_source_monitor", withRequestId((msg, connection) =>
     replyWithOutcome(connection, "source_monitor_ack", msg.requestId, () => openInSourceMonitor(msg))
   )],
+  ["open_sequence", withRequestId((msg, connection) =>
+    replyWithOutcome(connection, "open_sequence_ack", msg.requestId, () => sourceMedia.openSequenceInTimeline(msg))
+  )],
   ["request_audio_preview", withRequestId(async (msg, connection) => {
     let source = null;
     let message = "";

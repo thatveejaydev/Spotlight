@@ -1,5 +1,5 @@
 use crate::actions::Action;
-use crate::catalog::{EffectEntry, ProjectItemEntry};
+use crate::catalog::{EffectEntry, ProjectItemEntry, ProjectItemKind};
 use crate::debug_log::{self, LogKind};
 use crate::premiere_prefs::{default_transition_prefs, read_premiere_transition_prefs};
 use crate::protocol::{
@@ -236,7 +236,8 @@ pub enum BridgeEvent {
     MarkerResult(MarkerEvent),
     ProjectItemsChanged,
     PlacementResult(CommandReply),
-    SourceMonitorResult(CommandReply),
+    /// The reply to opening an item in the Source Monitor or a sequence in the Timeline.
+    OpenResult(CommandReply),
     AudioPreviewResult(AudioPreviewResult),
     ContextReceived(ContextEvent),
     ShowWindowRequested,
@@ -532,6 +533,27 @@ impl BridgeClients {
         Ok(request_id)
     }
 
+    /// Opens a project sequence in its own Timeline tab.
+    pub fn open_sequence(&self, catalog: &MediaCatalog, item_id: String) -> Result<u64, &'static str> {
+        let peers = self.peers();
+        let (peer, current, entry) = project_source(
+            &peers,
+            catalog,
+            &item_id,
+            false,
+            "Close the other Premiere session before opening sequences.",
+        )?;
+        let project_id = require_project(current)?.to_owned();
+        if !matches!(entry.kind, ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence) {
+            return Err("Only sequences open in the Timeline.");
+        }
+        let request_id = self.next_request_id();
+        let msg = OutgoingHelperMessage::OpenSequence { request_id, project_id, item_id };
+        self.send_command(peer, request_id, "open_sequence", &msg, MEDIA_DISCONNECTED)?;
+        Self::log_sent("open_sequence", "", request_id);
+        Ok(request_id)
+    }
+
     pub fn request_audio_preview(
         &self,
         catalog: &MediaCatalog,
@@ -759,6 +781,7 @@ where
                                     | IncomingPluginMessage::MarkerAck { .. }
                                     | IncomingPluginMessage::PlacementAck { .. }
                                     | IncomingPluginMessage::SourceMonitorAck { .. }
+                                    | IncomingPluginMessage::OpenSequenceAck { .. }
                                     | IncomingPluginMessage::AudioPreviewAck { .. }
                             )
                         {
@@ -860,10 +883,15 @@ where
                                 request_id,
                                 ok,
                                 message,
+                            }
+                            | IncomingPluginMessage::OpenSequenceAck {
+                                request_id,
+                                ok,
+                                message,
                             } => {
                                 bridge.finish_request(request_id);
                                 if is_plugin_client {
-                                    cb(BridgeEvent::SourceMonitorResult(CommandReply {
+                                    cb(BridgeEvent::OpenResult(CommandReply {
                                         peer_id,
                                         request_id,
                                         ok,

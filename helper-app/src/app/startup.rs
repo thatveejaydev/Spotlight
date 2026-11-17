@@ -264,9 +264,9 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
             }
             schedule_action_deadlines(&st);
         }
-        BridgeEvent::SourceMonitorResult(result) => {
+        BridgeEvent::OpenResult(result) => {
             let mut st = ctx.state.borrow_mut();
-            if let Some(message) = update_source_open(ui, &mut st, Some(result)) {
+            if let Some(message) = update_open(ui, &mut st, Some(result)) {
                 debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
                 ctx.toast.show(message, st.previous_hwnd);
             }
@@ -1263,7 +1263,7 @@ fn wire_deadlines(ctx: &AppCtx) {
                     debug_log::log_event(LogKind::Error, "PLACE", message.as_str());
                     ctx.toast.show(message, st.previous_hwnd);
                 }
-                if let Some(message) = update_source_open(ui, st, None) {
+                if let Some(message) = update_open(ui, st, None) {
                     debug_log::log_event(LogKind::Error, "SOURCE", message.as_str());
                     ctx.toast.show(message, st.previous_hwnd);
                 }

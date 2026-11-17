@@ -870,21 +870,21 @@ fn shift_activate_handles_effects_and_project_items() {
         shift_activate_at(1, &ui, &mut state, &bridge).unwrap();
         assert!(!state.is_visible);
         assert!(requests.try_recv().unwrap().contains("open_in_source_monitor"));
-        let request_id = state.pending_source_open.as_ref().unwrap().request_id;
-        let error = update_source_open(&ui, &mut state, Some(CommandReply {
+        let request_id = state.pending_open.as_ref().unwrap().request.request_id;
+        let error = update_open(&ui, &mut state, Some(CommandReply {
             peer_id: 7,
             request_id,
             ok: success,
             message: if success { "Opened clip" } else { "Too old" }.into(),
         }));
         assert_eq!(error.as_deref(), if success { None } else { Some("Too old") });
-        assert!(state.pending_source_open.is_none());
+        assert!(state.pending_open.is_none());
         assert!(state.pending_placement.is_none());
     }
 
     shift_activate_at(1, &ui, &mut state, &bridge).unwrap();
-    state.pending_source_open.as_mut().unwrap().deadline = Instant::now();
-    assert!(update_source_open(&ui, &mut state, None).unwrap().contains("didn't respond"));
+    state.pending_open.as_mut().unwrap().request.deadline = Instant::now();
+    assert!(update_open(&ui, &mut state, None).unwrap().contains("didn't respond"));
 }
 
 #[test]
@@ -1835,4 +1835,166 @@ fn toggle_palette_from_hotkey_for_fg(
         is_premiere_fg,
         state.is_visible,
     );
+}
+
+#[test]
+fn alternate_action_opens_sequences_in_the_timeline() {
+    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+    let ui = SpotlightWindow::new().unwrap();
+    let item = |id: &str, kind| catalog::ProjectItemEntry {
+        item_id: id.into(),
+        name: id.into(),
+        bin_path: "Sequences".into(),
+        kind,
+        offline: false,
+    };
+    let catalog = MediaCatalog {
+        peer_id: 7,
+        project_id: Some("project".into()),
+        sequence_id: Some("main".into()),
+        items: vec![
+            item("Draft", ProjectItemKind::Sequence),
+            item("Main", ProjectItemKind::ActiveSequence),
+            item("Clip", ProjectItemKind::Media),
+        ],
+    };
+    let bridge = BridgeClients::new();
+    let requests = bridge.connect_test_peer(catalog.clone());
+    let mut state = AppState {
+        matched_items: catalog
+            .items
+            .iter()
+            .map(|entry| SearchResult::ProjectItem(Arc::new(entry.clone())))
+            .collect(),
+        media_catalog: Some(catalog),
+        ..AppState::new(AppSettings::default())
+    };
+    let read_command = || -> serde_json::Value {
+        serde_json::from_str(&requests.try_recv().unwrap()).unwrap()
+    };
+
+    for (index, item_id) in [(0, "Draft"), (1, "Main")] {
+        show_palette(&ui, &mut state);
+        shift_activate_at(index, &ui, &mut state, &bridge).unwrap();
+        assert!(!state.is_visible);
+        let command = read_command();
+        assert_eq!(command["type"], "open_sequence");
+        assert_eq!(command["itemId"], item_id);
+        assert_eq!(command["projectId"], "project");
+        let pending = state.pending_open.as_ref().unwrap();
+        assert_eq!(pending.target, OpenTarget::Timeline);
+        let request_id = pending.request.request_id;
+        assert!(update_open(&ui, &mut state, Some(CommandReply {
+            peer_id: 7, request_id, ok: true, message: format!("Opened \"{item_id}\" in the Timeline."),
+        })).is_none());
+        assert!(state.pending_open.is_none());
+        assert!(ui.get_status_message().contains("in the Timeline"));
+    }
+
+    // Media still opens in the Source Monitor.
+    show_palette(&ui, &mut state);
+    shift_activate_at(2, &ui, &mut state, &bridge).unwrap();
+    assert_eq!(read_command()["type"], "open_in_source_monitor");
+    assert_eq!(state.pending_open.as_ref().unwrap().target, OpenTarget::SourceMonitor);
+
+    // Failures and timeouts name the Timeline.
+    show_palette(&ui, &mut state);
+    shift_activate_at(0, &ui, &mut state, &bridge).unwrap();
+    let request_id = read_command()["requestId"].as_u64().unwrap();
+    let error = update_open(&ui, &mut state, Some(CommandReply {
+        peer_id: 7, request_id, ok: false, message: String::new(),
+    }));
+    assert_eq!(error.as_deref(), Some(OpenTarget::Timeline.failure()));
+    shift_activate_at(0, &ui, &mut state, &bridge).unwrap();
+    state.pending_open.as_mut().unwrap().request.deadline = Instant::now();
+    assert_eq!(update_open(&ui, &mut state, None).as_deref(), Some(OpenTarget::Timeline.timeout()));
+
+    // The bridge refuses to open anything but a sequence in the Timeline.
+    let catalog = state.media_catalog.clone().unwrap();
+    assert!(bridge.open_sequence(&catalog, "Clip".into()).unwrap_err().contains("Only sequences"));
+}
+
+#[test]
+fn add_named_marker_takes_a_name_and_adds_it_without_the_dialog() {
+    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+    let ui = SpotlightWindow::new().unwrap();
+    let bridge = BridgeClients::new();
+    let requests = bridge.connect_test_peer(MediaCatalog {
+        peer_id: 7,
+        project_id: Some("project".into()),
+        sequence_id: Some("sequence".into()),
+        items: Vec::new(),
+    });
+    let mut state = AppState::new(AppSettings::default());
+    let toast = Rc::new(ErrorToast::default());
+    let drain = || while requests.try_recv().is_ok() {};
+
+    // The hotkey opens Spotlight straight into the name field.
+    activate_action(Action::AddNamedMarker, &ui, &mut state, &bridge).unwrap();
+    drain();
+    assert!(state.is_visible && ui.get_marker_naming());
+    assert_eq!(ui.get_active_catalog(), "actions");
+    assert_eq!(ui.get_status_message(), "Add Named Marker · Esc to return");
+
+    // Typing names the marker instead of searching, and Esc returns to the search.
+    ui.set_search_text("Intro".into());
+    refresh_results_ui(&ui, &mut state);
+    assert_eq!(ui.get_total_matches(), 0);
+    escape_palette(&ui, &mut state);
+    assert!(state.is_visible && !ui.get_marker_naming());
+    assert_eq!(ui.get_search_text(), "");
+    assert!(ui.get_total_matches() > 0);
+
+    // From the ACT list, Enter on the row opens the name field and keeps the query.
+    ui.set_search_text("named marker".into());
+    refresh_results_ui(&ui, &mut state);
+    apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+    assert!(state.is_visible && ui.get_marker_naming());
+    ui.set_search_text("  Intro  ".into());
+    apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+    assert!(!state.is_visible && !ui.get_marker_naming());
+    let command: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+    assert_eq!(command["type"], "marker_command");
+    assert_eq!(command["operation"], "add");
+    assert_eq!(command["name"], "Intro");
+    let request_id = command["requestId"].as_u64().unwrap();
+    let reply = |request_id: u64, result: Option<MarkerReply>, message: &str| MarkerEvent {
+        peer_id: 7,
+        request_id,
+        result,
+        message: message.into(),
+    };
+    receive_marker(&ui, &mut state, &bridge, reply(request_id + 1, Some(MarkerReply::Added), ""), &toast);
+    assert!(state.pending_named_marker.is_some());
+    receive_marker(&ui, &mut state, &bridge, reply(request_id, Some(MarkerReply::Added), ""), &toast);
+    assert!(state.pending_named_marker.is_none());
+    assert_eq!(ui.get_status_message(), "Added marker \u{201c}Intro\u{201d}.");
+
+    // Shift+Enter also submits; an error reply clears the request.
+    activate_action(Action::AddNamedMarker, &ui, &mut state, &bridge).unwrap();
+    drain();
+    shift_activate_at(0, &ui, &mut state, &bridge).unwrap();
+    let command: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+    assert_eq!(command["name"], "");
+    let request_id = command["requestId"].as_u64().unwrap();
+    receive_marker(&ui, &mut state, &bridge, reply(request_id, None, "A marker already exists"), &toast);
+    assert!(state.pending_named_marker.is_none());
+
+    // Without an open sequence the name field stays open and explains why.
+    activate_action(Action::AddNamedMarker, &ui, &mut state, &bridge).unwrap();
+    drain();
+    state.premiere_context = Some(PremiereContext {
+        project_id: Some("project".into()),
+        ..PremiereContext::default()
+    });
+    apply_entry_at(0, &ui, &mut state, &bridge).unwrap();
+    assert!(state.is_visible && ui.get_marker_naming());
+    assert_eq!(ui.get_status_message(), "Open a sequence first.");
+    assert!(requests.try_recv().is_err());
+
+    // Switching catalogs leaves the name field.
+    clear_marker_picker(&ui, &mut state);
+    assert!(!ui.get_marker_naming() && state.marker_naming.is_none());
 }

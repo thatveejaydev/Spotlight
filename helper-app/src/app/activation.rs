@@ -20,6 +20,9 @@ pub(super) fn apply_entry_with_options(
     bridge: &BridgeClients,
     open_effect_controls: bool,
 ) -> Result<Option<PresetHandoff>, SharedString> {
+    if state.marker_naming.is_some() {
+        return submit_marker_name(ui, state, bridge).map(|()| None);
+    }
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
         return Ok(None);
     };
@@ -124,6 +127,16 @@ pub(super) fn activate_action(
             }
             state.marker_dialog = Some(MarkerDialog::new(state.previous_hwnd, bridge)?);
         }
+        Action::AddNamedMarker => {
+            if state.marker_naming.is_some() {
+                return Ok(());
+            }
+            if !state.is_visible {
+                center_and_show(ui, state, bridge);
+                set_catalog(ui, Catalog::Actions);
+            }
+            start_marker_naming(ui, state);
+        }
         Action::LockHorizontalAxis => {
             if let Some(shortcut) = state
                 .settings
@@ -152,7 +165,11 @@ pub(super) fn activate_action(
             state.pending_action = Some(PendingRequest::new(peer_id, request_id));
         }
     }
-    if action != Action::GoToMarker && action != Action::LockHorizontalAxis && state.is_visible {
+    let stays_open = matches!(
+        action,
+        Action::GoToMarker | Action::AddNamedMarker | Action::LockHorizontalAxis
+    );
+    if !stays_open && state.is_visible {
         hide_and_restore_focus(ui, state);
     }
     schedule_action_deadlines(state);
@@ -189,6 +206,9 @@ pub(super) fn shift_activate_at(
     state: &mut AppState,
     bridge: &BridgeClients,
 ) -> Result<Option<PresetHandoff>, SharedString> {
+    if state.marker_naming.is_some() {
+        return submit_marker_name(ui, state, bridge).map(|()| None);
+    }
     let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
         return Ok(None);
     };
@@ -210,11 +230,18 @@ pub(super) fn shift_activate_at(
             let Some(catalog) = &state.media_catalog else {
                 return Err("Project media changed. Search again.".into());
             };
-            let request_id = bridge
-                .open_in_source_monitor(catalog, entry.item_id.clone())
-                .map_err(SharedString::from)?;
+            let target = OpenTarget::for_item(entry);
+            let item_id = entry.item_id.clone();
+            let request_id = match target {
+                OpenTarget::SourceMonitor => bridge.open_in_source_monitor(catalog, item_id),
+                OpenTarget::Timeline => bridge.open_sequence(catalog, item_id),
+            }
+            .map_err(SharedString::from)?;
             ui.set_status_message(format!("Opening {}…", entry.name).into());
-            state.pending_source_open = Some(PendingRequest::new(catalog.peer_id, request_id));
+            state.pending_open = Some(PendingOpen {
+                request: PendingRequest::new(catalog.peer_id, request_id),
+                target,
+            });
             schedule_action_deadlines(state);
             hide_palette(ui, state);
             restore_premiere_focus(state.previous_hwnd);

@@ -80,6 +80,38 @@ async function prepareMarker(ppro, isCurrent) {
   return { kind: "prepared", location, created };
 }
 
+const MAX_MARKER_NAME = 256;
+
+// Adds a sequence marker named `name` at the playhead in one undo step, without the Marker dialog.
+async function addNamedMarker(ppro, name, isCurrent) {
+  const markerName = typeof name === "string" ? name.trim().slice(0, MAX_MARKER_NAME) : "";
+  const { project, sequence, ref, markers } = await activeTimeline(ppro);
+  const position = await sequence.getPlayerPosition();
+  const at = ticks(position);
+  // Give a playing timeline time to advance before creating anything at a captured frame.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await activeSequence(ppro, ref);
+  if (ticks(await sequence.getPlayerPosition()) !== at) {
+    throw new Error("Pause playback before adding a marker.");
+  }
+  ensureConnected(isCurrent);
+  project.lockedAccess(() => {
+    ensureConnected(isCurrent);
+    if (markers.getMarkers().some((marker) => ticks(marker.getStart()) === at)) {
+      throw new Error("A marker already exists at the playhead. Move the playhead or edit that marker.");
+    }
+    const action = markers.createAddMarkerAction(
+      markerName, "Comment", position, ppro.TickTime.createWithTicks("0"), ""
+    );
+    if (!action || !project.executeTransaction((transaction) => {
+      if (!transaction.addAction(action)) throw new Error("Premiere rejected the marker.");
+    }, markerName ? `Add Marker "${markerName}"` : "Add Marker")) {
+      throw new Error("Premiere could not create the marker.");
+    }
+  });
+  return { kind: "added" };
+}
+
 async function checkMarkerContext(sequence, location, isCurrent) {
   const selection = await sequence.getSelection();
   const trackItems = await selection?.getTrackItems();
@@ -159,6 +191,8 @@ async function runMarkerCommand(ppro, command, isCurrent) {
       return seekProjectMarker(ppro, command, isCurrent);
     case "prepare":
       return prepareMarker(ppro, isCurrent);
+    case "add":
+      return addNamedMarker(ppro, command.name, isCurrent);
     case "confirm": {
       const { markers } = await activeTimeline(ppro, command.location.sequence);
       const { sequence } = await activeSequence(ppro, command.location.sequence);
