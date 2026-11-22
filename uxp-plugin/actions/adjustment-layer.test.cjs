@@ -11,12 +11,20 @@ const pluginSource = fs.readFileSync(pluginPath, "utf8");
 const pluginRequire = createRequire(pluginPath);
 const time = (ticks) => ({ ticks: String(ticks) });
 const span = (start, end) => ({ getStartTime: () => time(start), getEndTime: () => time(end) });
-const videoClip = (index, start, end, item = { getId: () => "footage" }) => ({
+class VideoClipTrackItem {}
+class AudioClipTrackItem {}
+const videoItem = (fields) => Object.assign(new VideoClipTrackItem(), fields);
+const clipFields = (index, start, end, item) => ({
   ...span(start, end),
   getTrackIndex: () => index,
   getProjectItem: () => item,
   isAdjustmentLayer: () => item.uid === "layer"
 });
+const videoClip = (index, start, end, item = { getId: () => "footage" }) =>
+  videoItem(clipFields(index, start, end, item));
+// Premiere's audio clips have isAdjustmentLayer too.
+const audioClip = (index, start, end, item = { getId: () => "footage" }) =>
+  Object.assign(new AudioClipTrackItem(), clipFields(index, start, end, item));
 
 function track({ clips = [], transitions = [], locked = false, exposeLock = true } = {}) {
   return {
@@ -130,6 +138,8 @@ function fixture() {
     FolderItem: { cast: (item) => item.children && { getItems: () => item.children } },
     ClipProjectItem: { cast: (item) => item.clip },
     UniqueSerializeable: { cast: (item) => ({ getUniqueID: () => item.uid }) },
+    VideoClipTrackItem,
+    AudioClipTrackItem,
     TickTime: { createWithTicks: time },
     Constants: { MediaType: { VIDEO: "video" }, TrackItemType: { CLIP: 1, TRANSITION: 2 } },
     SequenceEditor: { getEditor: () => ({
@@ -235,10 +245,21 @@ test("tries a new top track when a locked track cannot be read and other tracks 
   assert.deepEqual(f.source, { inPoint: null, outPoint: time(80) });
 });
 
+test("linked and longer audio clips don't move or stretch the layer", async () => {
+  for (const audio of [audioClip(1, 100n, 200n), audioClip(5, 50n, 400n)]) {
+    const f = fixture();
+    await f.register();
+    f.sequence.video.push(track());
+    f.sequence.selected = [audio, f.selected];
+    assert.match((await f.add()).message, /on V2/);
+    assert.deepEqual(f.placed, [[1, 100n, 200n]]);
+  }
+});
+
 test("rejects empty, audio-only, and stale selections before editing", async () => {
   const f = fixture();
   await f.register();
-  for (const items of [[], [span(0, 100)]]) {
+  for (const items of [[], [span(0, 100)], [audioClip(0, 100n, 200n)]]) {
     f.sequence.selected = items;
     assert.match((await f.add()).message, /Select at least one video clip/);
   }
@@ -348,12 +369,12 @@ test("places an adjustment layer over text and generated clips without a project
   ]) {
     const f = fixture();
     await f.register();
-    const textLayer = {
+    const textLayer = videoItem({
       ...span(100n, 220n),
       getTrackIndex: () => 0,
       getProjectItem,
       isAdjustmentLayer: () => false
-    };
+    });
     f.sequence.selected = [textLayer];
     f.sequence.video = [track({ clips: [textLayer] }), track()];
 
@@ -367,23 +388,23 @@ test("places an adjustment layer over text and generated clips without a project
 test("detects selection replacement and still rejects invalid clip track bounds", async () => {
   const f = fixture();
   await f.register();
-  const textLayer = {
+  const textLayer = videoItem({
     ...span(100n, 200n),
     getTrackIndex: () => 0,
     getProjectItem: () => null,
     isAdjustmentLayer: () => false
-  };
+  });
   f.sequence.selected = [textLayer];
   f.hooks.marksChanged = () => { f.sequence.selected = [videoClip(0, 100n, 200n)]; };
   assert.match((await f.add()).message, /timeline changed/);
   assert.deepEqual(f.attempts, []);
 
   f.hooks.marksChanged = null;
-  f.sequence.selected = [{
+  f.sequence.selected = [videoItem({
     ...span(100n, 200n),
     getTrackIndex: () => -1,
     getProjectItem: () => null,
     isAdjustmentLayer: () => false
-  }];
+  })];
   assert.match((await f.add()).message, /Premiere could not verify the selected video clips/);
 });

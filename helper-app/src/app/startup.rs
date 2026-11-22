@@ -227,7 +227,7 @@ fn handle_bridge_event(ui: &SpotlightWindow, ctx: &AppCtx, event: BridgeEvent) {
                 }
             }
             st.pending_effects
-                .retain(|_, pending| Instant::now() < pending.deadline);
+                .retain(|_, pending| !pending.request.expired());
             schedule_action_deadlines(&st);
         }
         BridgeEvent::ProjectItemsChanged => {
@@ -1250,7 +1250,7 @@ fn wire_deadlines(ctx: &AppCtx) {
         slot.set(move |()| {
             ctx.with_state(|ui, st| {
                 st.pending_effects
-                    .retain(|_, pending| Instant::now() < pending.deadline);
+                    .retain(|_, pending| !pending.request.expired());
                 if let Some(message) = update_placement(ui, st, None) {
                     debug_log::log_event(LogKind::Error, "PLACE", message.as_str());
                     ctx.toast.show(message, st.previous_hwnd);

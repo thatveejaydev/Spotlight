@@ -128,19 +128,20 @@ module.exports = function createEffects(ppro) {
     const reqType = String(payload.effectType || "videoEffect").trim();
 
     if (catalog.length > 0) {
-      const exactMatch = catalog.find(
-        (item) => item.effectType === reqType && (item.matchName === reqMatch || item.name === reqName)
-      );
-      if (exactMatch) return exactMatch;
-
-      const lowerName = reqName.toLowerCase();
+      const sameType = catalog.filter((item) => item.effectType === reqType);
       const lowerMatch = reqMatch.toLowerCase();
-      const ciMatch = catalog.find(
-        (item) =>
-          item.effectType === reqType &&
-          (item.name.toLowerCase() === lowerName || item.matchName.toLowerCase() === lowerMatch)
-      );
-      if (ciMatch) return ciMatch;
+      const byMatchName = sameType.find((item) => item.matchName === reqMatch)
+        ?? sameType.find((item) => item.matchName.toLowerCase() === lowerMatch);
+      if (byMatchName) return byMatchName;
+
+      // The helper's built-in list can carry an outdated match name. Display names aren't
+      // unique, so only fall back to one when it identifies a single effect.
+      const lowerName = reqName.toLowerCase();
+      const byName = sameType.filter((item) => item.name.toLowerCase() === lowerName);
+      if (byName.length === 1) return byName[0];
+      if (byName.length > 1) {
+        throw new Error(`More than one effect is named "${reqName}". Search again and pick one.`);
+      }
     }
 
     return {

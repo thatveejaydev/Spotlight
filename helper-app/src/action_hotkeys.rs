@@ -35,6 +35,74 @@ impl KeyPress {
     }
 }
 
+/// A held key repeats at least this often, even at the slowest Filter Keys setting.
+#[cfg(any(windows, test))]
+const LONGEST_REPEAT_GAP_MS: u32 = 2_500;
+
+/// One event from the keyboard hook.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Default)]
+struct KeyEvent {
+    injected: bool,
+    up: bool,
+    /// The async key state before this event. A press the hook swallows never sets it.
+    system_down: bool,
+    /// Milliseconds, wrapping.
+    time: u32,
+    /// How many times a Spotlight window has taken the foreground.
+    focus_visits: u32,
+    spotlight_focused: bool,
+}
+
+/// A key's press, and when the hook last saw it.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+struct KeyState {
+    press: KeyPress,
+    time: u32,
+    focus_visits: u32,
+}
+
+#[cfg(any(windows, test))]
+impl KeyState {
+    const UP: Self = Self { press: KeyPress::Up, time: 0, focus_visits: 0 };
+
+    /// Returns whether to swallow the event.
+    fn handle(&mut self, event: KeyEvent, dispatch: impl FnOnce() -> bool) -> bool {
+        if event.injected {
+            return false;
+        }
+        if !event.up && self.missed_key_up(event) {
+            self.press = KeyPress::Up;
+        }
+        self.time = event.time;
+        self.focus_visits = event.focus_visits;
+        let swallow = self.press.handle(false, event.up, dispatch);
+        // Repeats that reached the palette set the system's key state, so their release must clear it.
+        swallow && !(event.up && event.system_down)
+    }
+
+    /// Whether this key-down is a fresh press after a key-up the hook never saw.
+    ///
+    /// The hook can go unheard while a Spotlight window has focus, because winit registers for raw
+    /// input. A swallowed key always reads as up, so that alone can't tell a repeat from a press.
+    fn missed_key_up(&self, event: KeyEvent) -> bool {
+        if event.system_down {
+            return false;
+        }
+        match self.press {
+            KeyPress::Up => false,
+            // Nothing swallowed this press, so the system's key state can be trusted.
+            KeyPress::Passed => true,
+            KeyPress::Consumed => {
+                let left_spotlight =
+                    !event.spotlight_focused && event.focus_visits != self.focus_visits;
+                left_spotlight || event.time.wrapping_sub(self.time) > LONGEST_REPEAT_GAP_MS
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 pub(crate) struct Binding {
@@ -135,8 +203,8 @@ fn hold_releases_on_key_up(
 #[cfg(windows)]
 mod windows {
     use super::{
-        hold_releases_on_key_up, virtual_key, Action, AppSettings, Binding, HotKey, KeyPress,
-        Modifiers,
+        hold_releases_on_key_up, virtual_key, Action, AppSettings, Binding, HotKey, KeyEvent,
+        KeyState, Modifiers,
     };
     use crate::{
         cursor_lock,
@@ -146,7 +214,10 @@ mod windows {
     use std::{
         cell::{Cell, RefCell},
         ptr::null_mut,
-        sync::{mpsc, Mutex, RwLock},
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            mpsc, Mutex, RwLock,
+        },
         thread::{self, JoinHandle},
     };
     use windows_sys::Win32::{
@@ -184,13 +255,14 @@ mod windows {
     static BINDINGS: RwLock<Vec<Binding>> = RwLock::new(Vec::new());
     pub(super) static LAUNCH_HOTKEY: RwLock<Option<LaunchBinding>> = RwLock::new(None);
     static ACTIVE_HOLD: Mutex<Option<Binding>> = Mutex::new(None);
+    static FOCUS_VISITS: AtomicU32 = AtomicU32::new(0);
     type Dispatch = Box<dyn Fn(Binding, isize) -> bool + Send>;
     type LaunchDispatch = Box<dyn Fn() -> bool + Send>;
 
     thread_local! {
         static DISPATCH: RefCell<Option<Dispatch>> = const { RefCell::new(None) };
         static LAUNCH_DISPATCH: RefCell<Option<LaunchDispatch>> = const { RefCell::new(None) };
-        static KEYS: [Cell<KeyPress>; 256] = const { [const { Cell::new(KeyPress::Up) }; 256] };
+        static KEYS: [Cell<KeyState>; 256] = const { [const { Cell::new(KeyState::UP) }; 256] };
     }
 
     pub(crate) fn release_active_hold() {
@@ -203,7 +275,14 @@ mod windows {
         }
     }
 
+    fn is_spotlight_window(hwnd: isize) -> bool {
+        win_focus::window_process_id(hwnd) == Some(std::process::id())
+    }
+
     pub(crate) fn foreground_changed(hwnd: isize) {
+        if is_spotlight_window(hwnd) {
+            FOCUS_VISITS.fetch_add(1, Ordering::Release);
+        }
         if hwnd != 0 && !win_focus::is_premiere_action_window(hwnd) {
             release_active_hold();
         }
@@ -345,20 +424,18 @@ mod windows {
                     }
                 }
                 if KEYS.with(|keys| {
-                    let state = &keys[usize::from(key)];
-                    let mut press = state.get();
-                    // The hook can miss key-ups (e.g. none arrive while the palette has focus).
-                    // Before this event the async state still shows the key's previous state, so a
-                    // "repeat" for a key that is not down is really a fresh press after a lost key-up.
-                    if !injected
-                        && !up
-                        && !matches!(press, KeyPress::Up)
-                        && GetAsyncKeyState(i32::from(key)) >= 0
-                    {
-                        press = KeyPress::Up;
-                    }
-                    let handled = press.handle(injected, up, || dispatch_key(key));
-                    state.set(press);
+                    let cell = &keys[usize::from(key)];
+                    let mut state = cell.get();
+                    let key_event = KeyEvent {
+                        injected,
+                        up,
+                        system_down: GetAsyncKeyState(i32::from(key)) < 0,
+                        time: event.time,
+                        focus_visits: FOCUS_VISITS.load(Ordering::Acquire),
+                        spotlight_focused: is_spotlight_window(win_focus::get_foreground_hwnd()),
+                    };
+                    let handled = state.handle(key_event, || dispatch_key(key));
+                    cell.set(state);
                     handled
                 }) {
                     return 1;
@@ -463,6 +540,30 @@ mod windows {
                 .is_some_and(|dispatch| dispatch(binding, foreground))
         })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn hook_swallows_repeats_of_a_consumed_key() {
+            // F24 is not down, which is also how Windows reports a key whose press the hook swallowed.
+            const F24: u16 = 0x87;
+            KEYS.with(|keys| {
+                let mut state = KeyState::UP;
+                assert!(state.handle(KeyEvent::default(), || true));
+                keys[usize::from(F24)].set(state);
+            });
+            let mut event: KBDLLHOOKSTRUCT = unsafe { std::mem::zeroed() };
+            event.vkCode = F24.into();
+            for _ in 0..5 {
+                let result = unsafe {
+                    keyboard_event(HC_ACTION as i32, 0, &event as *const KBDLLHOOKSTRUCT as LPARAM)
+                };
+                assert_eq!(result, 1, "a repeat was treated as a new press");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +582,74 @@ mod tests {
         assert!(!press.handle(false, false, || panic!("repeat after a focus change")));
         assert!(!press.handle(false, true, || panic!("unconsumed release")));
         assert!(press.handle(false, false, || true));
+    }
+
+    fn down(time: u32) -> KeyEvent {
+        KeyEvent { time, ..Default::default() }
+    }
+
+    fn consumed() -> KeyState {
+        let mut key = KeyState::UP;
+        assert!(key.handle(down(0), || true));
+        key
+    }
+
+    #[test]
+    fn holding_a_key_dispatches_once_at_every_repeat_rate() {
+        for (delay, interval) in [(250, 33), (500, 33), (1_000, 400), (2_000, 2_000)] {
+            let mut key = consumed();
+            for repeat in 0..200 {
+                assert!(key.handle(down(delay + repeat * interval), || panic!("repeat")));
+            }
+        }
+        // The hook's clock wraps after 49 days.
+        let mut key = KeyState::UP;
+        assert!(key.handle(down(u32::MAX - 10), || true));
+        assert!(key.handle(down(20), || panic!("repeat across the wrap")));
+    }
+
+    #[test]
+    fn a_press_after_a_lost_key_up_dispatches_again() {
+        // The key-up went to the palette, which has since closed.
+        let mut key = consumed();
+        let mut fired = false;
+        assert!(key.handle(KeyEvent { focus_visits: 1, ..down(120) }, || {
+            fired = true;
+            true
+        }));
+        assert!(fired);
+
+        // The key-up was lost some other way, such as on the lock screen.
+        let mut key = consumed();
+        let mut fired = false;
+        key.handle(down(LONGEST_REPEAT_GAP_MS + 1), || {
+            fired = true;
+            true
+        });
+        assert!(fired);
+
+        // An unswallowed press is judged by the system's key state alone.
+        let mut key = KeyState::UP;
+        assert!(!key.handle(down(0), || false));
+        assert!(key.handle(down(10), || true));
+    }
+
+    #[test]
+    fn holding_a_key_through_the_palette_does_not_fire_again() {
+        // The hook still hears repeats while the palette has focus.
+        let mut key = consumed();
+        let in_palette = KeyEvent { focus_visits: 1, spotlight_focused: true, ..down(500) };
+        assert!(key.handle(in_palette, || panic!("repeat in the palette")));
+        let after = KeyEvent { focus_visits: 1, ..down(533) };
+        assert!(key.handle(after, || panic!("repeat after the palette")));
+
+        // The hook heard nothing, so the repeats set the system's key state.
+        let mut key = consumed();
+        let after = KeyEvent { focus_visits: 1, system_down: true, ..down(4_000) };
+        assert!(key.handle(after, || panic!("repeat after the palette")));
+        let release = KeyEvent { up: true, ..after };
+        assert!(!key.handle(release, || panic!("release")), "the release must reach Windows");
+        assert!(matches!(key.press, KeyPress::Up));
     }
 
     #[test]

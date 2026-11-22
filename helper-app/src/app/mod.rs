@@ -34,7 +34,7 @@ use crate::{
     premiere_prefs::{self, ShortcutBinding},
     presets::{self, PresetHandoff},
     protocol::{MarkerCommand, MarkerReply, PremiereContext},
-    request::{CommandReply, PendingRequest, ACTION_TIMEOUT},
+    request::{CommandReply, PendingRequest},
     settings::{
         self, AlternateModifier, AppSettings, PaletteShortcut, PaletteShortcutAction, PaletteTheme,
     },
@@ -131,8 +131,7 @@ impl AppState {
 
 struct PendingEffect {
     entry: Arc<EffectEntry>,
-    recipients: Vec<usize>,
-    deadline: Instant,
+    request: PendingRequest,
     open_effect_controls: bool,
 }
 
@@ -243,7 +242,7 @@ fn schedule_action_deadlines(state: &AppState) {
     ]
     .into_iter()
     .flatten()
-    .chain(state.pending_effects.values().map(|p| p.deadline))
+    .chain(state.pending_effects.values().map(|p| p.request.deadline))
     .min();
 
     DEADLINE_TIMER.with(|slot| {

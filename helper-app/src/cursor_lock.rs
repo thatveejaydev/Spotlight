@@ -40,6 +40,10 @@ struct SyntheticClickState {
 #[cfg(any(windows, test))]
 impl SyntheticClickState {
     fn on_engage(&mut self, left_already_down: bool) -> bool {
+        // While held, the button that reads as down is our own synthetic press.
+        if self.held {
+            return false;
+        }
         self.held = !left_already_down;
         self.held
     }
@@ -342,5 +346,10 @@ mod tests {
 
         assert!(!click.on_engage(true));
         assert!(!click.take_release());
+
+        // Engaging again sees our own synthetic press as a held button; it must still be released.
+        assert!(click.on_engage(false));
+        assert!(!click.on_engage(true));
+        assert!(click.take_release());
     }
 }

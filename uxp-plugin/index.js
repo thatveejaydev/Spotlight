@@ -12,6 +12,7 @@ const { entrypoints, shell, host } = require("uxp");
 const { nowMs, mapWithConcurrency, guid } = require("./lib/util.js");
 const { mediaTypeOfFileName } = require("./lib/media.js");
 const {
+  isVideoClip,
   readTicks,
   readItemRange,
   readSingleTrack,
@@ -463,7 +464,8 @@ const messageHandlers = new Map([
           storage: globalThis.localStorage,
           findSource: async (project, matchesClip) =>
             (await collectProjectEntries(project, { matchesClip }))?.found,
-          readTicks, readItemRange, readSingleTrack, trackLayout, trackLayoutsEqual, isConnected, watchTimeline
+          isVideoClip, readTicks, readItemRange, readSingleTrack, trackLayout, trackLayoutsEqual,
+          isConnected, watchTimeline
         });
       } finally {
         if (placing) placementInProgress = false;

@@ -25,10 +25,13 @@ use tungstenite::{
     Message,
 };
 
-/// Browsers attach an `http(s)` Origin to every WebSocket handshake, so a web page
-/// could otherwise connect to the bridge. Premiere's UXP plugin and a second
-/// Spotlight instance send no Origin or a non-web one, and local pages stay allowed.
-fn origin_allowed(origin: Option<&str>) -> bool {
+/// Browsers attach an Origin to every WebSocket handshake, so this keeps web pages off
+/// the bridge. Premiere's UXP runtime sends `file://` and a second Spotlight sends none.
+/// Pages served from localhost stay allowed.
+///
+/// `null` is refused because any website can send it from a sandboxed iframe. A browser
+/// can also send `file://` or an extension scheme, so those need a non-browser user agent.
+fn origin_allowed(origin: Option<&str>, user_agent: Option<&str>) -> bool {
     let Some(origin) = origin.map(str::trim).filter(|origin| !origin.is_empty()) else {
         return true;
     };
@@ -37,8 +40,8 @@ fn origin_allowed(origin: Option<&str>) -> bool {
         .strip_prefix("http://")
         .or_else(|| lower.strip_prefix("https://"))
     else {
-        // Non-web schemes (and the opaque "null") are kept so a UXP host origin can never lock the plugin out.
-        return true;
+        let from_browser = user_agent.is_some_and(|agent| agent.starts_with("Mozilla/"));
+        return lower != "null" && !from_browser;
     };
     let host = if let Some(bracketed) = rest.strip_prefix('[') {
         bracketed.split(']').next().unwrap_or_default()
@@ -332,6 +335,10 @@ const MARKER_PEERS: PeerErrors = PeerErrors {
 const ACTION_PEERS: PeerErrors = PeerErrors {
     disconnected: "Premiere action bridge disconnected.",
     multiple: "Multiple Premiere bridges are connected. Leave one connected to run an action.",
+};
+const EFFECT_PEERS: PeerErrors = PeerErrors {
+    disconnected: "Premiere effect bridge disconnected.",
+    multiple: "Close the other Premiere session before applying effects.",
 };
 const MEDIA_DISCONNECTED: &str = "Premiere media bridge disconnected.";
 const MEDIA_CHANGED: &str = "Project media changed. Search again.";
@@ -627,9 +634,10 @@ impl BridgeClients {
         Ok((request_id, peer.id))
     }
 
-    pub fn send_apply(&self, entry: &EffectEntry) -> Option<(u64, Vec<usize>)> {
+    /// Sends the effect to the only connected plugin, so it can't edit another session's project.
+    pub fn send_apply(&self, entry: &EffectEntry) -> Result<PendingRequest, &'static str> {
         if entry.is_preset() {
-            return None;
+            return Err("Presets are applied from Premiere's Effects panel.");
         }
         let (video_transition_duration, audio_transition_duration) =
             if entry.effect_type.is_transition() {
@@ -647,27 +655,11 @@ impl BridgeClients {
             video_transition_duration,
             audio_transition_duration,
         };
-        let Ok(json) = serde_json::to_string(&msg) else {
-            return None;
-        };
-
         let peers = self.peers();
-        let recipients: Vec<_> = peers
-            .iter()
-            .filter(|peer| peer.tx.send(json.clone()).is_ok())
-            .map(|peer| peer.id)
-            .collect();
-        if !recipients.is_empty() {
-            self.track_request(request_id, "apply_effect");
-            debug_log::log_event(
-                LogKind::Bridge,
-                "BRIDGE",
-                format!("-> apply_effect \"{}\" (id={request_id})", entry.name),
-            );
-            Some((request_id, recipients))
-        } else {
-            None
-        }
+        let peer = sole_peer(&peers, None, &EFFECT_PEERS)?;
+        self.send_command(peer, request_id, "apply_effect", &msg, EFFECT_PEERS.disconnected)?;
+        Self::log_sent("apply_effect", &format!(" \"{}\"", entry.name), request_id);
+        Ok(PendingRequest::new(peer.id, request_id))
     }
 
     pub fn start_server<F>(&self, on_event: F)
@@ -717,7 +709,11 @@ where
             .headers()
             .get("origin")
             .map(|value| value.to_str().unwrap_or("<invalid>"));
-        if origin_allowed(origin) {
+        let user_agent = request
+            .headers()
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok());
+        if origin_allowed(origin, user_agent) {
             return Ok(response);
         }
         debug_log::log_event(
@@ -1020,8 +1016,9 @@ mod tests {
             effect_type: "videoEffect".into(),
             folder: String::new(),
         };
-        let (id, recipients) = bridge.send_apply(&effect).unwrap();
-        assert_eq!(recipients, [7]);
+        let request = bridge.send_apply(&effect).unwrap();
+        let id = request.request_id;
+        assert_eq!(request.peer_id, 7);
         let command: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
         assert_eq!(command["requestId"], id);
         assert_eq!(command["effectType"], "videoEffect");
@@ -1262,13 +1259,13 @@ mod tests {
 
     #[test]
     fn bridge_rejects_web_page_origins_but_keeps_local_and_plugin_clients() {
-        for origin in [None, Some(""), Some("null"), Some("uxp://plugin"), Some("file://"),
+        for origin in [None, Some(""), Some("uxp://plugin"), Some("file://"),
             Some("http://localhost:8080"), Some("https://127.0.0.1"), Some("http://[::1]:3000/")]
         {
-            assert!(origin_allowed(origin), "{origin:?} should be allowed");
+            assert!(origin_allowed(origin, None), "{origin:?} should be allowed");
         }
-        for origin in ["https://example.com", "http://localhost.example.com", "HTTP://evil.test:3847"] {
-            assert!(!origin_allowed(Some(origin)), "{origin} should be rejected");
+        for origin in ["null", " NULL ", "https://example.com", "http://localhost.example.com", "HTTP://evil.test:3847"] {
+            assert!(!origin_allowed(Some(origin), None), "{origin} should be rejected");
         }
 
         use tungstenite::client::IntoClientRequest;
@@ -1284,6 +1281,47 @@ mod tests {
         request.headers_mut().insert("Origin", "https://example.com".parse().unwrap());
         assert!(client(request, TcpStream::connect(addr).unwrap()).is_err());
         assert_eq!(server.join().unwrap(), 0);
+    }
+
+    #[test]
+    fn handshake_admits_premiere_and_refuses_browsers() {
+        use tungstenite::client::IntoClientRequest;
+        const CHROME: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/157.0.0.0 Safari/537.36";
+        const FIREFOX: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:160.0) Gecko/20100101 Firefox/160.0";
+        for (origin, agent, allowed) in [
+            // Premiere's UXP runtime opens sockets with a file:// origin.
+            (Some("file://"), Some("WebSocket++/0.8.3"), true),
+            (Some("file://"), None, true),
+            // A second Spotlight waking this one.
+            (None, None, true),
+            // Sandboxed iframes, which any website can create.
+            (Some("null"), Some(CHROME), false),
+            (Some("null"), Some(FIREFOX), false),
+            (Some("null"), None, false),
+            // A downloaded HTML file and a browser extension.
+            (Some("file://"), Some(CHROME), false),
+            (Some("chrome-extension://abcdef"), Some(CHROME), false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                handle_client(stream, BridgeClients::new(), Arc::new(|_event: BridgeEvent| {}));
+            });
+            let mut request = format!("ws://{addr}").into_client_request().unwrap();
+            for (header, value) in [("Origin", origin), ("User-Agent", agent)] {
+                if let Some(value) = value {
+                    request.headers_mut().insert(header, value.parse().unwrap());
+                }
+            }
+            let connection = client(request, TcpStream::connect(addr).unwrap());
+            assert_eq!(connection.is_ok(), allowed, "{origin:?} {agent:?}");
+            if let Ok((mut socket, _)) = connection {
+                assert!(socket.read().unwrap().is_text());
+                socket.close(None).unwrap();
+            }
+            server.join().unwrap();
+        }
     }
 
     #[test]

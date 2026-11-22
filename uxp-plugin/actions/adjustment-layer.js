@@ -60,8 +60,9 @@ async function optionalProjectItemId(item) {
   }
 }
 
-async function selectedVideoRanges(ppro, sequence, readItemRange) {
-  const items = await selectionItems(sequence);
+async function selectedVideoRanges(ppro, sequence, readItemRange, isVideoClip) {
+  // Audio clips have isAdjustmentLayer too, and their track indexes count a separate stack.
+  const items = (await selectionItems(sequence)).filter(isVideoClip);
   const ranges = await Promise.all(items.map(async (item) => {
     if (typeof item?.isAdjustmentLayer !== "function" ||
         (item.getType && await item.getType() !== ppro.Constants.TrackItemType.CLIP)) return null;
@@ -126,9 +127,9 @@ async function addAdjustmentLayer(ppro, _isCurrent, timeline) {
   const { project, sequence, projectId, sequenceId } = await activeTimeline(ppro);
   const {
     storage, findSource, readTicks, readItemRange, readSingleTrack, trackLayout, trackLayoutsEqual,
-    isConnected, watchTimeline
+    isVideoClip, isConnected, watchTimeline
   } = timeline;
-  const readSelection = () => selectedVideoRanges(ppro, sequence, readItemRange);
+  const readSelection = () => selectedVideoRanges(ppro, sequence, readItemRange, isVideoClip);
   const selection = await readSelection();
   if (!selection.length) throw new Error("Select at least one video clip first.");
 

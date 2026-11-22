@@ -54,18 +54,11 @@ pub(super) fn apply_entry_with_options(
             return activate_action(action, ui, state, bridge).map(|()| None);
         }
         SearchResult::Effect(entry) => {
-            let Some((request_id, recipients)) = bridge.send_apply(&entry) else {
-                return Err("Premiere effect bridge disconnected.".into());
-            };
+            let request = bridge.send_apply(&entry).map_err(SharedString::from)?;
             show_status(ui, format!("Applying {}…", entry.name));
             state.pending_effects.insert(
-                request_id,
-                PendingEffect {
-                    entry,
-                    recipients,
-                    deadline: Instant::now() + ACTION_TIMEOUT,
-                    open_effect_controls,
-                },
+                request.request_id,
+                PendingEffect { entry, request, open_effect_controls },
             );
             schedule_action_deadlines(state);
         }

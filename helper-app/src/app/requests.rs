@@ -9,8 +9,8 @@ pub(super) fn complete_effect(state: &mut AppState, result: &ApplyResult) -> Opt
         // Already loaded plugins can still acknowledge an apply without a request ID.
         None if result.ok => {
             let mut matches = state.pending_effects.iter().filter(|(_, pending)| {
-                pending.recipients.contains(&result.peer_id)
-                    && Instant::now() < pending.deadline
+                pending.request.peer_id == result.peer_id
+                    && !pending.request.expired()
                     && result.message
                         .strip_prefix("Applied \"")
                         .and_then(|message| message.strip_prefix(&pending.entry.name))
@@ -24,16 +24,12 @@ pub(super) fn complete_effect(state: &mut AppState, result: &ApplyResult) -> Opt
         }
         None => return None,
     };
-    let pending = state.pending_effects.get_mut(&request_id)?;
-    let index = pending.recipients.iter().position(|peer| *peer == result.peer_id)?;
-    if Instant::now() >= pending.deadline {
+    let pending = state.pending_effects.get(&request_id)?;
+    if !pending.request.is_answered_by(result.peer_id, request_id) || pending.request.expired() {
         return None;
     }
     if !result.ok {
-        pending.recipients.swap_remove(index);
-        if pending.recipients.is_empty() {
-            state.pending_effects.remove(&request_id);
-        }
+        state.pending_effects.remove(&request_id);
         return None;
     }
     let completed = state.pending_effects.remove(&request_id).unwrap();

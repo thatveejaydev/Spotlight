@@ -952,10 +952,9 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         effect_type: "videoEffect".into(),
         folder: String::new(),
     });
-    let pending = || PendingEffect {
+    let pending = |request_id| PendingEffect {
         entry: effect.clone(),
-        recipients: vec![7],
-        deadline: Instant::now() + ACTION_TIMEOUT,
+        request: PendingRequest::new(7, request_id),
         open_effect_controls: false,
     };
     let ack = |request_id, ok| ApplyResult {
@@ -964,12 +963,12 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         ok,
         message: r#"Applied "Gaussian Blur" to 1 video clip."#.into(),
     };
-    state.pending_effects.insert(1, pending());
+    state.pending_effects.insert(1, pending(1));
     assert_eq!(complete_effect(&mut state, &ack(Some(2), true)), None);
     assert_eq!(complete_effect(&mut state, &ack(Some(1), false)), None);
     assert!(state.recent_items.is_empty());
-    state.pending_effects.insert(3, pending());
-    state.pending_effects.insert(4, pending());
+    state.pending_effects.insert(3, pending(3));
+    state.pending_effects.insert(4, pending(4));
     assert_eq!(complete_effect(&mut state, &ack(None, true)), None);
     assert_eq!(complete_effect(&mut state, &ack(Some(3), true)), Some(false));
     let mut other_peer = ack(None, true);
@@ -977,13 +976,11 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
     assert_eq!(complete_effect(&mut state, &other_peer), None);
     assert_eq!(complete_effect(&mut state, &ack(None, true)), Some(false));
     assert_eq!(complete_effect(&mut state, &ack(None, true)), None);
-    let mut both_peers = pending();
-    both_peers.recipients.push(8);
-    state.pending_effects.insert(5, both_peers);
-    assert_eq!(complete_effect(&mut state, &ack(Some(5), false)), None);
-    let mut success = ack(Some(5), true);
-    success.peer_id = 8;
-    assert_eq!(complete_effect(&mut state, &success), Some(false));
+    state.pending_effects.insert(5, pending(5));
+    let mut foreign = ack(Some(5), true);
+    foreign.peer_id = 8;
+    assert_eq!(complete_effect(&mut state, &foreign), None);
+    assert_eq!(complete_effect(&mut state, &ack(Some(5), true)), Some(false));
     ui.set_search_text(" take ".into());
     hide_and_restore_focus(&ui, &mut state);
     let bridge = BridgeClients::new();
@@ -2092,4 +2089,33 @@ fn each_kind_of_result_gets_its_own_icon_and_media_files_follow_their_type() {
     .map(|look| (look.name, look.tint))
     .collect();
     assert_eq!(looks.len(), 12);
+}
+
+#[test]
+fn an_effect_is_refused_when_two_premiere_sessions_are_connected() {
+    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+    let ui = SpotlightWindow::new().unwrap();
+    let bridge = BridgeClients::new();
+    let session = |peer_id| MediaCatalog {
+        peer_id,
+        project_id: Some("project".into()),
+        sequence_id: Some("sequence".into()),
+        items: Vec::new(),
+    };
+    let first = bridge.connect_test_peer(session(1));
+    let second = bridge.connect_test_peer(session(2));
+    let mut state = AppState::new(AppSettings::default());
+    state.is_visible = true;
+    state.matched_items = vec![SearchResult::Effect(Arc::new(EffectEntry {
+        name: "Gaussian Blur".into(),
+        match_name: "blur".into(),
+        effect_type: EffectType::VideoEffect,
+        folder: String::new(),
+    }))];
+
+    let error = apply_entry_at(0, &ui, &mut state, &bridge).unwrap_err();
+    assert_eq!(error, "Close the other Premiere session before applying effects.");
+    assert!(first.try_recv().is_err() && second.try_recv().is_err());
+    assert!(state.is_visible && state.pending_effects.is_empty());
 }
