@@ -90,10 +90,10 @@ function fixture() {
       return require(id);
     },
     document: { readyState: "loading", addEventListener() {}, getElementById: () => null },
-    WebSocket: { OPEN: 1 }, console, socket
+    WebSocket: { OPEN: 1 }, console, socket, setTimeout
   });
   const exports = vm.runInContext(
-    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, openSequence: (payload) => sourceMedia.openSequenceInTimeline(payload), resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog, markProjectChanged: () => ++projectContextRevision });", context
+    source + "\nws = socket; ({ placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor, openSequence: (payload) => sourceMedia.openSequenceInTimeline(payload), resolveAudioPreview, ensureCatalogScanned, scanPremiereCatalog, markProjectChanged: () => ++projectContextRevision, importAndPlace, importAndOpen });", context
   );
   const { placeProjectItem, syncProjectItems, applyEffectToSelection, openInSourceMonitor } = exports;
   return {
@@ -627,4 +627,102 @@ test("reports whether each clip is video, an image or audio", async () => {
   f.markProjectChanged();
   await f.scan(10);
   assert.equal(typeOf(f.messages, "take"), "video");
+});
+
+// A project whose root can make bins, and a Library file that importFiles adds to the
+// Spotlight Library bin.
+function libraryFixture() {
+  const f = fixture();
+  const libraryBin = { name: "Spotlight Library", getId: () => "library-bin", children: [] };
+  const rootFolder = {
+    getItems: () => f.root.children,
+    createBinAction: (name, makeUnique) => ({ createBin: name, makeUnique })
+  };
+  f.project.getRootItem = () => rootFolder;
+  const execute = f.project.executeTransaction;
+  f.project.executeTransaction = function (callback, label) {
+    const committed = execute.call(this, callback, label);
+    if (f.commits.at(-1)?.action?.createBin) f.root.children.push(libraryBin);
+    return committed;
+  };
+  const imports = [];
+  const audioClip = (path) => ({
+    isSequence: () => false,
+    isOffline: () => false,
+    getMediaFilePath: () => path,
+    getComponentChain: (type) => (type === "audio" ? {} : null),
+    getInPoint: () => time(0),
+    getOutPoint: () => time(50)
+  });
+  f.project.importFiles = async (paths, suppressUI, bin, asNumberedStills) => {
+    imports.push({ paths, suppressUI, bin: bin?.getId(), asNumberedStills });
+    for (const path of paths) {
+      const name = path.split("\\").pop();
+      if (name !== "Ghost.wav") bin.children.push({ name, getId: () => name.toLowerCase(), clip: audioClip(path) });
+    }
+    return true;
+  };
+  const payload = (path) => ({ projectId: "project", sequenceId: "timeline", path });
+  return { ...f, libraryBin, imports, payload };
+}
+
+test("the project scan reports each clip's media file", async () => {
+  const f = fixture();
+  f.clip.getMediaFilePath = () => "D:\\Media\\Take.mov";
+  await f.scan(3);
+  const items = f.messages[0].items;
+  assert.equal(items.find((item) => item.itemId === "take").mediaPath, "D:\\Media\\Take.mov");
+  for (const itemId of ["draft", "bin", "other"]) {
+    assert.equal(items.find((item) => item.itemId === itemId).mediaPath, null);
+  }
+});
+
+test("imports a Library file into the Spotlight Library bin and places it at the playhead", async () => {
+  const f = libraryFixture();
+  const message = await f.importAndPlace(f.payload("D:\\SFX\\Boom.wav"), f.connection);
+  assert.match(message, /^Imported and placed "Boom.wav" at the playhead/);
+  assert.deepEqual(f.imports, [{ paths: ["D:\\SFX\\Boom.wav"], suppressUI: true, bin: "library-bin", asNumberedStills: false }]);
+  assert.deepEqual(f.commits.map((commit) => commit.label), ["Create Spotlight Library bin", "Place Boom.wav"]);
+  assert.equal(f.commits[1].action.itemId, "boom.wav");
+
+  // The same file again, spelled differently, reuses its clip and the bin.
+  const again = await f.importAndPlace(f.payload("d:/sfx/BOOM.wav"), f.connection);
+  assert.match(again, /^Placed "Boom.wav"/);
+  assert.equal(f.imports.length, 1);
+  assert.deepEqual(f.commits.map((commit) => commit.label).slice(2), ["Place Boom.wav"]);
+});
+
+test("a Library file already in the project is placed without importing it", async () => {
+  const f = libraryFixture();
+  f.clip.getMediaFilePath = () => "D:\\Footage\\Take.mov";
+  f.project.importFiles = () => assert.fail("the existing clip should be reused");
+  assert.match(await f.importAndPlace(f.payload("d:/footage/TAKE.MOV"), f.connection), /^Placed "Take.mov"/);
+  assert.deepEqual(f.commits.map((commit) => commit.label), ["Place Take.mov"]);
+});
+
+test("a Library import that adds nothing, or for another project, fails before editing", async () => {
+  const f = libraryFixture();
+  await assert.rejects(f.importAndPlace(f.payload("D:\\SFX\\Ghost.wav"), f.connection),
+    /did not add "Ghost.wav" to the project/);
+  assert.deepEqual(f.commits.map((commit) => commit.label), ["Create Spotlight Library bin"]);
+
+  await assert.rejects(f.importAndPlace({ ...f.payload("D:\\SFX\\Boom.wav"), projectId: "other" }, f.connection),
+    /Active project changed/);
+  await assert.rejects(f.importAndPlace(f.payload(""), f.connection), /no path/);
+  f.project.importFiles = async () => { throw new Error("Unsupported format"); };
+  await assert.rejects(f.importAndPlace(f.payload("D:\\SFX\\Boom.wav"), f.connection),
+    /could not import "Boom.wav": Unsupported format/);
+  assert.equal(f.commits.length, 1);
+});
+
+test("imports a Library file and opens it in the Source Monitor", async () => {
+  const f = libraryFixture();
+  await assert.rejects(f.importAndOpen(f.payload("D:\\SFX\\Boom.wav"), f.connection), /25\.6 or later/);
+  assert.equal(f.imports.length, 0);
+  const opened = [];
+  f.ppro.SourceMonitor = { openProjectItem: async (item) => { opened.push(item.getId()); return true; } };
+  assert.match(await f.importAndOpen(f.payload("D:\\SFX\\Boom.wav"), f.connection),
+    /^Imported and opened "Boom.wav" in the Source Monitor/);
+  assert.deepEqual(opened, ["boom.wav"]);
+  assert.deepEqual(f.commits.map((commit) => commit.label), ["Create Spotlight Library bin"]);
 });

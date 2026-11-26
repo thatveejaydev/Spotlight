@@ -89,6 +89,9 @@ pub fn primary(result: &SearchResult, facts: &Facts) -> Availability {
         SearchResult::ProjectItem(entry) => placement(entry, facts),
         SearchResult::Action(action) => action_check(*action, facts),
         SearchResult::Marker(_) => Ok(()),
+        SearchResult::LibraryFile(_) => {
+            require(facts.project, NO_PROJECT).and_then(|()| require(facts.placement_sequence, NO_PLACEMENT_SEQUENCE))
+        }
     })
 }
 
@@ -96,6 +99,9 @@ pub fn primary(result: &SearchResult, facts: &Facts) -> Availability {
 pub fn alternate(result: &SearchResult, facts: &Facts) -> Availability {
     match result {
         SearchResult::ProjectItem(entry) => Availability::from_check(source_monitor(entry, facts)),
+        SearchResult::LibraryFile(_) => Availability::from_check(
+            require(facts.project, NO_PROJECT).and_then(|()| require(facts.modern_host, NEEDS_25_6)),
+        ),
         _ => primary(result, facts),
     }
 }
@@ -233,6 +239,7 @@ mod tests {
             kind,
             offline,
             media_type: None,
+            media_path: None,
         }))
     }
 
@@ -395,6 +402,33 @@ mod tests {
         assert_eq!(reason(Action::GoToMarker, &no_sequence), None);
         assert_eq!(reason(Action::GoToMarker, &no_project), Some(NO_PROJECT));
         assert_eq!(reason(Action::LockHorizontalAxis, &no_project), None);
+    }
+
+    #[test]
+    fn library_files_need_a_project_and_a_sequence_to_place() {
+        let file = SearchResult::LibraryFile(Arc::new(crate::library::LibraryEntry {
+            path: r"D:\SFX\Boom.wav".into(),
+            name: "Boom.wav".into(),
+            folder: "SFX".into(),
+            media_type: crate::catalog::MediaType::Audio,
+            key: r"d:\sfx\boom.wav".into(),
+        }));
+        assert_eq!(primary(&file, &Facts::default()), Availability::Ready);
+        assert_eq!(alternate(&file, &Facts::default()), Availability::Ready);
+
+        let mut open = context(None);
+        open.sequence_id = None;
+        assert_eq!(primary(&file, &facts(&open)).reason(), Some(NO_PLACEMENT_SEQUENCE));
+        assert_eq!(alternate(&file, &facts(&open)), Availability::Ready);
+
+        let closed = PremiereContext::default();
+        assert_eq!(primary(&file, &facts(&closed)).reason(), Some(NO_PROJECT));
+        assert_eq!(alternate(&file, &facts(&closed)).reason(), Some(NO_PROJECT));
+
+        let mut old = context(None);
+        old.host_version = Some("25.2".into());
+        assert_eq!(primary(&file, &facts(&old)), Availability::Ready);
+        assert_eq!(alternate(&file, &facts(&old)).reason(), Some(NEEDS_25_6));
     }
 
     #[test]

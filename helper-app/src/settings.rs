@@ -87,10 +87,13 @@ pub struct AppSettings {
     pub catalog_all_hotkey: String,
     pub catalog_effects_hotkey: String,
     pub catalog_project_hotkey: String,
+    pub catalog_library_hotkey: String,
     pub catalog_actions_hotkey: String,
     pub audio_preview_hotkey: String,
     pub auto_preview_audio: bool,
     pub action_hotkeys: BTreeMap<String, String>,
+    /// Folders whose importable files the Library catalog lists.
+    pub library_folders: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -104,10 +107,12 @@ impl Default for AppSettings {
             catalog_all_hotkey: String::new(),
             catalog_effects_hotkey: String::new(),
             catalog_project_hotkey: String::new(),
+            catalog_library_hotkey: String::new(),
             catalog_actions_hotkey: String::new(),
             audio_preview_hotkey: DEFAULT_AUDIO_PREVIEW_HOTKEY.into(),
             auto_preview_audio: false,
             action_hotkeys: BTreeMap::new(),
+            library_folders: Vec::new(),
         }
     }
 }
@@ -129,17 +134,19 @@ pub enum PaletteShortcut {
     CatalogAll,
     CatalogEffects,
     CatalogProject,
+    CatalogLibrary,
     CatalogActions,
     AudioPreview,
 }
 
 impl PaletteShortcut {
     /// In conflict-check and matching order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Settings,
         Self::CatalogAll,
         Self::CatalogEffects,
         Self::CatalogProject,
+        Self::CatalogLibrary,
         Self::CatalogActions,
         Self::AudioPreview,
     ];
@@ -151,6 +158,7 @@ impl PaletteShortcut {
             Self::CatalogAll => "catalog_all",
             Self::CatalogEffects => "catalog_effects",
             Self::CatalogProject => "catalog_project",
+            Self::CatalogLibrary => "catalog_library",
             Self::CatalogActions => "catalog_actions",
             Self::AudioPreview => "audio_preview",
         }
@@ -167,6 +175,7 @@ impl PaletteShortcut {
             Self::CatalogAll => "All Catalog",
             Self::CatalogEffects => "Effects Catalog",
             Self::CatalogProject => "Project Catalog",
+            Self::CatalogLibrary => "Library Catalog",
             Self::CatalogActions => "Actions Catalog",
             Self::AudioPreview => "Preview Audio",
         }
@@ -179,6 +188,7 @@ impl PaletteShortcut {
             Self::CatalogAll => "All catalog shortcut",
             Self::CatalogEffects => "Effects catalog shortcut",
             Self::CatalogProject => "Project catalog shortcut",
+            Self::CatalogLibrary => "Library catalog shortcut",
             Self::CatalogActions => "Actions catalog shortcut",
             Self::AudioPreview => "Preview audio shortcut",
         }
@@ -189,7 +199,11 @@ impl PaletteShortcut {
         match self {
             Self::Settings => DEFAULT_SETTINGS_HOTKEY,
             Self::AudioPreview => DEFAULT_AUDIO_PREVIEW_HOTKEY,
-            Self::CatalogAll | Self::CatalogEffects | Self::CatalogProject | Self::CatalogActions => "",
+            Self::CatalogAll
+            | Self::CatalogEffects
+            | Self::CatalogProject
+            | Self::CatalogLibrary
+            | Self::CatalogActions => "",
         }
     }
 
@@ -199,6 +213,7 @@ impl PaletteShortcut {
             Self::CatalogAll => PaletteShortcutAction::SelectCatalog(Catalog::All),
             Self::CatalogEffects => PaletteShortcutAction::SelectCatalog(Catalog::Effects),
             Self::CatalogProject => PaletteShortcutAction::SelectCatalog(Catalog::Project),
+            Self::CatalogLibrary => PaletteShortcutAction::SelectCatalog(Catalog::Library),
             Self::CatalogActions => PaletteShortcutAction::SelectCatalog(Catalog::Actions),
             Self::AudioPreview => PaletteShortcutAction::PreviewAudio,
         }
@@ -210,6 +225,7 @@ impl PaletteShortcut {
             Self::CatalogAll => &settings.catalog_all_hotkey,
             Self::CatalogEffects => &settings.catalog_effects_hotkey,
             Self::CatalogProject => &settings.catalog_project_hotkey,
+            Self::CatalogLibrary => &settings.catalog_library_hotkey,
             Self::CatalogActions => &settings.catalog_actions_hotkey,
             Self::AudioPreview => &settings.audio_preview_hotkey,
         }
@@ -221,6 +237,7 @@ impl PaletteShortcut {
             Self::CatalogAll => &mut settings.catalog_all_hotkey,
             Self::CatalogEffects => &mut settings.catalog_effects_hotkey,
             Self::CatalogProject => &mut settings.catalog_project_hotkey,
+            Self::CatalogLibrary => &mut settings.catalog_library_hotkey,
             Self::CatalogActions => &mut settings.catalog_actions_hotkey,
             Self::AudioPreview => &mut settings.audio_preview_hotkey,
         }
@@ -262,7 +279,18 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     if shortcut_conflict(audio_preview.id(), &settings.audio_preview_hotkey, &settings).is_some() {
         settings.audio_preview_hotkey.clear();
     }
+    settings.library_folders = normalize_library_folders(std::mem::take(&mut settings.library_folders));
     settings
+}
+
+/// Trims the folders and drops blanks and repeats, keeping their order.
+pub fn normalize_library_folders(folders: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    folders
+        .into_iter()
+        .map(|folder| folder.trim().to_owned())
+        .filter(|folder| !folder.is_empty() && seen.insert(crate::library::path_key(folder)))
+        .collect()
 }
 
 fn normalize_optional_hotkey(spec: &str, fallback: &str) -> String {
@@ -919,10 +947,12 @@ mod tests {
             catalog_all_hotkey: "Ctrl+1".into(),
             catalog_effects_hotkey: "Ctrl+2".into(),
             catalog_project_hotkey: "Ctrl+3".into(),
+            catalog_library_hotkey: "Ctrl+5".into(),
             catalog_actions_hotkey: "Ctrl+4".into(),
             audio_preview_hotkey: "Alt+P".into(),
             auto_preview_audio: true,
             action_hotkeys: BTreeMap::new(),
+            library_folders: vec![r"D:\SFX".into(), r"E:\Memes".into()],
         };
         for (theme, value) in [
             (PaletteTheme::Light, "light"),
@@ -1188,6 +1218,23 @@ mod tests {
         assert!(resolve_open_effect_controls(false, true));
         assert!(resolve_open_effect_controls(true, false));
         assert!(!resolve_open_effect_controls(true, true));
+    }
+
+    #[test]
+    fn library_folders_drop_blanks_and_repeats() {
+        assert_eq!(
+            normalize_library_folders(vec![
+                r" D:\SFX ".into(),
+                "".into(),
+                "d:/sfx".into(),
+                r"E:\Memes\".into(),
+                r"e:\memes".into(),
+            ]),
+            [r"D:\SFX", r"E:\Memes\"]
+        );
+        let loaded: AppSettings = serde_json::from_str(r#"{"library_folders":["C:\\A"]}"#).unwrap();
+        assert_eq!(loaded.library_folders, [r"C:\A"]);
+        assert!(AppSettings::default().library_folders.is_empty());
     }
 
     #[test]

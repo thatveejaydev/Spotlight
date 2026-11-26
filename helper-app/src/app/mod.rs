@@ -25,12 +25,13 @@ use crate::{
         markers::{MarkerDialog, MarkerPicker},
         Action,
     },
-    audio_preview::AudioPreview,
+    audio_preview::{AudioPreview, PreviewItem},
     availability::{self, Availability, Facts},
     bridge::{ApplyResult, BridgeClients, BridgeEvent, ContextEvent, MarkerEvent, MediaCatalog},
     catalog::{Catalog, CatalogStore, EffectEntry, EffectType, MediaType, ProjectItemEntry, ProjectItemKind, SearchResult},
     debug_log::{self, DebugLogController, LogKind},
     error_toast::{self, ErrorToast},
+    library::{self, FolderStatus, LibraryIndexer, LibrarySnapshot},
     premiere_prefs::{self, ShortcutBinding},
     presets::{self, PresetHandoff},
     protocol::{MarkerCommand, MarkerReply, PremiereContext},
@@ -39,7 +40,7 @@ use crate::{
         self, AlternateModifier, AppSettings, PaletteShortcut, PaletteShortcutAction, PaletteTheme,
     },
     tray::{self, SystemTray, TrayAction},
-    win_focus, ActionHotkeyUI, EffectItemUI, SpotlightWindow,
+    win_focus, ActionHotkeyUI, EffectItemUI, LibraryFolderUI, SpotlightWindow,
 };
 #[cfg(test)]
 use crate::{bridge, catalog};
@@ -48,7 +49,7 @@ use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, Vec
 use std::{
     cell::RefCell,
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -79,6 +80,10 @@ struct AppState {
     marker_naming: Option<MarkerNaming>,
     pending_named_marker: Option<PendingNamedMarker>,
     audio_preview: AudioPreview,
+    /// What the indexer last found in each tracked Library folder.
+    library_status: Vec<FolderStatus>,
+    /// True while Windows' folder picker is open over the palette.
+    folder_picker_open: bool,
     active_bin_path: Option<String>,
     settings: AppSettings,
     selected_abs_index: usize,
@@ -109,6 +114,8 @@ impl AppState {
             marker_naming: None,
             pending_named_marker: None,
             audio_preview: AudioPreview::default(),
+            library_status: Vec::new(),
+            folder_picker_open: false,
             active_bin_path: None,
             settings,
             selected_abs_index: 0,
@@ -262,6 +269,8 @@ fn schedule_action_deadlines(state: &AppState) {
 thread_local! {
     static BRIDGE_DISPATCH: UiSlot<BridgeEvent> = const { UiSlot::new() };
     static PRESET_CATALOG_DISPATCH: UiSlot<Vec<EffectEntry>> = const { UiSlot::new() };
+    static LIBRARY_DISPATCH: UiSlot<LibrarySnapshot> = const { UiSlot::new() };
+    static FOLDER_PICK_DISPATCH: UiSlot<Option<Vec<PathBuf>>> = const { UiSlot::new() };
     static HOTKEY_DISPATCH: UiSlot<()> = const { UiSlot::new() };
     static ACTION_HOTKEY_DISPATCH: UiSlot<(action_hotkeys::Binding, isize)> = const { UiSlot::new() };
     static SYNC_FOCUS_DISPATCH: UiSlot<()> = const { UiSlot::new() };

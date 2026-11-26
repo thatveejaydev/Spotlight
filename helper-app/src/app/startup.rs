@@ -14,6 +14,7 @@ struct AppCtx {
     toast: Rc<ErrorToast>,
     /// True while the settings view is recording a shortcut.
     recording: Arc<AtomicBool>,
+    library: Rc<LibraryIndexer>,
 }
 
 impl AppCtx {
@@ -51,9 +52,13 @@ pub(crate) fn run() -> Result<(), slint::PlatformError> {
         bridge: BridgeClients::new(),
         toast: error_toast,
         recording: Arc::new(AtomicBool::new(false)),
+        library: Rc::new(LibraryIndexer::start(|snapshot| {
+            post(&LIBRARY_DISPATCH, snapshot);
+        })),
     };
 
     wire_preset_library(&ctx);
+    wire_library(&ui, &ctx, &initial_settings);
     wire_audio_preview_poll(&ctx);
     wire_bridge(&ctx);
     wire_palette(&ui, &ctx, &debug_log_ctrl);
@@ -149,6 +154,115 @@ fn wire_preset_library(ctx: &AppCtx) {
         });
     });
     presets::watch_library(|presets| post(&PRESET_CATALOG_DISPATCH, presets));
+}
+
+fn wire_library(ui: &SpotlightWindow, ctx: &AppCtx, settings: &AppSettings) {
+    let c = ctx.clone();
+    LIBRARY_DISPATCH.with(|slot| {
+        slot.set(move |snapshot: LibrarySnapshot| {
+            c.with_state(|ui, st| {
+                debug_log::log_event(
+                    LogKind::Info,
+                    "LIBRARY",
+                    format!("Indexed {} files in {} folders", snapshot.entries.len(), snapshot.folders.len()),
+                );
+                st.catalog.set_library_files(snapshot.entries);
+                st.library_status = snapshot.folders;
+                sync_library_ui(ui, st);
+                refresh_catalog_ui(ui, st, true);
+            });
+        });
+    });
+    let c = ctx.clone();
+    FOLDER_PICK_DISPATCH.with(|slot| {
+        slot.set(move |folders: Option<Vec<PathBuf>>| {
+            c.with_state(|ui, st| add_library_folders(ui, st, &c.library, folders));
+        });
+    });
+    ctx.library.set_folders(&settings.library_folders);
+    sync_library_ui(ui, &ctx.state.borrow());
+}
+
+/// Shows each tracked folder with what the indexer found in it.
+fn sync_library_ui(ui: &SpotlightWindow, st: &AppState) {
+    let rows: Vec<LibraryFolderUI> = st
+        .settings
+        .library_folders
+        .iter()
+        .map(|folder| {
+            let key = library::path_key(folder);
+            let detail = st
+                .library_status
+                .iter()
+                .find(|status| library::path_key(&status.path) == key)
+                .map_or_else(|| "Indexing…".to_string(), FolderStatus::describe);
+            LibraryFolderUI { path: folder.as_str().into(), detail: detail.into() }
+        })
+        .collect();
+    ui.set_library_folder_count(rows.len() as i32);
+    ui.set_library_folders(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Opens Windows' folder picker over the palette. The choice arrives through
+/// [`FOLDER_PICK_DISPATCH`].
+fn pick_library_folders(ui: &SpotlightWindow, st: &mut AppState) {
+    if st.folder_picker_open {
+        return;
+    }
+    let owner = extract_window_hwnd(ui);
+    let spawned = std::thread::Builder::new()
+        .name("folder-picker".into())
+        .spawn(move || {
+            post(&FOLDER_PICK_DISPATCH, library::pick_folders(owner));
+        });
+    if spawned.is_ok() {
+        st.folder_picker_open = true;
+    } else {
+        show_settings_error(ui, "Couldn't open the folder picker.");
+    }
+}
+
+fn add_library_folders(
+    ui: &SpotlightWindow,
+    st: &mut AppState,
+    indexer: &LibraryIndexer,
+    folders: Option<Vec<PathBuf>>,
+) {
+    st.folder_picker_open = false;
+    if st.is_visible {
+        win_focus::force_foreground(extract_window_hwnd(ui));
+    }
+    let Some(folders) = folders.filter(|folders| !folders.is_empty()) else {
+        return;
+    };
+    let before = st.settings.library_folders.len();
+    let mut next = st.settings.library_folders.clone();
+    next.extend(folders.iter().map(|folder| folder.to_string_lossy().into_owned()));
+    st.settings.library_folders = settings::normalize_library_folders(next);
+    let added = st.settings.library_folders.len() - before;
+    let message = match added {
+        0 => "Those folders are already in the Library.".to_string(),
+        1 => "Added 1 folder to the Library.".to_string(),
+        count => format!("Added {count} folders to the Library."),
+    };
+    if added > 0 {
+        let _ = save_and_sync_settings(ui, &st.settings, message);
+        indexer.set_folders(&st.settings.library_folders);
+    } else {
+        ui.set_settings_feedback_error(false);
+        ui.set_settings_feedback(message.into());
+    }
+    sync_library_ui(ui, st);
+}
+
+fn remove_library_folder(ui: &SpotlightWindow, st: &mut AppState, indexer: &LibraryIndexer, index: usize) {
+    if index >= st.settings.library_folders.len() {
+        return;
+    }
+    let removed = st.settings.library_folders.remove(index);
+    let _ = save_and_sync_settings(ui, &st.settings, format!("Removed {removed} from the Library."));
+    indexer.set_folders(&st.settings.library_folders);
+    sync_library_ui(ui, st);
 }
 
 fn wire_audio_preview_poll(ctx: &AppCtx) {
@@ -701,6 +815,7 @@ fn sync_settings_ui(ui: &SpotlightWindow, settings: &AppSettings) {
             PaletteShortcut::CatalogAll => ui.set_catalog_all_hotkey_label(label),
             PaletteShortcut::CatalogEffects => ui.set_catalog_effects_hotkey_label(label),
             PaletteShortcut::CatalogProject => ui.set_catalog_project_hotkey_label(label),
+            PaletteShortcut::CatalogLibrary => ui.set_catalog_library_hotkey_label(label),
             PaletteShortcut::CatalogActions => ui.set_catalog_actions_hotkey_label(label),
             PaletteShortcut::AudioPreview => ui.set_audio_preview_hotkey_label(label),
         }
@@ -1111,7 +1226,27 @@ fn wire_settings(ui: &SpotlightWindow, ctx: &AppCtx, hotkey_ctrl: &Rc<RefCell<Ho
     let c = ctx.clone();
     let hk_ctrl = hotkey_ctrl.clone();
     ui.on_reload_settings(move || {
-        c.with_state(|ui, st| reload_settings_live(ui, st, &hk_ctrl));
+        c.with_state(|ui, st| {
+            reload_settings_live(ui, st, &hk_ctrl);
+            c.library.set_folders(&st.settings.library_folders);
+            sync_library_ui(ui, st);
+        });
+    });
+
+    let c = ctx.clone();
+    ui.on_add_library_folders(move || {
+        c.with_state(|ui, st| {
+            stop_shortcut_recording(ui, Some(&c.recording));
+            pick_library_folders(ui, st);
+        });
+    });
+
+    let c = ctx.clone();
+    ui.on_remove_library_folder(move |index| {
+        c.with_state(|ui, st| {
+            stop_shortcut_recording(ui, Some(&c.recording));
+            remove_library_folder(ui, st, &c.library, index.max(0) as usize);
+        });
     });
 }
 
@@ -1152,6 +1287,10 @@ fn wire_focus_tracking(ctx: &AppCtx) -> win_focus::ForegroundHook {
 fn sync_palette_focus(ui: &SpotlightWindow, ctx: &AppCtx, hook_active: bool) {
     if !ctx.state.borrow().is_visible {
         stop_focus_grace_timer();
+        return;
+    }
+    // The folder picker takes the foreground on purpose; the palette stays behind it.
+    if ctx.state.borrow().folder_picker_open {
         return;
     }
     let our_hwnd = extract_window_hwnd(ui);

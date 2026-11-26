@@ -17,6 +17,8 @@ const fn kind(name: &'static str, tint: (u8, u8, u8), ink: (u8, u8, u8)) -> Kind
 
 pub(super) fn kind_icon(result: &SearchResult) -> KindIcon {
     const VIDEO_FILE: KindIcon = kind("video", (125, 211, 252), (3, 105, 161));
+    const IMAGE_FILE: KindIcon = kind("image", (94, 234, 212), (15, 118, 110));
+    const AUDIO_FILE: KindIcon = kind("audio", (190, 242, 100), (77, 124, 15));
     const OTHER: KindIcon = kind("other", (203, 213, 225), (71, 85, 105));
     match result {
         SearchResult::Effect(entry) => match entry.effect_type {
@@ -29,8 +31,8 @@ pub(super) fn kind_icon(result: &SearchResult) -> KindIcon {
         },
         SearchResult::ProjectItem(item) => match item.kind {
             ProjectItemKind::Media => match item.media_type {
-                Some(MediaType::Image) => kind("image", (94, 234, 212), (15, 118, 110)),
-                Some(MediaType::Audio) => kind("audio", (190, 242, 100), (77, 124, 15)),
+                Some(MediaType::Image) => IMAGE_FILE,
+                Some(MediaType::Audio) => AUDIO_FILE,
                 Some(MediaType::Video | MediaType::Unknown) | None => VIDEO_FILE,
             },
             ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => {
@@ -41,6 +43,11 @@ pub(super) fn kind_icon(result: &SearchResult) -> KindIcon {
         },
         SearchResult::Action(_) => kind("action", (253, 186, 116), (194, 65, 12)),
         SearchResult::Marker(_) => kind("marker", (252, 165, 165), (185, 28, 28)),
+        SearchResult::LibraryFile(file) => match file.media_type {
+            MediaType::Image => IMAGE_FILE,
+            MediaType::Audio => AUDIO_FILE,
+            MediaType::Video | MediaType::Unknown => VIDEO_FILE,
+        },
     }
 }
 
@@ -60,10 +67,12 @@ fn bin_path_label(path: &str) -> String {
     path.replace(crate::catalog::BIN_PATH_SEPARATOR, " › ")
 }
 
-/// One row of the result list.
-pub(super) fn result_row(result: &SearchResult, facts: &Facts) -> EffectItemUI {
-    let reason = availability::primary(result, facts).reason();
+/// One row of the result list. A Library file the project holds is checked as its clip.
+pub(super) fn result_row(result: &SearchResult, facts: &Facts, catalog: &CatalogStore) -> EffectItemUI {
+    let resolved = catalog.resolve(result);
+    let reason = availability::primary(&resolved, facts).reason();
     let icon = kind_icon(result);
+    let needs_import = matches!(resolved, SearchResult::LibraryFile(_));
     let color = |(r, g, b): (u8, u8, u8)| Color::from_rgb_u8(r, g, b);
     let (name, detail, subtitle): (&str, String, &str) = match result {
         SearchResult::Marker(marker) => (
@@ -79,6 +88,15 @@ pub(super) fn result_row(result: &SearchResult, facts: &Facts) -> EffectItemUI {
         ),
         SearchResult::Effect(entry) => (entry.name.as_str(), effect_kind(entry.effect_type).into(), ""),
         SearchResult::ProjectItem(entry) => (entry.name.as_str(), bin_path_label(&entry.bin_path), ""),
+        SearchResult::LibraryFile(file) => (
+            file.name.as_str(),
+            if matches!(resolved, SearchResult::ProjectItem(_)) {
+                format!("In project · {}", bin_path_label(&file.folder))
+            } else {
+                bin_path_label(&file.folder)
+            },
+            "",
+        ),
     };
     EffectItemUI {
         name: name.into(),
@@ -88,6 +106,7 @@ pub(super) fn result_row(result: &SearchResult, facts: &Facts) -> EffectItemUI {
         tint: color(icon.tint),
         ink: color(icon.ink),
         disabled: reason.is_some(),
+        needs_import,
     }
 }
 
@@ -101,6 +120,7 @@ pub(super) fn key_hints(state: &AppState) -> (&'static str, &'static str, &'stat
     let Some(result) = state.matched_items.get(state.selected_abs_index) else {
         return ("", "", escape);
     };
+    let result = &state.catalog.resolve(result);
     let facts = state.facts();
     let ready = |availability: Availability| availability.reason().is_none();
     let open_effect_controls = state.settings.open_effect_controls_by_default;
@@ -118,6 +138,8 @@ pub(super) fn key_hints(state: &AppState) -> (&'static str, &'static str, &'stat
             ProjectItemKind::Sequence | ProjectItemKind::ActiveSequence => ("Nest at playhead", "Open in Timeline"),
             ProjectItemKind::Other => ("", ""),
         },
+        // Only files the project doesn't hold; the rest resolved to their clip above.
+        SearchResult::LibraryFile(_) => ("Import and place at playhead", "Import to Source Monitor"),
     };
     let enter = if ready(availability::primary(result, &facts)) { enter } else { "" };
     let alternate = if ready(availability::alternate(result, &facts)) { alternate } else { "" };
@@ -140,17 +162,18 @@ pub(super) fn remember_item(state: &mut AppState, recent: RecentItem) {
 }
 
 pub(super) fn recent_results(state: &AppState) -> Vec<SearchResult> {
-    state
-        .recent_items
-        .iter()
-        .filter_map(|recent| match &recent.item {
+    let in_project = |recent: &RecentItem| {
+        state
+            .media_catalog
+            .as_ref()
+            .filter(|catalog| recent.project_id == catalog.project_id)
+    };
+    let mut results: Vec<SearchResult> = Vec::new();
+    for recent in &state.recent_items {
+        let result = match &recent.item {
             SearchResult::Effect(_) => Some(recent.item.clone()),
             SearchResult::Action(_) | SearchResult::Marker(_) => None,
-            SearchResult::ProjectItem(item) => {
-                let catalog = state.media_catalog.as_ref()?;
-                if recent.project_id != catalog.project_id {
-                    return None;
-                }
+            SearchResult::ProjectItem(item) => in_project(recent).and_then(|catalog| {
                 catalog
                     .items
                     .iter()
@@ -158,9 +181,18 @@ pub(super) fn recent_results(state: &AppState) -> Vec<SearchResult> {
                     .cloned()
                     .map(Arc::new)
                     .map(SearchResult::ProjectItem)
-            }
-        })
-        .collect()
+            }),
+            // A placed Library file is a project clip now; show that clip, as All does.
+            SearchResult::LibraryFile(file) => in_project(recent).and_then(|_| {
+                let file = state.catalog.library_file(&file.key)?;
+                Some(state.catalog.resolve(&SearchResult::LibraryFile(file)))
+            }),
+        };
+        if let Some(result) = result.filter(|result| !results.iter().any(|seen| seen.same_item(result))) {
+            results.push(result);
+        }
+    }
+    results
 }
 
 /// Asks the plugin for the Premiere state that decides which rows are dimmed.
@@ -235,7 +267,8 @@ pub(super) fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
 pub(super) fn sync_audio_selection(ui: &SpotlightWindow, state: &mut AppState) {
     let item = if state.is_visible && !ui.get_settings_open() {
         match state.matched_items.get(state.selected_abs_index) {
-            Some(SearchResult::ProjectItem(item)) => Some(item.as_ref()),
+            Some(SearchResult::ProjectItem(item)) => Some(PreviewItem::Project(item.as_ref())),
+            Some(SearchResult::LibraryFile(file)) => Some(PreviewItem::File(&file.path)),
             _ => None,
         }
     } else {
@@ -275,7 +308,7 @@ pub(super) fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     let elapsed = started.elapsed();
     let total = state.matched_items.len();
     if state.is_visible {
-        let (effects_count, media_count) = state.catalog.counts();
+        let (effects_count, media_count, library_count) = state.catalog.counts();
         debug_log::record_search_timing(
             elapsed,
             query.as_str(),
@@ -285,8 +318,10 @@ pub(super) fn rebuild_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
                 picker.markers().len()
             } else if catalog == Catalog::Actions {
                 Action::ALL.len()
+            } else if catalog == Catalog::Library {
+                library_count
             } else if catalog == Catalog::All && !show_history {
-                effects_count + media_count + Action::ALL.len()
+                effects_count + media_count + library_count + Action::ALL.len()
             } else {
                 effects_count + media_count
             },
@@ -360,7 +395,7 @@ pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {
     let facts = state.facts();
     let slice: Vec<EffectItemUI> = state.matched_items[state.scroll_offset..end]
         .iter()
-        .map(|entry| result_row(entry, &facts))
+        .map(|entry| result_row(entry, &facts, &state.catalog))
         .collect();
 
     ui.set_results(ModelRc::new(VecModel::from(slice)));

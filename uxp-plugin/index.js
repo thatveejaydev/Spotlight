@@ -27,6 +27,7 @@ const {
 const effects = require("./lib/effects.js")(ppro);
 const placement = require("./lib/placement.js")(ppro, { findProjectEntry });
 const sourceMedia = require("./lib/source-media.js")(ppro, { findProjectEntry });
+const libraryImport = require("./lib/library-import.js")(ppro, { collectProjectEntries });
 const premiereContext = require("./lib/context.js")(ppro, {
   storage: globalThis.localStorage,
   sourceKey,
@@ -117,17 +118,18 @@ function sendProjectItems(connection, requestId, projectId, sequenceId, items, s
   }
 }
 
-// "audio", "image" or "video" for the clip icon, from the media file when Premiere
-// reports it (25.6 or later), else from the item name. Null when neither tells.
-async function readMediaType(item, clip) {
+// The clip's file, which tells the helper a Library file is already in the project, and
+// "audio", "image" or "video" for its icon. Both come from the media file when Premiere
+// reports it (25.6 or later); the type falls back to the item name. Null when unknown.
+async function readMediaInfo(item, clip) {
+  let mediaPath = null;
   try {
     const filePath = await clip.getMediaFilePath?.();
-    const fromPath = mediaTypeOfFileName(filePath);
-    if (fromPath) return fromPath;
+    if (typeof filePath === "string" && filePath.trim()) mediaPath = filePath;
   } catch (_) {
     // Fall back to the name.
   }
-  return mediaTypeOfFileName(item.name);
+  return { mediaPath, mediaType: mediaTypeOfFileName(mediaPath) || mediaTypeOfFileName(item.name) };
 }
 
 // `reuse` sends the last list without walking the project when nothing changed since it was built.
@@ -174,6 +176,7 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
           let kind = bin ? "bin" : "other";
           let offline = false;
           let mediaType = null;
+          let mediaPath = null;
           if (itemId === activeItemId) {
             kind = "activeSequence";
           } else if (clip && !stale()) {
@@ -181,13 +184,13 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
               kind = (await clip.isSequence()) ? "sequence" : "media";
               if (kind === "media" && !stale()) {
                 offline = Boolean(await clip.isOffline?.());
-                mediaType = await readMediaType(item, clip);
+                ({ mediaType, mediaPath } = await readMediaInfo(item, clip));
               }
             } catch (_) {
               // Keep items visible even when Premiere cannot classify their source.
             }
           }
-          return { itemId, name: item.name, binPath: path || PROJECT_ROOT_BIN, kind, offline, mediaType };
+          return { itemId, name: item.name, binPath: path || PROJECT_ROOT_BIN, kind, offline, mediaType, mediaPath };
         }
       );
       if (stale()) return;
@@ -259,6 +262,49 @@ async function placeProjectItem(payload, connection) {
   const revision = projectContextRevision;
   return placement.placeProjectItem(payload, () =>
     revision === projectContextRevision && ws === connection && connection.readyState === WebSocket.OPEN);
+}
+
+// Waits until project events stop arriving, so the events of an import don't make the
+// placement that follows it look stale. Gives up waiting after about a second.
+async function settleProjectEvents(delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
+  let last = projectContextRevision;
+  for (let quiet = 0, waited = 0; quiet < 2 && waited < 20; waited++) {
+    await delay(50);
+    quiet = projectContextRevision === last ? quiet + 1 : 0;
+    last = projectContextRevision;
+  }
+}
+
+// Imports the command's Library file into the active project, or finds the clip made
+// from it before. Returns `{ entry, imported }`.
+async function importLibraryFile(payload, connection) {
+  if (typeof payload.path !== "string" || !payload.path.trim()) {
+    throw new Error("This Library file has no path.");
+  }
+  const project = await ppro.Project.getActiveProject();
+  if (!project || guid(project) !== payload.projectId) {
+    throw new Error("Active project changed. Search again.");
+  }
+  if (ws !== connection) throw new Error("Spotlight reconnected. Try again.");
+  const result = await libraryImport.importLibraryFile(project, payload.path);
+  if (result.imported) await settleProjectEvents();
+  return result;
+}
+
+async function importAndPlace(payload, connection) {
+  const { entry, imported } = await importLibraryFile(payload, connection);
+  const message = await placeProjectItem({ ...payload, itemId: entry.itemId }, connection);
+  return imported ? message.replace(/^Placed/, "Imported and placed") : message;
+}
+
+async function importAndOpen(payload, connection) {
+  const monitor = ppro.SourceMonitor ?? ppro.sourceMonitor;
+  if (typeof monitor?.openProjectItem !== "function") {
+    throw new Error("Opening in the Source Monitor requires Premiere Pro 25.6 or later.");
+  }
+  const { entry, imported } = await importLibraryFile(payload, connection);
+  const message = await openInSourceMonitor({ projectId: payload.projectId, itemId: entry.itemId });
+  return imported ? message.replace(/^Opened/, "Imported and opened") : message;
 }
 
 async function openInSourceMonitor(payload) {
@@ -418,6 +464,20 @@ const messageHandlers = new Map([
         placementInProgress = false;
       }
     })
+  )],
+  ["import_and_place", withRequestId((msg, connection) =>
+    replyWithOutcome(connection, "placement_ack", msg.requestId, async () => {
+      if (placementInProgress) throw new Error("A media placement is already in progress.");
+      placementInProgress = true;
+      try {
+        return await importAndPlace(msg, connection);
+      } finally {
+        placementInProgress = false;
+      }
+    })
+  )],
+  ["import_and_open", withRequestId((msg, connection) =>
+    replyWithOutcome(connection, "source_monitor_ack", msg.requestId, () => importAndOpen(msg, connection))
   )],
   ["open_in_source_monitor", withRequestId((msg, connection) =>
     replyWithOutcome(connection, "source_monitor_ack", msg.requestId, () => openInSourceMonitor(msg))

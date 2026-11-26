@@ -100,6 +100,23 @@ pub enum OutgoingHelperMessage {
         sequence_id: String,
         item_id: String,
     },
+    /// Imports a Library file (or reuses the clip already made from it) and places
+    /// it at the playhead. Answered with `placement_ack`.
+    #[serde(rename = "import_and_place", rename_all = "camelCase")]
+    ImportAndPlace {
+        request_id: u64,
+        project_id: String,
+        sequence_id: String,
+        path: String,
+    },
+    /// Imports a Library file (or reuses its clip) and opens it in the Source
+    /// Monitor. Answered with `source_monitor_ack`.
+    #[serde(rename = "import_and_open", rename_all = "camelCase")]
+    ImportAndOpen {
+        request_id: u64,
+        project_id: String,
+        path: String,
+    },
     #[serde(rename = "open_in_source_monitor", rename_all = "camelCase")]
     OpenInSourceMonitor {
         request_id: u64,
@@ -337,6 +354,30 @@ mod tests {
         ] {
             assert_eq!(parse_context(json), (9, None));
         }
+    }
+
+    #[test]
+    fn library_imports_serialize_the_file_path() {
+        let json = serde_json::to_value(OutgoingHelperMessage::ImportAndPlace {
+            request_id: 5,
+            project_id: "p".into(),
+            sequence_id: "s".into(),
+            path: r"D:\SFX\Boom.wav".into(),
+        })
+        .unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "import_and_place", "requestId": 5, "projectId": "p", "sequenceId": "s",
+            "path": "D:\\SFX\\Boom.wav"
+        }));
+        let json = serde_json::to_value(OutgoingHelperMessage::ImportAndOpen {
+            request_id: 6,
+            project_id: "p".into(),
+            path: "D:/a.png".into(),
+        })
+        .unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "import_and_open", "requestId": 6, "projectId": "p", "path": "D:/a.png"
+        }));
     }
 
     #[test]

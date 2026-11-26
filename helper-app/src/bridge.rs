@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     io::ErrorKind,
     net::{SocketAddr, TcpListener, TcpStream},
+    path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Sender},
@@ -356,15 +357,14 @@ fn sole_peer<'a>(
     }
 }
 
-/// Finds `item_id` in the only plugin's project list, which must still be the
-/// list `catalog` came from (and the same sequence when `same_sequence`).
-fn project_source<'a>(
+/// The only plugin with a project list, which must still be the list `catalog`
+/// came from (and the same sequence when `same_sequence`).
+fn catalog_peer<'a>(
     peers: &'a [Peer],
     catalog: &MediaCatalog,
-    item_id: &str,
     same_sequence: bool,
     multiple: &'static str,
-) -> Result<(&'a Peer, &'a MediaCatalog, &'a ProjectItemEntry), &'static str> {
+) -> Result<(&'a Peer, &'a MediaCatalog), &'static str> {
     let mut catalogs = peers.iter().filter_map(|peer| Some((peer, peer.media.as_ref()?)));
     let (peer, current) = catalogs.next().ok_or(MEDIA_DISCONNECTED)?;
     if catalogs.next().is_some() {
@@ -376,8 +376,28 @@ fn project_source<'a>(
     {
         return Err(MEDIA_CHANGED);
     }
+    Ok((peer, current))
+}
+
+/// Finds `item_id` in the only plugin's project list, as [`catalog_peer`] checks it.
+fn project_source<'a>(
+    peers: &'a [Peer],
+    catalog: &MediaCatalog,
+    item_id: &str,
+    same_sequence: bool,
+    multiple: &'static str,
+) -> Result<(&'a Peer, &'a MediaCatalog, &'a ProjectItemEntry), &'static str> {
+    let (peer, current) = catalog_peer(peers, catalog, same_sequence, multiple)?;
     let entry = current.items.iter().find(|entry| entry.item_id == item_id).ok_or(MEDIA_CHANGED)?;
     Ok((peer, current, entry))
+}
+
+/// The file's path as text for the plugin, once it is known to still exist.
+fn library_path(path: &Path) -> Result<String, &'static str> {
+    if !path.is_file() {
+        return Err("This file was moved or deleted. Spotlight will update the Library.");
+    }
+    path.to_str().map(str::to_owned).ok_or("Premiere can't import a file with this name.")
 }
 
 fn require_project(current: &MediaCatalog) -> Result<&str, &'static str> {
@@ -513,6 +533,38 @@ impl BridgeClients {
         let msg = OutgoingHelperMessage::PlaceProjectItem { request_id, project_id, sequence_id, item_id };
         self.send_command(peer, request_id, "place_project_item", &msg, MEDIA_DISCONNECTED)?;
         Self::log_sent("place_project_item", "", request_id);
+        Ok(request_id)
+    }
+
+    /// Imports a Library file into the project and places it at the playhead.
+    pub fn import_and_place(&self, catalog: &MediaCatalog, path: &Path) -> Result<u64, &'static str> {
+        let path = library_path(path)?;
+        let peers = self.peers();
+        let (peer, current) =
+            catalog_peer(&peers, catalog, true, "Close the other Premiere session before placing media.")?;
+        let project_id = require_project(current)?.to_owned();
+        let sequence_id = current
+            .sequence_id
+            .clone()
+            .ok_or("Open a timeline before placing media.")?;
+        let request_id = self.next_request_id();
+        let msg = OutgoingHelperMessage::ImportAndPlace { request_id, project_id, sequence_id, path };
+        self.send_command(peer, request_id, "import_and_place", &msg, MEDIA_DISCONNECTED)?;
+        Self::log_sent("import_and_place", "", request_id);
+        Ok(request_id)
+    }
+
+    /// Imports a Library file into the project and opens it in the Source Monitor.
+    pub fn import_and_open(&self, catalog: &MediaCatalog, path: &Path) -> Result<u64, &'static str> {
+        let path = library_path(path)?;
+        let peers = self.peers();
+        let (peer, current) =
+            catalog_peer(&peers, catalog, false, "Close the other Premiere session before opening media.")?;
+        let project_id = require_project(current)?.to_owned();
+        let request_id = self.next_request_id();
+        let msg = OutgoingHelperMessage::ImportAndOpen { request_id, project_id, path };
+        self.send_command(peer, request_id, "import_and_open", &msg, MEDIA_DISCONNECTED)?;
+        Self::log_sent("import_and_open", "", request_id);
         Ok(request_id)
     }
 
@@ -1133,6 +1185,48 @@ mod tests {
     }
 
     #[test]
+    fn library_imports_go_to_the_current_project_and_need_the_file() {
+        let dir = std::env::temp_dir().join(format!("spotlight-bridge-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Boom.wav");
+        std::fs::write(&file, b"").unwrap();
+        let catalog = MediaCatalog {
+            peer_id: 70,
+            project_id: Some("project".into()),
+            sequence_id: Some("timeline".into()),
+            items: Vec::new(),
+        };
+        let bridge = BridgeClients::new();
+        let rx = bridge.connect_test_peer(catalog.clone());
+
+        let request_id = bridge.import_and_place(&catalog, &file).unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(sent["type"], "import_and_place");
+        assert_eq!(sent["requestId"], request_id);
+        assert_eq!(sent["sequenceId"], "timeline");
+        assert_eq!(sent["path"], file.to_str().unwrap());
+
+        bridge.import_and_open(&catalog, &file).unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(sent["type"], "import_and_open");
+        assert_eq!(sent["projectId"], "project");
+
+        assert_eq!(
+            bridge.import_and_place(&catalog, &dir.join("Gone.wav")),
+            Err("This file was moved or deleted. Spotlight will update the Library.")
+        );
+        let stale = MediaCatalog { project_id: Some("other".into()), ..catalog.clone() };
+        assert_eq!(bridge.import_and_place(&stale, &file), Err(MEDIA_CHANGED));
+        let no_timeline = MediaCatalog { sequence_id: None, ..catalog };
+        let bridge = BridgeClients::new();
+        let _rx = bridge.connect_test_peer(no_timeline.clone());
+        assert_eq!(bridge.import_and_place(&no_timeline, &file), Err("Open a timeline before placing media."));
+        assert!(bridge.import_and_open(&no_timeline, &file).is_ok());
+        assert!(rx.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn source_monitor_requests_need_a_project_but_not_a_timeline() {
         use crate::catalog::ProjectItemKind;
         let item = |id: &str, kind| ProjectItemEntry {
@@ -1142,6 +1236,7 @@ mod tests {
             kind,
             offline: id == "f",
             media_type: None,
+            media_path: None,
         };
         let catalog = MediaCatalog {
             peer_id: 9,

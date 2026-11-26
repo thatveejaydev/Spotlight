@@ -7,7 +7,7 @@ An ultra-lightweight, zero-WebView Spotlight launcher for Adobe Premiere Pro eff
 1. **`helper-app/` (Rust + Slint Software Renderer)**
    - **Single process, zero WebView2:** Compiles `.slint` declarative UI directly to native Rust machine code rendered via Slint's CPU software renderer (`renderer-software`).
    - **Global Hotkey (`Ctrl + Space`):** Toggles the frameless centered floating window (`620×440`).
-   - **Fuzzy Search (`nucleo-matcher`):** Fuzzy, typo-tolerant search across Video Effects, Audio Effects, Transitions, and custom presets. Exact, prefix and whole-word name matches rank first, then folder, bin and kind matches (type `transition` or a bin name). Effects you applied most this session get a capped boost.
+   - **Fuzzy Search (`nucleo-matcher`):** Fuzzy, typo-tolerant search across Video Effects, Audio Effects, Transitions, custom presets, project items, and files in your Library folders. Exact, prefix and whole-word name matches rank first, then folder, bin and kind matches (type `transition` or a bin name). Effects you applied most this session get a capped boost.
    - **Localhost WebSocket Bridge (`ws://127.0.0.1:3847`):** Event-driven, 0% idle CPU bridge to Premiere Pro.
 
 2. **`uxp-plugin/` (Adobe Premiere Pro UXP Plugin)**
@@ -44,6 +44,7 @@ This builds `helper-app` in release mode and outputs `dist\PremiereSpotlightSetu
 - `helper-app/src/bridge.rs`: the WebSocket server and the connected plugins.
 - `helper-app/src/protocol.rs`: the JSON messages exchanged with the plugin.
 - `helper-app/src/premiere_prefs.rs`: reads Premiere's preferences and keyboard shortcut profiles.
+- `helper-app/src/library.rs`: indexes the Library folders on a background thread and watches them with `ReadDirectoryChangesW`.
 - `helper-app/src/win_focus/`: Windows integration (processes, foreground, synthetic input, window style and placement).
 - `helper-app/ui/`: Slint windows. `spotlight.slint` is the file `build.rs` compiles.
 - `uxp-plugin/index.js`: the bridge connection and caches. `lib/` and `actions/` hold the Premiere commands; they receive Premiere's API as a parameter and keep no state.
@@ -66,7 +67,7 @@ CI runs both suites and Clippy on Windows for every push to `main` and every pul
 - **Type:** Fuzzy search effects, transitions, custom presets, project items, and actions in **All**. Selected presets and project items show their folder path.
 - **`↑` / `↓` Arrows:** Navigate results
 - **`Ctrl+P` (configurable):** Play or pause the highlighted audio clip in Project or All. The highlighted audio row also has a play/pause icon. During preview, click the progress line to seek within the clip’s Premiere In and Out points. Audio preview requires Premiere Pro 25.6 or later and supports WAV, PCM AIFF, MP3, FLAC, AAC, and AAC/ALAC in M4A.
-- **`Tab`:** Cycle through **All** → **Effects** → **Project** → **Actions**, or click a tab below the search bar to go straight to that catalog. Spotlight opens in **All** and lists **Recent** effects and inserted items from the active project. Select a recent item to apply or insert it again.
+- **`Tab`:** Cycle through **All** → **Effects** → **Project** → **Library** → **Actions**, or click a tab below the search bar to go straight to that catalog. Spotlight opens in **All** and lists **Recent** effects and inserted items from the active project. Select a recent item to apply or insert it again.
 - **Add Marker (All or Actions):** Add a sequence marker at the playhead and open Premiere’s Marker dialog. At an existing marker, open its dialog. Uses Premiere’s Timeline and Add Marker shortcuts.
 - **Add Named Marker (All or Actions):** The search box becomes a name field. Type a name and press **Enter** to add a marker with that name at the playhead in one undo step, without the Marker dialog. Leave the field empty for an unnamed marker, or press **Esc** to go back to the search. Pause playback first. If a marker already exists at the playhead, Spotlight leaves it alone and says so. Assign a hotkey under **Hotkeys** to open Spotlight straight into the name field.
 - **Go to Marker (All or Actions):** Search markers across the active project by marker name, sequence name, comment, or elapsed position. Each row shows its sequence. Choose a marker to open its sequence and move the playhead to its start, or press **Esc** to return to the catalog you opened it from.
@@ -74,6 +75,10 @@ CI runs both suites and Clippy on Windows for every push to `main` and every pul
 - **`Enter` (or Click) on `Remove Attributes` in All or Actions:** Remove applied effects from the selected timeline clips in one undo step. Built-in controls such as Motion, Opacity, and Volume keep their settings. Requires Premiere Pro 25.6 or later.
 - **`Enter` (or Click):** Apply an effect to selected timeline clips, drill into a project bin to browse/search its contents, or place a project clip or nested sequence at the playhead in the first verified space. Open a sequence before placing media. If Premiere rejects placement on new tracks, add an empty track and retry.
 - **`Enter` (or Click) on a `Preset` result:** Open Premiere’s Effects panel and search for that preset by name. Drag it onto a clip to apply it. Spotlight uses the Effects and Select Find Box bindings from Premiere’s Keyboard Shortcuts and refreshes presets after Premiere saves them to your profile.
+- **Library:** Search the files in the folders you add under **Settings → Library**. Spotlight lists files Premiere can import (video, audio and still images), shows the folder each one is in, and keeps the list current as files are added, renamed or deleted. Library files also appear in **All**. A file the project already holds shows there once, as its project item; in **Library** it says **In project**. A file that isn't in the project yet has a small amber arrow on its icon, and the footer says **Import and place at playhead**.
+  - **`Enter` (or Click):** Import the file into a **Spotlight Library** bin and place it at the playhead, the same way as project media. A file the project already holds is placed from its existing clip and isn't imported again. On Premiere versions before 25.6, which don't report a clip's file, Spotlight can't recognize imported files, so they show twice and may be imported again.
+  - **Alternate key + `Enter`:** Import the file and open it in the Source Monitor (Premiere Pro 25.6 or later).
+  - **Audio preview:** Highlighted audio files play straight from disk with **`Ctrl+P`** or **Auto-preview audio**, without Premiere.
 - **`Backspace` (when search is empty inside a bin, or Click the bin pill):** Step back up one folder level (or exit bin view).
 - **`Shift + Enter` (or `Shift` + Click; configurable to `Ctrl` or `Alt`):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, open a sequence in its own Timeline tab (or bring its tab forward if it is already open), or open other project items in the Source Monitor.
 - **`Esc`:** Close popup and return focus to Premiere (or exit Settings back to Search if Settings is open)
@@ -89,8 +94,9 @@ When Spotlight opens, it reads the active sequence and Timeline selection from P
   - Under **General**, customize the global **Launch hotkey** (default `Ctrl+Space`).
   - Toggle **Open Effect Controls on Enter** (swaps primary and alternate actions for effects).
   - Choose the **Alternate action key** (`Shift`, `Ctrl`, or `Alt`, default `Shift`) used with `Enter` / Click.
-  - Customize the **Open settings** shortcut (default `Ctrl+,`) and optional **Catalog shortcuts** for **All**, **Effects**, **Project**, and **Actions** (all empty by default).
+  - Customize the **Open settings** shortcut (default `Ctrl+,`) and optional **Catalog shortcuts** for **All**, **Effects**, **Project**, **Library**, and **Actions** (all empty by default).
   - Customize the **Preview audio** shortcut (default `Ctrl+P`) and enable **Auto-preview audio** to play a clip after its highlight settles. Auto-preview is off by default.
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.
 - Under **Appearance**, choose **Light**, **Dark**, **Midnight Indigo** (the default), or **Premiere**.
+- Under **Library**, click **Add folders…** to pick one or more folders in File Explorer, or **×** to stop tracking one. Each folder shows how many files Spotlight found, or **Folder not found**. Spotlight indexes up to 20,000 files per folder and skips hidden files, hidden folders and folders whose names start with a dot. Folders are saved under `library_folders` in the config file.
 - Under **Hotkeys**, record or clear a shortcut for any command in **Actions**. Action hotkeys start unassigned and work from Premiere or Spotlight search. Spotlight saves them under `action_hotkeys` in the same config file. Use **General** for launch, catalog, and preview shortcuts.

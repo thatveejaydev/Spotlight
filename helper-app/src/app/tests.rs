@@ -26,7 +26,7 @@ mod at {
     pub const SETTINGS_GEAR: Point = (597., 423.);
     /// Settings tabs and controls.
     pub const HOTKEYS_TAB: Point = (105., 66.);
-    pub const ABOUT_TAB: Point = (254., 66.);
+    pub const ABOUT_TAB: Point = (313., 66.);
     pub const LAUNCH_HOTKEY_BUTTON: Point = (533., 125.);
     pub const FIRST_ACTION_RECORD: Point = (530., 141.);
     pub const FIRST_ACTION_CLEAR: Point = (581., 141.);
@@ -132,6 +132,7 @@ fn appearance_dropdown_saves_theme_and_recovers_from_save_failure() {
 
     key(Key::RightArrow);
     key(Key::RightArrow);
+    key(Key::RightArrow);
     key(Key::Tab);
     key(Key::Return);
     key(Key::DownArrow);
@@ -176,6 +177,7 @@ fn appearance_dropdown_saves_theme_and_recovers_from_save_failure() {
     ui.set_settings_open(true);
     key(Key::RightArrow);
     key(Key::RightArrow);
+    key(Key::RightArrow);
     click(at::THEME_DROPDOWN);
     key(Key::UpArrow);
     assert_eq!(
@@ -199,6 +201,7 @@ fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies()
         kind: ProjectItemKind::Media,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -210,7 +213,7 @@ fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies()
     let outbound = bridge.connect_test_peer(catalog.clone());
     let mut preview = AudioPreview::default();
     let select = |preview: &mut AudioPreview, index: usize| {
-        preview.select(&ui, Some(&catalog), Some(&catalog.items[index]), true);
+        preview.select(&ui, Some(&catalog), Some(PreviewItem::Project(&catalog.items[index])), true);
     };
     select(&mut preview, 0);
     preview.poll(&ui, &bridge, Some(&catalog));
@@ -250,7 +253,7 @@ fn audio_preview_resolves_only_the_settled_selection_and_ignores_stale_replies()
     });
     assert!(!ui.get_status_message().as_str().contains("Stale error"));
 
-    preview.select(&ui, Some(&catalog), Some(&catalog.items[0]), false);
+    preview.select(&ui, Some(&catalog), Some(PreviewItem::Project(&catalog.items[0])), false);
     std::thread::sleep(Duration::from_millis(260));
     preview.poll(&ui, &bridge, Some(&catalog));
     let identify: serde_json::Value = serde_json::from_str(&outbound.try_recv().unwrap()).unwrap();
@@ -503,6 +506,7 @@ fn accepted_actions_hide_immediately_and_errors_leave_visibility_alone() {
         kind: ProjectItemKind::Media,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -769,6 +773,7 @@ fn shift_activate_handles_effects_and_project_items() {
         kind,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -901,8 +906,8 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         window.dispatch_event(WindowEvent::KeyPressed { text: Key::Tab.into() });
         window.dispatch_event(WindowEvent::KeyReleased { text: Key::Tab.into() });
     };
-    // Centers of the All, Effects, Project and Actions text tabs.
-    const TAB_X: [f32; 4] = [23., 70., 129., 189.];
+    // Centers of the All, Effects, Project, Library and Actions text tabs.
+    const TAB_X: [f32; 5] = [23., 70., 129., 188., 248.];
     let click_tab = |index: usize| {
         let position = LogicalPosition::new(TAB_X[index], 66.);
         let button = PointerEventButton::Left;
@@ -922,14 +927,17 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         }
     };
     assert_highlight(0);
-    for (index, expected) in [(1, "effects"), (2, "project"), (3, "actions"), (0, "all")] {
+    for (index, expected) in [(1, "effects"), (2, "project"), (3, "library"), (4, "actions"), (0, "all")] {
         press_tab();
         assert_eq!(ui.get_active_catalog().as_str(), expected);
         assert_eq!(ui.get_search_text().as_str(), "Take");
         assert_highlight(index);
     }
-    click_tab(3);
+    click_tab(4);
     assert_eq!(ui.get_active_catalog().as_str(), "actions");
+    assert_highlight(4);
+    click_tab(3);
+    assert_eq!(ui.get_active_catalog().as_str(), "library");
     assert_highlight(3);
     click_tab(2);
     assert_eq!(ui.get_active_catalog().as_str(), "project");
@@ -998,6 +1006,7 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         kind: ProjectItemKind::Media,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     remember_item(&mut state, RecentItem {
         item: SearchResult::ProjectItem(Arc::new(item.clone())), project_id: Some("project".into()),
@@ -1028,6 +1037,7 @@ fn catalog_tabs_cycle_and_reopen_to_recent_items() {
         kind: catalog::ProjectItemKind::Media,
         offline: false,
         media_type: None,
+        media_path: None,
     }).collect());
     refresh_results_ui(&ui, &mut state);
     assert_eq!(ui.get_total_matches(), 8);
@@ -1213,6 +1223,7 @@ fn moving_selection_inside_visible_window_reuses_results_model() {
                 kind: ProjectItemKind::Media,
                 offline: false,
                 media_type: None,
+                media_path: None,
             })
             .collect(),
     );
@@ -1258,6 +1269,7 @@ fn bin_drill_down_enters_and_steps_out_without_hiding() {
         kind,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let items = vec![
         item("b1", "Footage", "Project root", ProjectItemKind::Bin),
@@ -1454,6 +1466,7 @@ fn default_effect_controls_setting_swaps_enter_and_shift_enter_for_effects() {
         kind: ProjectItemKind::Media,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -1567,7 +1580,7 @@ fn settings_gear_toggles_in_palette_settings_view_and_esc_returns_to_search() {
     assert!(!ui.get_recording_hotkey());
     assert!(ui.get_settings_open());
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         window.dispatch_event(WindowEvent::KeyPressed {
             text: Key::LeftArrow.into(),
         });
@@ -1637,6 +1650,7 @@ fn configurable_modifier_settings_hotkey_and_catalog_shortcuts_work() {
         kind: ProjectItemKind::Media,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let state = Rc::new(RefCell::new(AppState {
         matched_items: vec![SearchResult::ProjectItem(Arc::new(clip))],
@@ -1822,6 +1836,7 @@ fn alternate_action_opens_sequences_in_the_timeline() {
         kind,
         offline: false,
         media_type: None,
+        media_path: None,
     };
     let catalog = MediaCatalog {
         peer_id: 7,
@@ -1974,6 +1989,46 @@ fn add_named_marker_takes_a_name_and_adds_it_without_the_dialog() {
 }
 
 #[test]
+fn library_files_outside_the_project_get_an_import_badge_and_hints() {
+    let file = |path: &str| {
+        let path = std::path::PathBuf::from(path);
+        crate::library::LibraryEntry {
+            name: path.file_name().unwrap().to_str().unwrap().to_owned(),
+            key: crate::library::path_key(path.to_str().unwrap()),
+            folder: "SFX".into(),
+            media_type: catalog::MediaType::Audio,
+            path,
+        }
+    };
+    let mut state = AppState::new(AppSettings::default());
+    state.catalog.set_library_files(vec![file(r"D:\SFX\Boom.wav"), file(r"D:\SFX\Clap.wav")]);
+    state.catalog.set_project_items(vec![ProjectItemEntry {
+        item_id: "clap".into(),
+        name: "Clap.wav".into(),
+        bin_path: "Spotlight Library".into(),
+        kind: ProjectItemKind::Media,
+        offline: false,
+        media_type: Some(catalog::MediaType::Audio),
+        media_path: Some("d:/sfx/clap.wav".into()),
+    }]);
+    state.matched_items = state.catalog.search("", "library");
+    let facts = state.facts();
+    let rows: Vec<_> = state
+        .matched_items
+        .iter()
+        .map(|result| result_row(result, &facts, &state.catalog))
+        .collect();
+    assert_eq!(rows.iter().map(|row| (row.name.as_str(), row.needs_import)).collect::<Vec<_>>(),
+        [("Boom.wav", true), ("Clap.wav", false)]);
+    assert_eq!(rows[1].detail.as_str(), "In project · SFX");
+
+    state.selected_abs_index = 0;
+    assert_eq!(key_hints(&state), ("Import and place at playhead", "Import to Source Monitor", "Close"));
+    state.selected_abs_index = 1;
+    assert_eq!(key_hints(&state), ("Place at playhead", "Open in Source Monitor", "Close"));
+}
+
+#[test]
 fn footer_hints_follow_the_highlighted_row_and_messages_fade() {
     use slint::Model;
 
@@ -1993,6 +2048,7 @@ fn footer_hints_follow_the_highlighted_row_and_messages_fade() {
         kind,
         offline: false,
         media_type: None,
+        media_path: None,
     }));
     let mut state = AppState::new(AppSettings::default());
     let hints = |state: &mut AppState, result: SearchResult| {

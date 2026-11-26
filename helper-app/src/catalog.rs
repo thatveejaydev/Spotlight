@@ -1,6 +1,10 @@
 mod search;
 
-use crate::{actions::Action, protocol::SequenceMarker};
+use crate::{
+    actions::Action,
+    library::{self, LibraryEntry},
+    protocol::SequenceMarker,
+};
 use nucleo_matcher::{Config, Matcher};
 use search::{Query, SearchKey};
 use serde::{Deserialize, Serialize};
@@ -20,17 +24,19 @@ pub enum Catalog {
     All,
     Effects,
     Project,
+    Library,
     Actions,
 }
 
 impl Catalog {
-    pub const ALL: [Self; 4] = [Self::All, Self::Effects, Self::Project, Self::Actions];
+    pub const ALL: [Self; 5] = [Self::All, Self::Effects, Self::Project, Self::Library, Self::Actions];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::All => "all",
             Self::Effects => "effects",
             Self::Project => "project",
+            Self::Library => "library",
             Self::Actions => "actions",
         }
     }
@@ -45,6 +51,10 @@ impl Catalog {
 
     fn includes_project(self) -> bool {
         matches!(self, Self::All | Self::Project)
+    }
+
+    fn includes_library(self) -> bool {
+        matches!(self, Self::All | Self::Library)
     }
 
     fn includes_actions(self) -> bool {
@@ -134,6 +144,10 @@ pub struct ProjectItemEntry {
     /// without a file extension.
     #[serde(default)]
     pub media_type: Option<MediaType>,
+    /// The clip's file on disk. Null from older plugins, for sequences and bins, and
+    /// when Premiere can't report it.
+    #[serde(default)]
+    pub media_path: Option<String>,
 }
 
 /// The kind of file behind a media clip.
@@ -221,6 +235,8 @@ pub enum SearchResult {
     ProjectItem(Arc<ProjectItemEntry>),
     Action(Action),
     Marker(Arc<SequenceMarker>),
+    /// A file in a tracked Library folder.
+    LibraryFile(Arc<LibraryEntry>),
 }
 
 struct IndexedEffect {
@@ -269,6 +285,28 @@ impl IndexedProjectItem {
     }
 }
 
+struct IndexedLibraryFile {
+    entry: Arc<LibraryEntry>,
+    name_lower: String,
+    key: SearchKey,
+}
+
+impl IndexedLibraryFile {
+    fn new(entry: LibraryEntry) -> Self {
+        let kind = match entry.media_type {
+            MediaType::Audio => "Audio",
+            MediaType::Image => "Image",
+            MediaType::Video | MediaType::Unknown => "Video",
+        };
+        let key = SearchKey::new(&entry.name, &format!("{} Library {kind}", entry.folder));
+        Self {
+            name_lower: entry.name.to_lowercase(),
+            entry: Arc::new(entry),
+            key,
+        }
+    }
+}
+
 struct IndexedAction {
     action: Action,
     name_lower: String,
@@ -290,6 +328,7 @@ enum CatalogEntry<'a> {
     Effect(&'a IndexedEffect),
     ProjectItem(&'a IndexedProjectItem),
     Action(&'a IndexedAction),
+    LibraryFile(&'a IndexedLibraryFile),
 }
 
 /// Ranking bonus for an effect applied `count` times this session. It grows
@@ -308,6 +347,7 @@ impl SearchResult {
             (Self::ProjectItem(a), Self::ProjectItem(b)) => a.item_id == b.item_id,
             (Self::Action(a), Self::Action(b)) => a == b,
             (Self::Marker(a), Self::Marker(b)) => a == b,
+            (Self::LibraryFile(a), Self::LibraryFile(b)) => a.key == b.key,
             _ => false,
         }
     }
@@ -319,6 +359,7 @@ impl CatalogEntry<'_> {
             Self::Effect(item) => &item.entry.name,
             Self::ProjectItem(item) => &item.entry.name,
             Self::Action(item) => item.action.name(),
+            Self::LibraryFile(item) => &item.entry.name,
         }
     }
 
@@ -327,6 +368,7 @@ impl CatalogEntry<'_> {
             Self::Effect(item) => &item.name_lower,
             Self::ProjectItem(item) => &item.name_lower,
             Self::Action(item) => &item.name_lower,
+            Self::LibraryFile(item) => &item.name_lower,
         }
     }
 
@@ -335,6 +377,7 @@ impl CatalogEntry<'_> {
             Self::Effect(item) => &item.entry.folder,
             Self::ProjectItem(item) => &item.entry.bin_path,
             Self::Action(_) => "",
+            Self::LibraryFile(item) => &item.entry.folder,
         }
     }
 
@@ -343,6 +386,7 @@ impl CatalogEntry<'_> {
             Self::Effect(item) => &item.key,
             Self::ProjectItem(item) => &item.key,
             Self::Action(item) => &item.key,
+            Self::LibraryFile(item) => &item.key,
         }
     }
 
@@ -351,7 +395,13 @@ impl CatalogEntry<'_> {
             Self::Effect(item) => SearchResult::Effect(Arc::clone(&item.entry)),
             Self::ProjectItem(item) => SearchResult::ProjectItem(Arc::clone(&item.entry)),
             Self::Action(item) => SearchResult::Action(item.action),
+            Self::LibraryFile(item) => SearchResult::LibraryFile(Arc::clone(&item.entry)),
         }
+    }
+
+    /// Breaks ties between equal scores: Library files come after everything else.
+    fn tie_group(&self) -> u8 {
+        u8::from(matches!(self, Self::LibraryFile(_)))
     }
 }
 
@@ -372,6 +422,9 @@ pub struct CatalogStore {
     items: Vec<IndexedEffect>,
     presets: Vec<IndexedEffect>,
     project_items: Vec<IndexedProjectItem>,
+    /// Project media by the [`library::path_key`] of its file.
+    project_paths: HashMap<String, Arc<ProjectItemEntry>>,
+    library: Vec<IndexedLibraryFile>,
     /// How often each effect was applied this session, by type and match name.
     usage_counts: HashMap<EffectType, HashMap<String, u32>>,
     actions: Vec<IndexedAction>,
@@ -388,6 +441,8 @@ impl CatalogStore {
             items,
             presets: Vec::new(),
             project_items: Vec::new(),
+            project_paths: HashMap::new(),
+            library: Vec::new(),
             usage_counts: HashMap::new(),
             actions: Action::ALL.into_iter().map(IndexedAction::new).collect(),
             matcher: Matcher::new(Config::DEFAULT),
@@ -431,10 +486,50 @@ impl CatalogStore {
             .into_iter()
             .map(IndexedProjectItem::new)
             .collect();
+        self.project_paths.clear();
+        for item in &self.project_items {
+            let entry = &item.entry;
+            let Some(path) = entry.media_path.as_deref().filter(|_| entry.kind == ProjectItemKind::Media) else {
+                continue;
+            };
+            // A file imported twice maps to its first clip in the Project panel.
+            self.project_paths
+                .entry(library::path_key(path))
+                .or_insert_with(|| Arc::clone(entry));
+        }
     }
 
-    pub fn counts(&self) -> (usize, usize) {
-        (self.items.len() + self.presets.len(), self.project_items.len())
+    pub fn set_library_files(&mut self, entries: Vec<LibraryEntry>) {
+        self.library = entries.into_iter().map(IndexedLibraryFile::new).collect();
+    }
+
+    /// The project clip already made from `file`, if the project holds it.
+    pub fn project_item_for(&self, file: &LibraryEntry) -> Option<Arc<ProjectItemEntry>> {
+        self.project_paths.get(&file.key).cloned()
+    }
+
+    /// The indexed Library file with this [`library::path_key`].
+    pub fn library_file(&self, key: &str) -> Option<Arc<LibraryEntry>> {
+        self.library
+            .iter()
+            .find(|file| file.entry.key == key)
+            .map(|file| Arc::clone(&file.entry))
+    }
+
+    /// What `result` stands for: a Library file the project already holds is that
+    /// project clip, so Enter places it instead of importing it again.
+    pub fn resolve(&self, result: &SearchResult) -> SearchResult {
+        match result {
+            SearchResult::LibraryFile(file) => self
+                .project_item_for(file)
+                .map_or_else(|| result.clone(), SearchResult::ProjectItem),
+            _ => result.clone(),
+        }
+    }
+
+    /// Effects and presets, project items, and Library files.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.items.len() + self.presets.len(), self.project_items.len(), self.library.len())
     }
 
     pub fn contains_bin_path(&self, bin_path: &str) -> bool {
@@ -499,7 +594,18 @@ impl CatalogStore {
             .iter()
             .filter(move |_| include_actions)
             .map(CatalogEntry::Action);
-        let entries = effects.chain(project_items).chain(actions);
+        let include_library = catalog.includes_library() && bin_scope.is_none();
+        // All shows a file the project already holds once, as its project clip.
+        let hide_imported = catalog == Catalog::All;
+        let project_paths = &self.project_paths;
+        let library = self
+            .library
+            .iter()
+            .filter(move |file| {
+                include_library && !(hide_imported && project_paths.contains_key(&file.entry.key))
+            })
+            .map(CatalogEntry::LibraryFile);
+        let entries = effects.chain(project_items).chain(actions).chain(library);
         let usage = |item: &CatalogEntry| match item {
             CatalogEntry::Effect(indexed) => self
                 .usage_counts
@@ -507,7 +613,7 @@ impl CatalogStore {
                 .and_then(|counts| counts.get(&indexed.entry.match_name))
                 .copied()
                 .unwrap_or(0),
-            CatalogEntry::ProjectItem(_) | CatalogEntry::Action(_) => 0,
+            CatalogEntry::ProjectItem(_) | CatalogEntry::Action(_) | CatalogEntry::LibraryFile(_) => 0,
         };
 
         if trimmed.is_empty() {
@@ -523,6 +629,7 @@ impl CatalogStore {
                 };
                 scope_order(a)
                     .cmp(&scope_order(b))
+                    .then_with(|| a.tie_group().cmp(&b.tie_group()))
                     .then_with(|| usage(b).cmp(&usage(a)))
                     .then_with(|| a.name_lower().cmp(b.name_lower()))
                     .then_with(|| a.folder().cmp(b.folder()))
@@ -542,6 +649,7 @@ impl CatalogStore {
 
         scored.sort_by(|a, b| {
             b.0.cmp(&a.0)
+                .then_with(|| a.1.tie_group().cmp(&b.1.tie_group()))
                 .then_with(|| a.1.name().len().cmp(&b.1.name().len()))
                 .then_with(|| a.1.name_lower().cmp(b.1.name_lower()))
                 .then_with(|| a.1.folder().cmp(b.1.folder()))
@@ -639,6 +747,7 @@ mod tests {
                 kind: ProjectItemKind::Media,
                 offline: false,
                 media_type: None,
+                media_path: None,
             },
             ProjectItemEntry {
                 item_id: "2".into(),
@@ -647,6 +756,7 @@ mod tests {
                 kind: ProjectItemKind::Sequence,
                 offline: false,
                 media_type: None,
+                media_path: None,
             },
         ]);
         let all = store.search("Gaussian Blur", "all");
@@ -725,7 +835,7 @@ mod tests {
         }
         assert_eq!(
             Catalog::ALL.map(Catalog::id),
-            ["all", "effects", "project", "actions"]
+            ["all", "effects", "project", "library", "actions"]
         );
         assert_eq!(parent_bin_path("Footage / B-Roll"), Some("Footage"));
         assert_eq!(parent_bin_path("Footage"), None);
@@ -740,6 +850,7 @@ mod tests {
             kind: ProjectItemKind::Bin,
             offline: false,
             media_type: None,
+            media_path: None,
         };
         let clip = |id: &str, name: &str, bin_path: &str| ProjectItemEntry {
             item_id: id.into(),
@@ -748,6 +859,7 @@ mod tests {
             kind: ProjectItemKind::Media,
             offline: false,
             media_type: None,
+            media_path: None,
         };
 
         let root_bin = bin("b1", "Footage", "Project root");
@@ -784,6 +896,7 @@ mod tests {
                 SearchResult::Effect(e) => e.name.as_str(),
                 SearchResult::Action(action) => action.name(),
                 SearchResult::Marker(marker) => marker.title(),
+                SearchResult::LibraryFile(file) => file.name.as_str(),
             })
             .collect();
         assert_eq!(names, ["B-Roll", "A-Cam.mov", "Street.mov"]);
@@ -823,6 +936,7 @@ mod tests {
             SearchResult::ProjectItem(item) => &item.name,
             SearchResult::Action(action) => action.name(),
             SearchResult::Marker(marker) => marker.title(),
+            SearchResult::LibraryFile(file) => &file.name,
         }
     }
 
@@ -836,6 +950,7 @@ mod tests {
             kind: ProjectItemKind::Media,
             offline: false,
             media_type: None,
+            media_path: None,
         };
         let mut items: Vec<_> = [
             ("A-Cam_Interview_01.mov", "Footage / Interviews"),
@@ -991,6 +1106,75 @@ mod tests {
         assert_eq!(first(&mut store, "color").as_deref(), Some("Lumetri Color"));
         assert_eq!(first(&mut store, "color key").as_deref(), Some("Color Key"));
         assert_eq!(first(&mut store, "color balance").as_deref(), Some("Color Balance (HLS)"));
+    }
+
+    fn library_file(path: &str, folder: &str) -> LibraryEntry {
+        let path = std::path::PathBuf::from(path);
+        let media_type = library::importable_media_type(&path).unwrap();
+        LibraryEntry {
+            name: path.file_name().unwrap().to_str().unwrap().to_owned(),
+            key: library::path_key(path.to_str().unwrap()),
+            path,
+            folder: folder.into(),
+            media_type,
+        }
+    }
+
+    #[test]
+    fn library_files_join_all_once_and_their_own_tab_always() {
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_library_files(vec![
+            library_file(r"D:\SFX\Boom.wav", "SFX"),
+            library_file(r"D:\SFX\Whooshes\Whoosh_01.wav", "SFX / Whooshes"),
+            library_file(r"D:\Memes\Bruh.mp4", "Memes"),
+        ]);
+        store.set_project_items(vec![ProjectItemEntry {
+            item_id: "boom".into(),
+            name: "Boom.wav".into(),
+            bin_path: PROJECT_ROOT_BIN.into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+            media_type: Some(MediaType::Audio),
+            // Premiere's spelling of the same file.
+            media_path: Some("d:/sfx/BOOM.wav".into()),
+        }]);
+
+        // All: the imported file shows once, as its project clip.
+        let all = store.search("boom", "all");
+        assert!(matches!(all.as_slice(), [SearchResult::ProjectItem(item)] if item.item_id == "boom"));
+        // Library: every tracked file, and the imported one stands for its clip.
+        let library = store.search("", "library");
+        assert_eq!(library.iter().map(result_name).collect::<Vec<_>>(), ["Boom.wav", "Bruh.mp4", "Whoosh_01.wav"]);
+        assert!(matches!(store.resolve(&library[0]), SearchResult::ProjectItem(item) if item.item_id == "boom"));
+        assert!(matches!(store.resolve(&library[1]), SearchResult::LibraryFile(_)));
+        // Folders and the catalog name are context.
+        assert_eq!(store.search("whooshes", "all").iter().map(result_name).collect::<Vec<_>>(), ["Whoosh_01.wav"]);
+        assert_eq!(store.search("library", "library").len(), 3);
+        assert!(store.search("", "effects").iter().all(|r| !matches!(r, SearchResult::LibraryFile(_))));
+        assert!(store.search("boom", "project").iter().all(|r| !matches!(r, SearchResult::LibraryFile(_))));
+        assert_eq!(store.counts().2, 3);
+        assert!(store.library_file(&library::path_key(r"d:\memes\bruh.MP4")).is_some());
+
+        // Without a path from Premiere, nothing can be matched, so both show.
+        store.set_project_items(vec![ProjectItemEntry {
+            item_id: "boom".into(),
+            name: "Boom.wav".into(),
+            bin_path: PROJECT_ROOT_BIN.into(),
+            kind: ProjectItemKind::Media,
+            offline: false,
+            media_type: Some(MediaType::Audio),
+            media_path: None,
+        }]);
+        assert_eq!(store.search("boom", "all").len(), 2);
+    }
+
+    #[test]
+    fn library_files_rank_after_equal_matches() {
+        let mut store = CatalogStore::new_with_defaults();
+        store.set_library_files(vec![library_file(r"D:\SFX\Crop.wav", "SFX")]);
+        let names: Vec<_> = store.search("crop", "all").iter().map(result_name).map(String::from).collect();
+        assert_eq!(names.first().map(String::as_str), Some("Crop"));
+        assert!(names.contains(&"Crop.wav".to_string()));
     }
 
     #[test]

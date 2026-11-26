@@ -11,6 +11,7 @@ mod cursor_lock;
 mod debug_log;
 mod error_toast;
 mod installer;
+mod library;
 mod premiere_prefs;
 mod presets;
 mod protocol;

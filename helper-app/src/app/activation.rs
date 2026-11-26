@@ -23,9 +23,10 @@ pub(super) fn apply_entry_with_options(
     if state.marker_naming.is_some() {
         return submit_marker_name(ui, state, bridge).map(|()| None);
     }
-    let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
+    let Some(chosen) = state.matched_items.get(abs_index) else {
         return Ok(None);
     };
+    let chosen = state.catalog.resolve(chosen);
     if block_unavailable(availability::primary(&chosen, &state.facts()), abs_index, ui, state) {
         return Ok(None);
     }
@@ -78,6 +79,23 @@ pub(super) fn apply_entry_with_options(
                 request: PendingRequest::new(catalog.peer_id, request_id),
                 recent: RecentItem {
                     item: SearchResult::ProjectItem(entry),
+                    project_id: catalog.project_id.clone(),
+                },
+            });
+            schedule_action_deadlines(state);
+        }
+        SearchResult::LibraryFile(file) => {
+            let Some(catalog) = &state.media_catalog else {
+                return Err(NO_PROJECT_FOR_LIBRARY.into());
+            };
+            let request_id = bridge
+                .import_and_place(catalog, &file.path)
+                .map_err(SharedString::from)?;
+            show_status(ui, format!("Importing {}…", file.name));
+            state.pending_placement = Some(PendingPlacement {
+                request: PendingRequest::new(catalog.peer_id, request_id),
+                recent: RecentItem {
+                    item: SearchResult::LibraryFile(file),
                     project_id: catalog.project_id.clone(),
                 },
             });
@@ -200,10 +218,31 @@ pub(super) fn shift_activate_at(
     if state.marker_naming.is_some() {
         return submit_marker_name(ui, state, bridge).map(|()| None);
     }
-    let Some(chosen) = state.matched_items.get(abs_index).cloned() else {
+    let Some(chosen) = state.matched_items.get(abs_index) else {
         return Ok(None);
     };
+    let chosen = state.catalog.resolve(chosen);
     match chosen {
+        SearchResult::LibraryFile(ref file) => {
+            if block_unavailable(availability::alternate(&chosen, &state.facts()), abs_index, ui, state) {
+                return Ok(None);
+            }
+            let Some(catalog) = &state.media_catalog else {
+                return Err(NO_PROJECT_FOR_LIBRARY.into());
+            };
+            let request_id = bridge
+                .import_and_open(catalog, &file.path)
+                .map_err(SharedString::from)?;
+            show_status(ui, format!("Importing {}…", file.name));
+            state.pending_open = Some(PendingOpen {
+                request: PendingRequest::new(catalog.peer_id, request_id),
+                target: OpenTarget::SourceMonitor,
+            });
+            schedule_action_deadlines(state);
+            hide_palette(ui, state);
+            restore_premiere_focus(state.previous_hwnd);
+            Ok(None)
+        }
         SearchResult::Action(_) | SearchResult::Marker(_) => {
             apply_entry_with_options(abs_index, ui, state, bridge, false)
         }
@@ -240,6 +279,8 @@ pub(super) fn shift_activate_at(
         }
     }
 }
+
+const NO_PROJECT_FOR_LIBRARY: &str = "Open a Premiere project to import Library files.";
 
 /// How long a disabled row's outline flashes after activating it.
 const FLASH_DURATION: Duration = Duration::from_millis(400);

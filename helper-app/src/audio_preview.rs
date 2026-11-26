@@ -4,6 +4,7 @@ use crate::{
     app::show_status,
     bridge::{AudioPreviewResult, BridgeClients, MediaCatalog},
     catalog::{ProjectItemEntry, ProjectItemKind},
+    protocol::AudioPreviewSource,
     SpotlightWindow,
 };
 use playback::{Command, Worker};
@@ -27,11 +28,23 @@ fn is_audio_file_name(name: &str) -> bool {
         })
 }
 
+/// What the highlighted row previews.
+pub enum PreviewItem<'a> {
+    /// A project clip, whose source file Premiere resolves.
+    Project(&'a ProjectItemEntry),
+    /// A Library file, played straight from disk.
+    File(&'a std::path::Path),
+}
+
+#[derive(PartialEq, Eq)]
+enum Target {
+    Project { peer_id: usize, project_id: String, item_id: String },
+    File(std::path::PathBuf),
+}
+
 #[derive(PartialEq, Eq)]
 struct Selection {
-    peer_id: usize,
-    project_id: String,
-    item_id: String,
+    target: Target,
     offline: bool,
     audio_name: bool,
 }
@@ -81,19 +94,30 @@ impl AudioPreview {
         &mut self,
         ui: &SpotlightWindow,
         catalog: Option<&MediaCatalog>,
-        item: Option<&ProjectItemEntry>,
+        item: Option<PreviewItem<'_>>,
         auto_preview: bool,
     ) {
-        let selection = catalog.zip(item).and_then(|(catalog, item)| {
-            (item.kind == ProjectItemKind::Media).then_some(())?;
-            Some(Selection {
-                peer_id: catalog.peer_id,
-                project_id: catalog.project_id.clone()?,
-                item_id: item.item_id.clone(),
-                offline: item.offline,
-                audio_name: is_audio_file_name(&item.name),
-            })
-        });
+        let selection = match item {
+            Some(PreviewItem::Project(item)) => catalog.and_then(|catalog| {
+                (item.kind == ProjectItemKind::Media).then_some(())?;
+                Some(Selection {
+                    target: Target::Project {
+                        peer_id: catalog.peer_id,
+                        project_id: catalog.project_id.clone()?,
+                        item_id: item.item_id.clone(),
+                    },
+                    offline: item.offline,
+                    audio_name: is_audio_file_name(&item.name),
+                })
+            }),
+            // Only audio files preview; nothing needs Premiere to tell.
+            Some(PreviewItem::File(path)) => path.to_str().filter(|name| is_audio_file_name(name)).map(|_| Selection {
+                target: Target::File(path.to_path_buf()),
+                offline: false,
+                audio_name: true,
+            }),
+            None => None,
+        };
         if self.selection == selection {
             return;
         }
@@ -175,13 +199,19 @@ impl AudioPreview {
         catalog: Option<&MediaCatalog>,
         intent: ResolveIntent,
     ) {
+        if let Some(Target::File(path)) = self.selection.as_ref().map(|selection| &selection.target) {
+            let source = AudioPreviewSource { path: path.clone(), in_seconds: None, out_seconds: None };
+            self.load(ui, source);
+            return;
+        }
         let request = self
             .selection
             .as_ref()
             .zip(catalog)
             .ok_or("Select an audio clip to preview.")
-            .and_then(|(selection, catalog)| {
-                bridge.request_audio_preview(catalog, &selection.item_id)
+            .and_then(|(selection, catalog)| match &selection.target {
+                Target::Project { item_id, .. } => bridge.request_audio_preview(catalog, item_id),
+                Target::File(_) => Err("Select an audio clip to preview."),
             });
         match request {
             Ok(request_id) => {
@@ -217,10 +247,10 @@ impl AudioPreview {
         else {
             return;
         };
-        let Some(selection) = &self.selection else {
+        let Some(Target::Project { peer_id, .. }) = self.selection.as_ref().map(|selection| &selection.target) else {
             return;
         };
-        if request_id != result.request_id || selection.peer_id != result.peer_id {
+        if request_id != result.request_id || *peer_id != result.peer_id {
             return;
         }
         let Some(source) = result.source else {
@@ -239,6 +269,11 @@ impl AudioPreview {
             self.timer.stop();
             return;
         }
+        self.load(ui, source);
+    }
+
+    /// Starts playing `source` in the worker.
+    fn load(&mut self, ui: &SpotlightWindow, source: AudioPreviewSource) {
         ui.set_preview_message("Loading audio…".into());
         ui.set_preview_can_toggle(false);
         self.state = State::Loading;
