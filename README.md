@@ -45,6 +45,7 @@ This builds `helper-app` in release mode and outputs `dist\PremiereSpotlightSetu
 - `helper-app/src/protocol.rs`: the JSON messages exchanged with the plugin.
 - `helper-app/src/premiere_prefs.rs`: reads Premiere's preferences and keyboard shortcut profiles.
 - `helper-app/src/library.rs`: indexes the Library folders on a background thread and watches them with `ReadDirectoryChangesW`.
+- `helper-app/src/media_preview.rs`: reads thumbnails, frame sizes and durations for the preview pane from the Windows shell on a background thread.
 - `helper-app/src/win_focus/`: Windows integration (processes, foreground, synthetic input, window style and placement).
 - `helper-app/ui/`: Slint windows. `spotlight.slint` is the file `build.rs` compiles.
 - `uxp-plugin/index.js`: the bridge connection and caches. `lib/` and `actions/` hold the Premiere commands; they receive Premiere's API as a parameter and keep no state.
@@ -79,6 +80,7 @@ CI runs both suites and Clippy on Windows for every push to `main` and every pul
   - **`Enter` (or Click):** Import the file into a **Spotlight Library** bin and place it at the playhead, the same way as project media. A file the project already holds is placed from its existing clip and isn't imported again. On Premiere versions before 25.6, which don't report a clip's file, Spotlight can't recognize imported files, so they show twice and may be imported again.
   - **Alternate key + `Enter`:** Import the file and open it in the Source Monitor (Premiere Pro 25.6 or later).
   - **Audio preview:** Highlighted audio files play straight from disk with **`Ctrl+P`** or **Auto-preview audio**, without Premiere.
+- **Preview pane:** When a video, image or audio file is highlighted, in **Project**, **Library**, **All** or **Recent**, a pane on the right shows its thumbnail, its kind, frame size and duration, and its file path. Thumbnails are the ones File Explorer shows, so formats Windows has no codec for (such as ProRes, PSD or EXR without extensions) show their kind's icon instead. Project items need Premiere Pro 25.6 or later, which reports a clip's file. Turn the pane off under **Settings → General**.
 - **`Backspace` (when search is empty inside a bin, or Click the bin pill):** Step back up one folder level (or exit bin view).
 - **`Shift + Enter` (or `Shift` + Click; configurable to `Ctrl` or `Alt`):** Apply an effect and automatically open/focus Premiere Pro's Effect Controls panel, open a sequence in its own Timeline tab (or bring its tab forward if it is already open), or open other project items in the Source Monitor.
 - **`Esc`:** Close popup and return focus to Premiere (or exit Settings back to Search if Settings is open)
@@ -96,6 +98,7 @@ When Spotlight opens, it reads the active sequence and Timeline selection from P
   - Choose the **Alternate action key** (`Shift`, `Ctrl`, or `Alt`, default `Shift`) used with `Enter` / Click.
   - Customize the **Open settings** shortcut (default `Ctrl+,`) and optional **Catalog shortcuts** for **All**, **Effects**, **Project**, **Library**, and **Actions** (all empty by default).
   - Customize the **Preview audio** shortcut (default `Ctrl+P`) and enable **Auto-preview audio** to play a clip after its highlight settles. Auto-preview is off by default.
+  - Turn **Show preview pane for media** off to keep the result list full width. It is on by default.
 - Settings persist in `%APPDATA%\PremiereSpotlight\config.json` and take effect immediately without restarting.
 - Under **Appearance**, choose **Light**, **Dark**, **Midnight Indigo** (the default), or **Premiere**.
 - Under **Library**, click **Add folders…** to pick one or more folders in File Explorer, or **×** to stop tracking one. Each folder shows how many files Spotlight found, or **Folder not found**. Spotlight indexes up to 20,000 files per folder and skips hidden files, hidden folders and folders whose names start with a dot. Folders are saved under `library_folders` in the config file.
