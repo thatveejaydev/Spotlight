@@ -111,7 +111,9 @@ module.exports = function createPlacement(ppro, { findProjectEntry }) {
   }
 
   // `isCurrent()` turns false once the bridge or Premiere context changes, so a stale request never edits.
-  async function placeProjectItem(payload, isCurrent) {
+  // `knownSource` is the project entry for `payload.itemId` when the caller already has
+  // it, such as a clip just imported, so the project isn't walked again to find it.
+  async function placeProjectItem(payload, isCurrent, knownSource = null) {
     const project = await ppro.Project.getActiveProject();
     if (!project || guid(project) !== payload.projectId) {
       throw new Error("Active project changed. Search again.");
@@ -123,7 +125,9 @@ module.exports = function createPlacement(ppro, { findProjectEntry }) {
     const editor = ppro.SequenceEditor?.getEditor(sequence);
     if (!editor) throw new Error("Premiere could not open the timeline editor.");
 
-    const source = await findProjectEntry(project, payload.projectId, payload.itemId);
+    const source = knownSource?.itemId === payload.itemId
+      ? knownSource
+      : await findProjectEntry(project, payload.projectId, payload.itemId);
     if (!source) throw new Error("Project item was removed. Search again.");
     if (source.bin) throw new Error("Bins can't be placed on the timeline. Bins are search only.");
     if (!source.clip) throw new Error("This project item can't be placed on the timeline.");

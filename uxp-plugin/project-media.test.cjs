@@ -700,6 +700,49 @@ test("a Library file already in the project is placed without importing it", asy
   assert.deepEqual(f.commits.map((commit) => commit.label), ["Place Take.mov"]);
 });
 
+// Counts how often the Footage bin is opened, which only a walk of the project does.
+function countWalks(f) {
+  const cast = f.ppro.FolderItem.cast;
+  const counter = { walks: 0 };
+  f.ppro.FolderItem.cast = (item) => {
+    if (item === f.bin) counter.walks++;
+    return cast(item);
+  };
+  return counter;
+}
+
+test("after a project scan, Library files are imported and placed without walking the project", async () => {
+  const f = libraryFixture();
+  await f.scan(1);
+  const counter = countWalks(f);
+  assert.match(await f.importAndPlace(f.payload("D:\\SFX\\Boom.wav"), f.connection), /^Imported and placed "Boom.wav"/);
+  assert.equal(counter.walks, 0);
+  assert.equal(f.imports.length, 1);
+});
+
+test("the last scan finds a Library file's clip, and a stale answer falls back to a walk", async () => {
+  const f = libraryFixture();
+  let takePath = "D:\\Footage\\Take.mov";
+  f.clip.getMediaFilePath = () => takePath;
+  await f.scan(1);
+  const counter = countWalks(f);
+  f.project.importFiles = () => assert.fail("the existing clip should be reused");
+  assert.match(await f.importAndPlace(f.payload("d:/footage/take.mov"), f.connection), /^Placed "Take.mov"/);
+  assert.equal(counter.walks, 0);
+
+  // The clip was relinked since the scan: Premiere is asked again, and the file imported.
+  takePath = "D:\\Footage\\Take_v2.mov";
+  const imports = [];
+  f.project.importFiles = async (paths, suppressUI, bin) => {
+    imports.push(paths[0]);
+    bin.children.push({ name: "Take.mov", getId: () => "new-take", clip: { ...f.clip, getMediaFilePath: () => paths[0] } });
+    return true;
+  };
+  assert.match(await f.importAndPlace(f.payload("D:\\Footage\\Take.mov"), f.connection), /^Imported and placed/);
+  assert.equal(counter.walks, 1);
+  assert.deepEqual(imports, ["D:\\Footage\\Take.mov"]);
+});
+
 test("a Library import that adds nothing, or for another project, fails before editing", async () => {
   const f = libraryFixture();
   await assert.rejects(f.importAndPlace(f.payload("D:\\SFX\\Ghost.wav"), f.connection),

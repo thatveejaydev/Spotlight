@@ -425,6 +425,9 @@ pub struct CatalogStore {
     /// Project media by the [`library::path_key`] of its file.
     project_paths: HashMap<String, Arc<ProjectItemEntry>>,
     library: Vec<IndexedLibraryFile>,
+    /// Each Library file's position in `library`, by its [`library::path_key`].
+    /// Rebuilt with `library`, so the two always agree.
+    library_by_key: HashMap<String, usize>,
     /// How often each effect was applied this session, by type and match name.
     usage_counts: HashMap<EffectType, HashMap<String, u32>>,
     actions: Vec<IndexedAction>,
@@ -443,6 +446,7 @@ impl CatalogStore {
             project_items: Vec::new(),
             project_paths: HashMap::new(),
             library: Vec::new(),
+            library_by_key: HashMap::new(),
             usage_counts: HashMap::new(),
             actions: Action::ALL.into_iter().map(IndexedAction::new).collect(),
             matcher: Matcher::new(Config::DEFAULT),
@@ -501,6 +505,12 @@ impl CatalogStore {
 
     pub fn set_library_files(&mut self, entries: Vec<LibraryEntry>) {
         self.library = entries.into_iter().map(IndexedLibraryFile::new).collect();
+        self.library_by_key = self
+            .library
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.entry.key.clone(), index))
+            .collect();
     }
 
     /// The project clip already made from `file`, if the project holds it.
@@ -510,10 +520,8 @@ impl CatalogStore {
 
     /// The indexed Library file with this [`library::path_key`].
     pub fn library_file(&self, key: &str) -> Option<Arc<LibraryEntry>> {
-        self.library
-            .iter()
-            .find(|file| file.entry.key == key)
-            .map(|file| Arc::clone(&file.entry))
+        let index = *self.library_by_key.get(key)?;
+        self.library.get(index).map(|file| Arc::clone(&file.entry))
     }
 
     /// What `result` stands for: a Library file the project already holds is that
@@ -1175,6 +1183,23 @@ mod tests {
         let names: Vec<_> = store.search("crop", "all").iter().map(result_name).map(String::from).collect();
         assert_eq!(names.first().map(String::as_str), Some("Crop"));
         assert!(names.contains(&"Crop.wav".to_string()));
+    }
+
+    #[test]
+    fn library_lookup_follows_each_index_update() {
+        let mut store = CatalogStore::new_with_defaults();
+        let key = |path: &str| library::path_key(path);
+        store.set_library_files(vec![library_file(r"D:\SFX\Boom.wav", "SFX"), library_file(r"D:\SFX\Clap.wav", "SFX")]);
+        assert_eq!(store.library_file(&key("d:/sfx/CLAP.wav")).map(|f| f.name.clone()).as_deref(), Some("Clap.wav"));
+
+        // Boom.wav was deleted and Swish.wav added: the lookup follows the new list.
+        store.set_library_files(vec![library_file(r"D:\SFX\Clap.wav", "SFX"), library_file(r"D:\SFX\Swish.wav", "SFX")]);
+        assert!(store.library_file(&key(r"D:\SFX\Boom.wav")).is_none());
+        assert_eq!(store.library_file(&key(r"D:\SFX\Clap.wav")).map(|f| f.name.clone()).as_deref(), Some("Clap.wav"));
+        assert_eq!(store.library_file(&key(r"D:\SFX\Swish.wav")).map(|f| f.name.clone()).as_deref(), Some("Swish.wav"));
+
+        store.set_library_files(Vec::new());
+        assert!(store.library_file(&key(r"D:\SFX\Clap.wav")).is_none());
     }
 
     #[test]

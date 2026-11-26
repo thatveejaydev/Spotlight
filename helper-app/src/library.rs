@@ -320,8 +320,7 @@ mod watch {
         Storage::FileSystem::{
             CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
             FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
-            FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
         System::{
             Threading::{CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, INFINITE},
@@ -329,10 +328,10 @@ mod watch {
         },
     };
 
-    const FILTER: u32 = FILE_NOTIFY_CHANGE_FILE_NAME
-        | FILE_NOTIFY_CHANGE_DIR_NAME
-        | FILE_NOTIFY_CHANGE_SIZE
-        | FILE_NOTIFY_CHANGE_LAST_WRITE;
+    /// Only files and folders appearing, disappearing or being renamed change the index.
+    /// Writes are left out, so a file being copied or rendered into a folder wakes the
+    /// indexer once when it appears, not on every write.
+    const FILTER: u32 = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME;
 
     /// An open folder and the read waiting on it. The read writes into `buffer` and
     /// `overlapped`, so both live on the heap and move to the watch thread unchanged.

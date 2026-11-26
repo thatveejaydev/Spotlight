@@ -27,7 +27,14 @@ function fileName(path) {
 const defaultDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // `collectProjectEntries(project)` walks every bin, as lib/project-items.js does.
-module.exports = function createLibraryImport(ppro, { collectProjectEntries, delay = defaultDelay }) {
+// `cachedClipFor(project, key)` answers from the last project scan: the entry for the
+// clip made from file `key`, null when the scan found none, or undefined when there is
+// no scan of this project to ask.
+module.exports = function createLibraryImport(ppro, {
+  collectProjectEntries,
+  cachedClipFor = () => undefined,
+  delay = defaultDelay
+}) {
   async function mediaPath(clip) {
     try {
       return (await clip?.getMediaFilePath?.()) || null;
@@ -47,6 +54,18 @@ module.exports = function createLibraryImport(ppro, { collectProjectEntries, del
   async function findInProject(project, key) {
     const collected = await collectProjectEntries(project);
     return collected ? firstClipFor(collected.entries, key) : null;
+  }
+
+  // The clip already made from file `key`. The last project scan answers without walking
+  // the bins; a clip it names is checked against Premiere first, since it may have been
+  // removed or relinked since.
+  async function findExisting(project, key) {
+    const cached = cachedClipFor(project, key);
+    if (cached === null) return null;
+    if (cached && cached.item?.getId?.() === cached.itemId && pathKey(await mediaPath(cached.clip)) === key) {
+      return cached;
+    }
+    return findInProject(project, key);
   }
 
   // The clips directly inside `bin`, in the shape collectProjectEntries returns.
@@ -106,7 +125,7 @@ module.exports = function createLibraryImport(ppro, { collectProjectEntries, del
     const key = pathKey(path);
     if (!key) throw new Error("This Library file has no path.");
     const name = fileName(path);
-    const existing = await findInProject(project, key);
+    const existing = await findExisting(project, key);
     if (existing) return { entry: existing, imported: false };
     if (typeof project.importFiles !== "function") {
       throw new Error("Importing Library files requires Premiere Pro 25.0 or later.");

@@ -166,7 +166,21 @@ pub fn record_search_timing(
         "SEARCH",
         format!("\"{display_query}\" [{catalog}] -> {matches} matches in {ms:.2} ms"),
     );
+    if ms > SLOW_SEARCH_MS {
+        log_event(
+            LogKind::Error,
+            "SLOW SEARCH",
+            format!(
+                "\"{display_query}\" [{catalog}] took {ms:.2} ms over {total_catalog_items} items \
+                 (warns above {SLOW_SEARCH_MS} ms; typing lags near 16 ms)"
+            ),
+        );
+    }
 }
+
+/// Searches slower than this get a warning in the debug log: half a frame, well before
+/// typing feels slow.
+const SLOW_SEARCH_MS: f64 = 8.0;
 
 pub fn record_bridge_rtt(label: &str, duration: Duration) {
     let ms = duration.as_secs_f64() * 1000.0;

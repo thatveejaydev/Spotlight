@@ -9,7 +9,8 @@ const { isAudioFileName } = require("./media.js");
 module.exports = function createSourceMedia(ppro, { findProjectEntry }) {
   const { TICKS_PER_SECOND, readTicks } = require("./timeline.js")(ppro);
 
-  async function openInSourceMonitor(payload) {
+  // `knownSource` is the project entry for `payload.itemId` when the caller already has it.
+  async function openInSourceMonitor(payload, knownSource = null) {
     const monitor = ppro.SourceMonitor ?? ppro.sourceMonitor;
     if (typeof monitor?.openProjectItem !== "function") {
       throw new Error("Opening in the Source Monitor requires Premiere Pro 25.6 or later.");
@@ -18,7 +19,9 @@ module.exports = function createSourceMedia(ppro, { findProjectEntry }) {
     if (!project || guid(project) !== payload.projectId) {
       throw new Error("Active project changed. Search again.");
     }
-    const source = await findProjectEntry(project, payload.projectId, payload.itemId);
+    const source = knownSource?.itemId === payload.itemId
+      ? knownSource
+      : await findProjectEntry(project, payload.projectId, payload.itemId);
     if (!source) throw new Error("Project item was removed. Search again.");
     if (source.bin) throw new Error("Bins can't open in the Source Monitor.");
     if (!source.clip) throw new Error("This project item can't open in the Source Monitor.");

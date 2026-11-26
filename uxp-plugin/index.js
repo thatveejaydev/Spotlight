@@ -11,6 +11,7 @@ const { sourceKey } = require("./actions/adjustment-layer.js");
 const { entrypoints, shell, host } = require("uxp");
 const { nowMs, mapWithConcurrency, guid } = require("./lib/util.js");
 const { mediaTypeOfFileName } = require("./lib/media.js");
+const { pathKey } = require("./lib/library-import.js");
 const {
   isVideoClip,
   readTicks,
@@ -27,7 +28,10 @@ const {
 const effects = require("./lib/effects.js")(ppro);
 const placement = require("./lib/placement.js")(ppro, { findProjectEntry });
 const sourceMedia = require("./lib/source-media.js")(ppro, { findProjectEntry });
-const libraryImport = require("./lib/library-import.js")(ppro, { collectProjectEntries });
+const libraryImport = require("./lib/library-import.js")(ppro, {
+  collectProjectEntries,
+  cachedClipFor: cachedClipForPath
+});
 const premiereContext = require("./lib/context.js")(ppro, {
   storage: globalThis.localStorage,
   sourceKey,
@@ -43,7 +47,9 @@ let started = false;
 let cachedCatalog = [];
 let catalogScanPromise = null;
 let cachedCatalogStatsText = "";
-let cachedProjectEntries = { projectId: null, byId: new Map() };
+// The last full project scan: entries by item ID, and media clips by the pathKey of
+// their file (null until a scan finishes).
+let cachedProjectEntries = emptyProjectCache();
 let failedConnects = 0;
 let launchAttempted = false;
 let mediaRequestId = 0;
@@ -54,6 +60,20 @@ let lastProjectScan = null;
 let projectEventBindings = [];
 let placementInProgress = false;
 
+
+function emptyProjectCache() {
+  return { projectId: null, byId: new Map(), byPath: null };
+}
+
+// The clip made from the file `key` according to the last full scan of `project`: its
+// entry, null when the scan found none, or undefined when there is no such scan.
+function cachedClipForPath(project, key) {
+  const projectId = guid(project);
+  if (!cachedProjectEntries.byPath || !projectId || cachedProjectEntries.projectId !== projectId) {
+    return undefined;
+  }
+  return cachedProjectEntries.byPath.get(key) ?? null;
+}
 
 function setBadge(online, text) {
   const el = document.getElementById("connBadge");
@@ -141,7 +161,7 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
   const stale = () => generation !== mediaScanGeneration || ws !== connection;
   if (clear) {
     lastProjectScan = null;
-    cachedProjectEntries = { projectId: null, byId: new Map() };
+    cachedProjectEntries = emptyProjectCache();
     sendProjectItems(connection, requestId, null, null, [], "scanning");
   }
   try {
@@ -161,6 +181,7 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
 
     let items = [];
     let nextById = new Map();
+    const nextByPath = new Map();
     if (projectId) {
       const [activeProjectItem, collected] = await Promise.all([
         Promise.resolve(sequence?.getProjectItem?.()),
@@ -172,7 +193,8 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
       items = await mapWithConcurrency(
         collected.entries,
         ITEM_SCAN_CONCURRENCY,
-        async ({ item, clip, itemId, path, bin }) => {
+        async (entry) => {
+          const { item, clip, itemId, path, bin } = entry;
           let kind = bin ? "bin" : "other";
           let offline = false;
           let mediaType = null;
@@ -185,6 +207,7 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
               if (kind === "media" && !stale()) {
                 offline = Boolean(await clip.isOffline?.());
                 ({ mediaType, mediaPath } = await readMediaInfo(item, clip));
+                entry.mediaPath = mediaPath;
               }
             } catch (_) {
               // Keep items visible even when Premiere cannot classify their source.
@@ -194,13 +217,18 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
         }
       );
       if (stale()) return;
+      // A file imported twice maps to its first clip, as the helper does.
+      for (const entry of collected.entries) {
+        const key = entry.mediaPath ? pathKey(entry.mediaPath) : "";
+        if (key && !nextByPath.has(key)) nextByPath.set(key, entry);
+      }
     }
 
     const currentProject = await ppro.Project.getActiveProject();
     const currentSequence = await currentProject?.getActiveSequence();
     if (generation === mediaScanGeneration) {
       if (guid(currentProject) === projectId && guid(currentSequence) === sequenceId) {
-        cachedProjectEntries = { projectId, byId: nextById };
+        cachedProjectEntries = { projectId, byId: nextById, byPath: nextByPath };
         lastProjectScan = { revision, projectId, sequenceId, items };
         const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
         sendProjectItems(connection, requestId, projectId, sequenceId, items, "rescanned", elapsedMs);
@@ -209,14 +237,14 @@ async function syncProjectItems(connection, requestId, clear = false, reuse = fa
         }
       } else {
         lastProjectScan = null;
-        cachedProjectEntries = { projectId: null, byId: new Map() };
+        cachedProjectEntries = emptyProjectCache();
         sendProjectItems(connection, requestId, null, null, []);
       }
     }
   } catch (error) {
     if (generation === mediaScanGeneration) {
       lastProjectScan = null;
-      cachedProjectEntries = { projectId: null, byId: new Map() };
+      cachedProjectEntries = emptyProjectCache();
       sendProjectItems(connection, requestId, null, null, []);
       console.warn("[Spotlight] Project media scan failed:", error);
     }
@@ -258,10 +286,11 @@ function bindProjectEvents() {
   }
 }
 
-async function placeProjectItem(payload, connection) {
+async function placeProjectItem(payload, connection, knownSource = null) {
   const revision = projectContextRevision;
   return placement.placeProjectItem(payload, () =>
-    revision === projectContextRevision && ws === connection && connection.readyState === WebSocket.OPEN);
+    revision === projectContextRevision && ws === connection && connection.readyState === WebSocket.OPEN,
+  knownSource);
 }
 
 // Waits until project events stop arriving, so the events of an import don't make the
@@ -293,7 +322,7 @@ async function importLibraryFile(payload, connection) {
 
 async function importAndPlace(payload, connection) {
   const { entry, imported } = await importLibraryFile(payload, connection);
-  const message = await placeProjectItem({ ...payload, itemId: entry.itemId }, connection);
+  const message = await placeProjectItem({ ...payload, itemId: entry.itemId }, connection, entry);
   return imported ? message.replace(/^Placed/, "Imported and placed") : message;
 }
 
@@ -303,12 +332,12 @@ async function importAndOpen(payload, connection) {
     throw new Error("Opening in the Source Monitor requires Premiere Pro 25.6 or later.");
   }
   const { entry, imported } = await importLibraryFile(payload, connection);
-  const message = await openInSourceMonitor({ projectId: payload.projectId, itemId: entry.itemId });
+  const message = await openInSourceMonitor({ projectId: payload.projectId, itemId: entry.itemId }, entry);
   return imported ? message.replace(/^Opened/, "Imported and opened") : message;
 }
 
-async function openInSourceMonitor(payload) {
-  return sourceMedia.openInSourceMonitor(payload);
+async function openInSourceMonitor(payload, knownSource = null) {
+  return sourceMedia.openInSourceMonitor(payload, knownSource);
 }
 
 async function resolveAudioPreview(payload) {
@@ -591,7 +620,7 @@ function stopPlugin() {
   ++projectContextRevision;
   catalogScanPromise = null;
   lastProjectScan = null;
-  cachedProjectEntries = { projectId: null, byId: new Map() };
+  cachedProjectEntries = emptyProjectCache();
   for (const [event, listener] of projectEventBindings) {
     try {
       ppro.EventManager.removeGlobalEventListener?.(event, listener, true);
