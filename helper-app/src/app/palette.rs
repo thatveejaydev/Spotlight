@@ -70,7 +70,7 @@ pub(super) fn show_palette(ui: &SpotlightWindow, state: &mut AppState) {
     if !ui.get_settings_open() {
         ui.invoke_focus_search();
     }
-    sync_audio_selection(ui, state);
+    sync_selection_preview(ui, state);
 }
 
 pub(super) fn update_palette_caption(ui: &SpotlightWindow, hwnd: isize) {

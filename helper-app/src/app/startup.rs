@@ -60,6 +60,7 @@ pub(crate) fn run() -> Result<(), slint::PlatformError> {
     wire_preset_library(&ctx);
     wire_library(&ui, &ctx, &initial_settings);
     wire_audio_preview_poll(&ctx);
+    wire_media_pane(&ctx);
     wire_bridge(&ctx);
     wire_palette(&ui, &ctx, &debug_log_ctrl);
 
@@ -275,6 +276,13 @@ fn wire_audio_preview_poll(ctx: &AppCtx) {
             let st = &mut *state.borrow_mut();
             st.audio_preview.poll(&ui, &bridge, st.media_catalog.as_ref());
         }
+    });
+}
+
+fn wire_media_pane(ctx: &AppCtx) {
+    let c = ctx.clone();
+    MEDIA_FACTS_DISPATCH.with(|slot| {
+        slot.set(move |facts: MediaFacts| c.with_state(|ui, st| receive_media_facts(ui, st, facts)));
     });
 }
 
@@ -495,7 +503,7 @@ fn activate_result(ctx: &AppCtx, rel_idx: Option<i32>, activate: Activate) {
                 let abs_idx = st.scroll_offset + (rel_idx.max(0) as usize);
                 st.selected_abs_index = abs_idx;
                 sync_viewport_slice(ui, st);
-                sync_audio_selection(ui, st);
+                sync_selection_preview(ui, st);
                 abs_idx
             }
             None => st.selected_abs_index,
@@ -545,7 +553,7 @@ fn wire_palette(ui: &SpotlightWindow, ctx: &AppCtx, debug_log_ctrl: &Rc<DebugLog
             let cur = st.selected_abs_index as isize;
             st.selected_abs_index = (cur + delta as isize).rem_euclid(total as isize) as usize;
             sync_viewport_slice(ui, st);
-            sync_audio_selection(ui, st);
+            sync_selection_preview(ui, st);
         });
     });
 
@@ -828,6 +836,7 @@ fn sync_settings_ui(ui: &SpotlightWindow, settings: &AppSettings) {
     }).to_vec())));
     action_hotkeys::update_bindings(settings);
     ui.set_auto_preview_audio(settings.auto_preview_audio);
+    ui.set_show_preview_pane(settings.show_preview_pane);
     ui.set_config_path_display(settings::config_path().to_string_lossy().into_owned().into());
     if !ui.get_bridge_connected() {
         show_status(ui, format!("Ready · {}", settings.hotkey));
@@ -928,6 +937,17 @@ fn toggle_auto_preview_audio(ui: &SpotlightWindow, state: &mut AppState) {
     let _ = save_and_sync_settings(ui, &state.settings, message.into());
 }
 
+fn toggle_preview_pane(ui: &SpotlightWindow, state: &mut AppState) {
+    state.settings.show_preview_pane = !state.settings.show_preview_pane;
+    let message = if state.settings.show_preview_pane {
+        "Preview pane shown for media."
+    } else {
+        "Preview pane hidden."
+    };
+    let _ = save_and_sync_settings(ui, &state.settings, message.into());
+    sync_media_pane(ui, state);
+}
+
 fn set_alternate_modifier(ui: &SpotlightWindow, state: &mut AppState, next: AlternateModifier) {
     if state.settings.alternate_modifier == next {
         return;
@@ -996,7 +1016,7 @@ fn toggle_settings_view(ui: &SpotlightWindow, state: &mut AppState, rec_flag: &A
     if next && clear_marker_picker(ui, state).is_some() {
         refresh_marker_results(ui, state);
     }
-    sync_audio_selection(ui, state);
+    sync_selection_preview(ui, state);
     if !next {
         ui.invoke_focus_search();
     }
@@ -1214,6 +1234,9 @@ fn wire_settings(ui: &SpotlightWindow, ctx: &AppCtx, hotkey_ctrl: &Rc<RefCell<Ho
 
     let c = ctx.clone();
     ui.on_toggle_auto_preview_audio(move || c.with_state(toggle_auto_preview_audio));
+
+    let c = ctx.clone();
+    ui.on_toggle_preview_pane(move || c.with_state(toggle_preview_pane));
 
     let c = ctx.clone();
     ui.on_toggle_default_effect_controls(move || {

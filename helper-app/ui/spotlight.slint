@@ -23,6 +23,23 @@ export struct EffectItemUI {
     needs-import: bool,
 }
 
+// The preview pane beside the results, for the highlighted media file.
+export struct MediaPaneUI {
+    visible: bool,
+    name: string,
+    // The kind and what Windows knows of it: "Video · 1920 × 1080 · 0:04".
+    facts: string,
+    path: string,
+    // A warning under the facts: "Not in the project yet" or "Media offline".
+    note: string,
+    // Drawn large in place of a thumbnail Windows can't make.
+    icon: string,
+    tint: color,
+    ink: color,
+    thumbnail: image,
+    has-thumbnail: bool,
+}
+
 // A tracked Library folder in Settings, and what the indexer found in it.
 export struct LibraryFolderUI {
     path: string,
@@ -46,6 +63,8 @@ export component SpotlightWindow inherits Window {
 
     in-out property <string> theme-name <=> Theme.theme-name;
     out property <color> caption-color: Theme.header-background;
+    // The width the preview pane takes from the results while a media row is highlighted.
+    private property <length> pane-width: 212px;
     private property <[string]> theme-options: ["Light", "Dark", "Midnight Indigo", "Premiere"];
     private property <int> saved-theme-index: Theme.light ? 0 : (Theme.indigo ? 2 : (root.theme-name == "Dark" ? 1 : 3));
     private property <int> theme-selection: root.saved-theme-index;
@@ -115,6 +134,8 @@ export component SpotlightWindow inherits Window {
     in property <int> library-folder-count: 0;
     in property <string> action-hotkeys-warning;
     in property <bool> auto-preview-audio: false;
+    in property <bool> show-preview-pane: true;
+    in property <MediaPaneUI> media-pane;
     in property <bool> preview-active: false;
     in property <string> preview-message: "";
     in property <string> preview-time: "";
@@ -148,6 +169,7 @@ export component SpotlightWindow inherits Window {
     callback set-alternate-modifier(string);
     callback try-palette-shortcut(string, bool, bool, bool, bool, bool) -> bool;
     callback toggle-auto-preview-audio();
+    callback toggle-preview-pane();
     callback toggle-preview-playback();
     callback seek-audio-preview(float);
     callback open-config-file();
@@ -1358,6 +1380,25 @@ export component SpotlightWindow inherits Window {
                                                 }
                                             }
                                         }
+
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Show preview pane for media";
+                                                font-size: 12px;
+                                                color: Theme.primary-text;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                            SettingsToggle {
+                                                checked: root.show-preview-pane;
+                                                label: "Show preview pane for media";
+                                                toggled => {
+                                                    root.set-recording(false);
+                                                    root.toggle-preview-pane();
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1487,7 +1528,8 @@ export component SpotlightWindow inherits Window {
 
                 VerticalLayout {
                     visible: !root.settings-open;
-                    width: 100%;
+                    x: 0px;
+                    width: root.media-pane.visible ? parent.width - root.pane-width : parent.width;
                     height: 100%;
                     padding-left: 6px;
                     padding-right: 6px;
@@ -1623,7 +1665,9 @@ export component SpotlightWindow inherits Window {
                                 }
                             }
 
-                            if item.detail != "" : Text {
+                            // The preview pane says where the highlighted file lives, so the
+                            // narrower list gives this room to the names.
+                            if item.detail != "" && !root.media-pane.visible : Text {
                                 min-width: 0px;
                                 max-width: 210px;
                                 text: item.detail;
@@ -1715,6 +1759,112 @@ export component SpotlightWindow inherits Window {
                             }
                             Tooltip {
                                 text: @markdown("\{root.preview-time}");
+                            }
+                        }
+                    }
+                }
+
+                // The highlighted media file: its thumbnail, or its kind's icon when Windows
+                // has none, and what Windows knows about it.
+                if !root.settings-open && root.media-pane.visible : Rectangle {
+                    x: parent.width - self.width;
+                    y: 0px;
+                    width: root.pane-width;
+                    height: parent.height;
+                    background: Theme.strip-background;
+                    clip: true;
+
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: 1px;
+                        height: parent.height;
+                        background: Theme.section-divider;
+                    }
+
+                    VerticalLayout {
+                        x: 1px;
+                        y: 0px;
+                        width: parent.width - 1px;
+                        height: parent.height;
+                        padding: 12px;
+                        spacing: 8px;
+                        alignment: start;
+
+                        Rectangle {
+                            height: 106px;
+                            border-radius: 6px;
+                            background: Theme.thumbnail-background;
+                            clip: true;
+
+                            if root.media-pane.has-thumbnail : Image {
+                                width: parent.width;
+                                height: parent.height;
+                                source: root.media-pane.thumbnail;
+                                image-fit: contain;
+                                accessible-role: image;
+                                accessible-label: "Thumbnail of " + root.media-pane.name;
+                            }
+                            if !root.media-pane.has-thumbnail : Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                border-radius: 10px;
+                                background: root.media-pane.tint.with-alpha(Theme.light ? 0.32 : 0.14);
+                                Icon {
+                                    x: 10px;
+                                    y: 10px;
+                                    width: 24px;
+                                    height: 24px;
+                                    name: root.media-pane.icon;
+                                    ink: Theme.light ? root.media-pane.ink : root.media-pane.tint;
+                                }
+                            }
+                            // Drawn over the thumbnail so its edge stays crisp.
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: parent.border-radius;
+                                border-width: 1px;
+                                border-color: Theme.card-border;
+                            }
+                        }
+
+                        Text {
+                            text: root.media-pane.name;
+                            font-size: 12.5px;
+                            font-weight: 600;
+                            color: Theme.primary-text;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.media-pane.facts;
+                            font-size: 11px;
+                            color: Theme.muted-text;
+                            wrap: word-wrap;
+                        }
+                        if root.media-pane.path != "" : Text {
+                            text: root.media-pane.path;
+                            font-size: 10.5px;
+                            color: Theme.subtle-text;
+                            wrap: char-wrap;
+                        }
+                        if root.media-pane.note != "" : HorizontalLayout {
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    name: "info";
+                                    ink: Theme.warning;
+                                    width: 12px;
+                                    height: 12px;
+                                }
+                            }
+                            Text {
+                                text: root.media-pane.note;
+                                font-size: 11px;
+                                color: Theme.warning;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
                             }
                         }
                     }

@@ -4,6 +4,7 @@
 
 mod activation;
 mod dispatch;
+mod media_pane;
 mod palette;
 mod requests;
 mod results;
@@ -15,6 +16,7 @@ pub(crate) use startup::run;
 
 use activation::*;
 use dispatch::{post, UiSlot};
+use media_pane::*;
 use palette::*;
 use requests::*;
 use results::*;
@@ -32,6 +34,7 @@ use crate::{
     debug_log::{self, DebugLogController, LogKind},
     error_toast::{self, ErrorToast},
     library::{self, FolderStatus, LibraryIndexer, LibrarySnapshot},
+    media_preview::MediaFacts,
     premiere_prefs::{self, ShortcutBinding},
     presets::{self, PresetHandoff},
     protocol::{MarkerCommand, MarkerReply, PremiereContext},
@@ -40,7 +43,7 @@ use crate::{
         self, AlternateModifier, AppSettings, PaletteShortcut, PaletteShortcutAction, PaletteTheme,
     },
     tray::{self, SystemTray, TrayAction},
-    win_focus, ActionHotkeyUI, EffectItemUI, LibraryFolderUI, SpotlightWindow,
+    win_focus, ActionHotkeyUI, EffectItemUI, LibraryFolderUI, MediaPaneUI, SpotlightWindow,
 };
 #[cfg(test)]
 use crate::{bridge, catalog};
@@ -80,6 +83,7 @@ struct AppState {
     marker_naming: Option<MarkerNaming>,
     pending_named_marker: Option<PendingNamedMarker>,
     audio_preview: AudioPreview,
+    media_pane: MediaPane,
     /// What the indexer last found in each tracked Library folder.
     library_status: Vec<FolderStatus>,
     /// True while Windows' folder picker is open over the palette.
@@ -114,6 +118,7 @@ impl AppState {
             marker_naming: None,
             pending_named_marker: None,
             audio_preview: AudioPreview::default(),
+            media_pane: MediaPane::default(),
             library_status: Vec::new(),
             folder_picker_open: false,
             active_bin_path: None,
@@ -270,6 +275,7 @@ thread_local! {
     static BRIDGE_DISPATCH: UiSlot<BridgeEvent> = const { UiSlot::new() };
     static PRESET_CATALOG_DISPATCH: UiSlot<Vec<EffectEntry>> = const { UiSlot::new() };
     static LIBRARY_DISPATCH: UiSlot<LibrarySnapshot> = const { UiSlot::new() };
+    static MEDIA_FACTS_DISPATCH: UiSlot<MediaFacts> = const { UiSlot::new() };
     static FOLDER_PICK_DISPATCH: UiSlot<Option<Vec<PathBuf>>> = const { UiSlot::new() };
     static HOTKEY_DISPATCH: UiSlot<()> = const { UiSlot::new() };
     static ACTION_HOTKEY_DISPATCH: UiSlot<(action_hotkeys::Binding, isize)> = const { UiSlot::new() };

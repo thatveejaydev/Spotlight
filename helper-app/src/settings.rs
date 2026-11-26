@@ -91,6 +91,8 @@ pub struct AppSettings {
     pub catalog_actions_hotkey: String,
     pub audio_preview_hotkey: String,
     pub auto_preview_audio: bool,
+    /// Shows a thumbnail and the file's facts beside the results for media rows.
+    pub show_preview_pane: bool,
     pub action_hotkeys: BTreeMap<String, String>,
     /// Folders whose importable files the Library catalog lists.
     pub library_folders: Vec<String>,
@@ -111,6 +113,7 @@ impl Default for AppSettings {
             catalog_actions_hotkey: String::new(),
             audio_preview_hotkey: DEFAULT_AUDIO_PREVIEW_HOTKEY.into(),
             auto_preview_audio: false,
+            show_preview_pane: true,
             action_hotkeys: BTreeMap::new(),
             library_folders: Vec::new(),
         }
@@ -951,6 +954,7 @@ mod tests {
             catalog_actions_hotkey: "Ctrl+4".into(),
             audio_preview_hotkey: "Alt+P".into(),
             auto_preview_audio: true,
+            show_preview_pane: false,
             action_hotkeys: BTreeMap::new(),
             library_folders: vec![r"D:\SFX".into(), r"E:\Memes".into()],
         };
@@ -1032,6 +1036,7 @@ mod tests {
         let default = normalize_settings(serde_json::from_str("{}").unwrap());
         assert_eq!(default.audio_preview_hotkey, "Ctrl+P");
         assert!(!default.auto_preview_audio);
+        assert!(default.show_preview_pane);
         assert_eq!(
             match_palette_shortcut(&default, false, "p", true, false, false, false),
             Some(PaletteShortcutAction::PreviewAudio)

@@ -261,10 +261,16 @@ pub(super) fn step_out_bin(ui: &SpotlightWindow, state: &mut AppState) {
 
 pub(super) fn refresh_results_ui(ui: &SpotlightWindow, state: &mut AppState) {
     rebuild_results_ui(ui, state);
-    sync_audio_selection(ui, state);
+    sync_selection_preview(ui, state);
 }
 
-pub(super) fn sync_audio_selection(ui: &SpotlightWindow, state: &mut AppState) {
+/// Updates the audio preview and the preview pane for the highlighted row.
+pub(super) fn sync_selection_preview(ui: &SpotlightWindow, state: &mut AppState) {
+    sync_audio_selection(ui, state);
+    sync_media_pane(ui, state);
+}
+
+fn sync_audio_selection(ui: &SpotlightWindow, state: &mut AppState) {
     let item = if state.is_visible && !ui.get_settings_open() {
         match state.matched_items.get(state.selected_abs_index) {
             Some(SearchResult::ProjectItem(item)) => Some(PreviewItem::Project(item.as_ref())),
@@ -365,7 +371,7 @@ pub(super) fn refresh_catalog_ui(ui: &SpotlightWindow, state: &mut AppState, pre
             sync_viewport_slice(ui, state);
         }
     }
-    sync_audio_selection(ui, state);
+    sync_selection_preview(ui, state);
 }
 
 pub(super) fn sync_viewport_slice(ui: &SpotlightWindow, state: &mut AppState) {

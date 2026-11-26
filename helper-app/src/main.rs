@@ -12,6 +12,7 @@ mod debug_log;
 mod error_toast;
 mod installer;
 mod library;
+mod media_preview;
 mod premiere_prefs;
 mod presets;
 mod protocol;

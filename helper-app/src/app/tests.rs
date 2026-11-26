@@ -2029,6 +2029,102 @@ fn library_files_outside_the_project_get_an_import_badge_and_hints() {
 }
 
 #[test]
+fn the_preview_pane_shows_media_rows_and_fills_in_what_windows_finds() {
+    let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(TestPlatform(adapter))).unwrap();
+    let ui = SpotlightWindow::new().unwrap();
+    let path = std::path::PathBuf::from(r"D:\Memes\Laugh.png");
+    let mut state = AppState::new(AppSettings::default());
+    state.is_visible = true;
+    state.catalog.set_library_files(vec![crate::library::LibraryEntry {
+        name: "Laugh.png".into(),
+        key: crate::library::path_key(path.to_str().unwrap()),
+        folder: "Memes".into(),
+        media_type: catalog::MediaType::Image,
+        path,
+    }]);
+    state.matched_items = vec![
+        state.catalog.search("", "library").remove(0),
+        SearchResult::Effect(Arc::new(EffectEntry {
+            name: "Blur".into(),
+            match_name: "blur".into(),
+            effect_type: "video_effect".into(),
+            folder: String::new(),
+        })),
+    ];
+
+    sync_media_pane(&ui, &mut state);
+    let pane = ui.get_media_pane();
+    assert!(pane.visible);
+    assert_eq!(
+        (pane.name.as_str(), pane.facts.as_str(), pane.path.as_str(), pane.note.as_str()),
+        ("Laugh.png", "Image", r"D:\Memes\Laugh.png", "Not in the project yet"),
+    );
+    assert!(!pane.has_thumbnail);
+
+    // Windows answers: the pane shows the thumbnail and the size, and keeps them.
+    receive_media_facts(&ui, &mut state, crate::media_preview::MediaFacts {
+        key: crate::library::path_key(r"d:/memes/laugh.png"),
+        // The file doesn't exist, so it has no modified time, as when it was read.
+        modified: None,
+        size: thumbnail_size(ui.window().scale_factor()),
+        thumbnail: Some(slint::SharedPixelBuffer::new(2, 2)),
+        dimensions: Some((512, 512)),
+        duration: Some(Duration::from_secs(3)),
+    });
+    let pane = ui.get_media_pane();
+    assert!(pane.has_thumbnail);
+    assert_eq!(pane.facts.as_str(), "Image · 512 × 512");
+
+    state.selected_abs_index = 1;
+    sync_media_pane(&ui, &mut state);
+    assert!(!ui.get_media_pane().visible);
+
+    state.selected_abs_index = 0;
+    sync_media_pane(&ui, &mut state);
+    assert!(ui.get_media_pane().has_thumbnail, "the thumbnail comes from the cache");
+    assert_eq!(state.media_pane.requested(), None, "a current cache entry isn't read again");
+
+    // The file changed after it was read: the old facts show while it is read again.
+    let key = crate::library::path_key(r"d:/memes/laugh.png");
+    receive_media_facts(&ui, &mut state, crate::media_preview::MediaFacts {
+        key: key.clone(),
+        modified: Some(std::time::SystemTime::UNIX_EPOCH),
+        size: thumbnail_size(ui.window().scale_factor()),
+        thumbnail: Some(slint::SharedPixelBuffer::new(2, 2)),
+        dimensions: Some((256, 256)),
+        duration: None,
+    });
+    assert_eq!(state.media_pane.requested(), None, "an answer never asks again by itself");
+    sync_media_pane(&ui, &mut state);
+    assert_eq!(ui.get_media_pane().facts.as_str(), "Image · 256 × 256");
+    assert_eq!(state.media_pane.requested(), Some(key.as_str()));
+
+    state.settings.show_preview_pane = false;
+    sync_media_pane(&ui, &mut state);
+    assert!(!ui.get_media_pane().visible);
+}
+
+#[test]
+fn thumbnails_are_asked_for_at_the_size_the_screen_shows_them() {
+    assert_eq!(thumbnail_size(1.0), (187, 106));
+    assert_eq!(thumbnail_size(1.5), (281, 159));
+    assert_eq!(thumbnail_size(2.0), (374, 212));
+    assert_eq!(thumbnail_size(f32::NAN), (187, 106));
+}
+
+#[test]
+fn preview_facts_name_the_kind_then_what_fits_it() {
+    let video = Some(catalog::MediaType::Video);
+    let size = Some((1920, 1080));
+    assert_eq!(facts_line(video, size, Some(Duration::from_millis(4_460))), "Video · 1920 × 1080 · 0:04.4");
+    assert_eq!(facts_line(video, None, Some(Duration::from_secs(3_725))), "Video · 1:02:05");
+    assert_eq!(facts_line(Some(catalog::MediaType::Audio), size, Some(Duration::from_secs(75))), "Audio · 1:15");
+    assert_eq!(facts_line(Some(catalog::MediaType::Image), size, Some(Duration::from_secs(1))), "Image · 1920 × 1080");
+    assert_eq!(facts_line(None, None, None), "Media");
+}
+
+#[test]
 fn footer_hints_follow_the_highlighted_row_and_messages_fade() {
     use slint::Model;
 
